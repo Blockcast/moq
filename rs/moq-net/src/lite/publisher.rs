@@ -435,6 +435,9 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 					Ok(()) | Err(Error::Stream(crate::StreamError::Cancel)) => {}
 					Err(err) => return Poll::Ready(Err(err)),
 				}
+				// That is why the token ended, whether or not our own FIN reaches a
+				// presenter that left.
+				issue.lock().peer.get_or_insert(Error::Cancel);
 				stream.writer.finish()?;
 				self.finished = true;
 				continue;
