@@ -38,6 +38,7 @@ pub enum Keys {
 /// a relay that dies without sending `end` holds its slots until they age out after
 /// two cadences, a restart empties the table until the fleet's next cadence refills
 /// it, and a session admitted while a live one's slot was missing stays over the cap.
+/// The cadence is [`Policy::revalidate`]; without one, nothing ages out.
 ///
 /// `#[non_exhaustive]`, so start from [`Limits::default`] and set the fields.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -59,11 +60,14 @@ pub struct Limits {
 ///
 /// The JWT is the `jwt` query parameter or a moq-transport SETUP token of type 0
 /// ([`Token::OUT_OF_BAND`]), verified alike. A session presenting both is refused,
-/// as is a SETUP token of any other type.
+/// as is a SETUP token of any other type, and one presenting a JWT alongside a
+/// certificate: neither can safely win, since a certificate would override a JWT
+/// meant to narrow it, and a JWT would narrow or refuse a peer by accident.
 ///
 /// `#[non_exhaustive]`, so start from [`Policy::default`] and set the fields.
 #[derive(Clone, Debug)]
 #[non_exhaustive]
+#[derive(Default)]
 pub struct Policy {
 	/// The keys a `jwt` is verified against; `None` refuses every token.
 	pub keys: Option<Keys>,
@@ -74,27 +78,14 @@ pub struct Policy {
 	pub mtls: Permissions,
 	/// The tier stamped on every grant.
 	pub tier: Option<String>,
-	/// How often the relay re-checks each grant.
-	pub revalidate: Duration,
+	/// How often the relay re-checks each grant; `None` never re-checks. The contract
+	/// refuses a cadence without a bound, so set [`expires`](Self::expires) with it.
+	pub revalidate: Option<Duration>,
 	/// How long a grant with no bound of its own lasts: an anonymous session, a token
-	/// without `exp`, a certificate without one.
-	pub expires: Duration,
+	/// without `exp`, a certificate without one. `None` leaves those unbounded.
+	pub expires: Option<Duration>,
 	/// Live session caps.
 	pub limits: Limits,
-}
-
-impl Default for Policy {
-	fn default() -> Self {
-		Self {
-			keys: None,
-			public: Permissions::default(),
-			mtls: Permissions::default(),
-			tier: None,
-			revalidate: Duration::from_secs(60),
-			expires: Duration::from_secs(24 * 60 * 60),
-			limits: Limits::default(),
-		}
-	}
 }
 
 /// Why a session was refused; the body of the 403.
@@ -125,12 +116,18 @@ pub enum Refusal {
 	TwoTokens,
 	#[error("SETUP token type {0:#x} is not supported; only type 0 (a JWT) is")]
 	UnsupportedToken(u64),
+	#[error("both a JWT and a client certificate were presented; present one")]
+	TokenAndCertificate,
 }
 
 impl Policy {
 	/// Decide `request` by the policy alone, ignoring session limits.
 	pub async fn decide(&self, request: &Request) -> Result<Grant, Refusal> {
-		let (permissions, expires) = if let Some(jwt) = jwt(request)? {
+		let jwt = jwt(request)?;
+		if jwt.is_some() && request.tls.is_some() {
+			return Err(Refusal::TokenAndCertificate);
+		}
+		let (permissions, expires) = if let Some(jwt) = jwt {
 			let key = self.key(jwt).await?;
 			let claims = key.verify(jwt).map_err(|err| Refusal::InvalidToken(err.to_string()))?;
 			let permissions = claims.authorize(&request.path).map_err(|err| match err {
@@ -155,9 +152,8 @@ impl Policy {
 		};
 
 		let mut grant = Grant::new(permissions.publish, permissions.subscribe);
-		// The contract refuses a cadence without a bound, so every grant carries one.
-		grant.expires = Some(expires.unwrap_or_else(|| SystemTime::now() + self.expires));
-		grant.revalidate = Some(self.revalidate);
+		grant.expires = expires.or_else(|| self.expires.map(|bound| SystemTime::now() + bound));
+		grant.revalidate = self.revalidate;
 		grant.tier = self.tier.clone();
 		Ok(grant)
 	}
@@ -302,12 +298,28 @@ pub struct Server {
 }
 
 impl Server {
-	/// A server answering with `policy`.
-	pub fn new(policy: Policy) -> Self {
-		Self {
+	/// A server answering with `policy`, refusing one that asks for a re-check without
+	/// a bound, or caps sessions without the re-check that ages out a dead relay's.
+	pub fn new(policy: Policy) -> crate::Result<Self> {
+		if policy.revalidate.is_some() && policy.expires.is_none() {
+			return Err(crate::Error::UnboundedRevalidate);
+		}
+		let limited = policy.limits.token.is_some() || policy.limits.remote.is_some();
+		if limited && policy.revalidate.is_none() {
+			return Err(crate::Error::LimitsWithoutRevalidate);
+		}
+		Ok(Self {
 			policy: Arc::new(policy),
 			sessions: Default::default(),
-		}
+		})
+	}
+
+	/// The cadence the session table ages out by, or `None` when no limit needs a table.
+	fn cadence(&self) -> Option<Duration> {
+		let limits = self.policy.limits;
+		(limits.token.is_some() || limits.remote.is_some())
+			.then_some(self.policy.revalidate)
+			.flatten()
 	}
 
 	/// Answer one event: the grant, or why the session is refused.
@@ -315,16 +327,20 @@ impl Server {
 		match request.event {
 			Event::Connect => {
 				let grant = self.policy.decide(request).await?;
-				let mut sessions = self.sessions.lock().unwrap();
-				sessions.sweep(self.policy.revalidate);
-				sessions.connect(request, self.policy.limits)?;
+				if let Some(cadence) = self.cadence() {
+					let mut sessions = self.sessions.lock().unwrap();
+					sessions.sweep(cadence);
+					sessions.connect(request, self.policy.limits)?;
+				}
 				Ok(Some(grant))
 			}
 			Event::Revalidate => {
 				let grant = self.policy.decide(request).await?;
-				let mut sessions = self.sessions.lock().unwrap();
-				sessions.sweep(self.policy.revalidate);
-				sessions.revalidate(request);
+				if let Some(cadence) = self.cadence() {
+					let mut sessions = self.sessions.lock().unwrap();
+					sessions.sweep(cadence);
+					sessions.revalidate(request);
+				}
 				Ok(Some(grant))
 			}
 			Event::End { .. } => {
@@ -418,7 +434,7 @@ mod tests {
 
 	/// The server behind a client, with a signal for each `end` it has handled.
 	async fn serve(policy: Policy) -> (Client, Arc<tokio::sync::Notify>) {
-		let server = Server::new(policy);
+		let server = Server::new(policy).unwrap();
 		let ended = Arc::new(tokio::sync::Notify::new());
 		let router = Router::new()
 			.route(
@@ -463,7 +479,7 @@ mod tests {
 		assert_eq!(grant.publish, patterns(&["alice/**"]));
 		assert_eq!(grant.subscribe, patterns(&["**"]));
 		assert_eq!(grant.expires, Some(exp));
-		assert_eq!(grant.revalidate, Some(Duration::from_secs(60)));
+		assert_eq!(grant.revalidate, None);
 		assert_eq!(grant.tier.as_deref(), Some("gold"));
 		assert_eq!(grant.root, None);
 	}
@@ -473,7 +489,7 @@ mod tests {
 		let (dir, key) = key_dir();
 		let policy = Policy {
 			keys: Some(Keys::Dir(dir.path().into())),
-			expires: Duration::from_secs(3600),
+			expires: Some(Duration::from_secs(3600)),
 			..Default::default()
 		};
 		let jwt = sign(&key, "demo", &["**"], &[], None);
@@ -682,12 +698,34 @@ mod tests {
 		assert_eq!(grant.publish, patterns(&["**"]));
 		assert_eq!(grant.expires, Some(not_after));
 
-		// A certificate without a bound gets the default one.
+		// A certificate without a bound gets none by default, like 0.14.
 		let grant = policy.decide(&with_peer(request("/"), None)).await.unwrap();
-		assert!(grant.expires.unwrap() <= SystemTime::now() + policy.expires);
+		assert_eq!(grant.expires, None);
 
 		// The certificate does not stand in for a public grant.
 		assert_eq!(policy.decide(&request("/")).await.unwrap_err(), Refusal::NoPublicGrant);
+	}
+
+	/// A certificate would override a JWT meant to narrow it, and a JWT would narrow or
+	/// refuse a peer by accident, so presenting both is refused, even with a bad JWT.
+	#[tokio::test]
+	async fn a_jwt_and_a_certificate_together_are_refused() {
+		let (dir, key) = key_dir();
+		let policy = Policy {
+			keys: Some(Keys::Dir(dir.path().into())),
+			mtls: rules(&["**"], &["**"]),
+			..Default::default()
+		};
+		let jwt = sign(&key, "demo", &["**"], &[], None);
+		for request in [
+			with_peer(with_token(request("/demo"), &jwt), None),
+			with_peer(with_token(request("/demo"), "garbage"), None),
+			with_peer(with_setup_token(request("/demo"), Token::OUT_OF_BAND, &jwt), None),
+		] {
+			assert_eq!(policy.decide(&request).await.unwrap_err(), Refusal::TokenAndCertificate);
+		}
+		assert!(policy.decide(&with_peer(request("/demo"), None)).await.is_ok());
+		assert!(policy.decide(&with_token(request("/demo"), &jwt)).await.is_ok());
 	}
 
 	#[tokio::test]
@@ -699,7 +737,9 @@ mod tests {
 		let grant = policy.decide(&request("/")).await.unwrap();
 		assert_eq!(grant.subscribe, patterns(&["anon/**"]));
 		assert!(grant.publish.is_empty());
-		assert!(grant.expires.is_some());
+		// Never re-checked or closed by default, like 0.14.
+		assert_eq!(grant.expires, None);
+		assert_eq!(grant.revalidate, None);
 	}
 
 	/// The rules are rooted at `/`, not at the dialed path: `anon/**` scopes a session
@@ -750,9 +790,11 @@ mod tests {
 				token: None,
 				remote: Some(2),
 			},
-			revalidate: Duration::from_secs(60),
+			revalidate: Some(Duration::from_secs(60)),
+			expires: Some(Duration::from_secs(24 * 60 * 60)),
 			..Default::default()
-		});
+		})
+		.unwrap();
 
 		let first = request("/");
 		let second = request("/");
@@ -792,6 +834,49 @@ mod tests {
 		assert_eq!(server.answer(&request("/")).await.unwrap_err(), Refusal::RemoteLimit);
 	}
 
+	/// The re-check a session table ages out by, which every limit needs.
+	fn limited() -> Policy {
+		Policy {
+			revalidate: Some(Duration::from_secs(60)),
+			expires: Some(Duration::from_secs(3600)),
+			..Default::default()
+		}
+	}
+
+	/// Without a re-check, a relay that died would hold its slots forever, and a
+	/// re-check without a bound would outlive an outage.
+	#[test]
+	fn a_server_refuses_limits_without_a_cadence() {
+		let capped = Policy {
+			limits: Limits {
+				token: Some(1),
+				remote: None,
+			},
+			..Default::default()
+		};
+		assert!(matches!(Server::new(capped), Err(Error::LimitsWithoutRevalidate)));
+		let unbounded = Policy {
+			revalidate: Some(Duration::from_secs(60)),
+			..Default::default()
+		};
+		assert!(matches!(Server::new(unbounded), Err(Error::UnboundedRevalidate)));
+	}
+
+	/// With no limit to count against, nothing is kept per session, so a relay that
+	/// dies without sending `end` leaks nothing here.
+	#[tokio::test]
+	async fn no_limits_keep_no_sessions() {
+		let server = Server::new(Policy {
+			public: rules(&["**"], &["**"]),
+			..Default::default()
+		})
+		.unwrap();
+		for _ in 0..3 {
+			server.answer(&request("/")).await.unwrap();
+		}
+		assert!(server.sessions.lock().unwrap().slots.is_empty());
+	}
+
 	#[tokio::test]
 	async fn limits_count_sessions_per_token_and_fold_mapped_addresses() {
 		let (dir, key) = key_dir();
@@ -801,8 +886,9 @@ mod tests {
 				token: Some(1),
 				remote: Some(1),
 			},
-			..Default::default()
-		});
+			..limited()
+		})
+		.unwrap();
 		let jwt = sign(&key, "demo", &["**"], &[], None);
 
 		server.answer(&with_token(request("/demo"), &jwt)).await.unwrap();
@@ -830,7 +916,7 @@ mod tests {
 				token: None,
 				remote: Some(1),
 			},
-			..Default::default()
+			..limited()
 		})
 		.await;
 
@@ -855,7 +941,8 @@ mod tests {
 		let server = Server::new(Policy {
 			public: rules(&["**"], &["**"]),
 			..Default::default()
-		});
+		})
+		.unwrap();
 		tokio::spawn(async move { server.serve_unix(listener).await });
 
 		let url = url::Url::from_file_path(&path).unwrap();

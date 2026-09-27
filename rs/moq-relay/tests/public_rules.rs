@@ -227,7 +227,7 @@ async fn auth_server_public_rules_are_rooted_at_slash() {
 	policy.public = moq_auth::Permissions::new(Default::default(), ["event/**".parse().unwrap()].into_iter().collect());
 	let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
 	let server_url: url::Url = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
-	let server = moq_auth::serve::Server::new(policy);
+	let server = moq_auth::serve::Server::new(policy).unwrap();
 	tokio::spawn(async move { server.serve(listener).await });
 
 	let mut config = auth::Config::default();
@@ -246,4 +246,23 @@ async fn auth_server_public_rules_are_rooted_at_slash() {
 	assert_refused(url(port, "/rooms/123")).await;
 
 	relay.abort();
+}
+
+/// Public rules grant a certificate what they grant anyone, so a client CA on a
+/// public-only relay is refused rather than left to verify certificates for nothing.
+#[tokio::test]
+async fn a_client_ca_needs_an_auth_server() {
+	for web in [false, true] {
+		let mut config = moq_relay::Config::default();
+		config.auth = anon();
+		match web {
+			false => config.listen.tls.root = vec!["ca.pem".into()],
+			true => config.web.https.root = vec!["ca.pem".into()],
+		}
+		let error = match moq_relay::Relay::load(config).await {
+			Ok(_) => panic!("a client CA was accepted under --auth-public"),
+			Err(error) => error.to_string(),
+		};
+		assert!(error.contains("--auth-public ignores"), "{error}");
+	}
 }

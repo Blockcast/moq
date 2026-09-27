@@ -69,6 +69,88 @@ pub struct Config {
 	#[serde(skip_serializing_if = "Vec::is_empty")]
 	#[serde_as(as = "OneOrMany<_>")]
 	pub public_publish: Vec<Pattern>,
+
+	/// The 0.14 flags and env vars #3688 removed, kept parsing but hidden. Never
+	/// read as settings: [`deprecated`](Self::deprecated) names what replaced each.
+	#[usage(flatten)]
+	#[serde(skip)]
+	pub(crate) legacy: Legacy,
+
+	// The 0.14 `[auth]` keys #3688 removed, kept only so they refuse with their
+	// replacement named rather than being ignored.
+	#[usage(skip)]
+	#[serde(skip_serializing)]
+	pub(crate) key: Option<serde::de::IgnoredAny>,
+	#[usage(skip)]
+	#[serde(skip_serializing)]
+	pub(crate) key_dir: Option<serde::de::IgnoredAny>,
+	#[usage(skip)]
+	#[serde(skip_serializing)]
+	pub(crate) auth_api: Option<serde::de::IgnoredAny>,
+	#[usage(skip)]
+	#[serde(skip_serializing)]
+	pub(crate) domains: Option<serde::de::IgnoredAny>,
+	#[usage(skip)]
+	#[serde(skip_serializing)]
+	pub(crate) mtls_tier: Option<serde::de::IgnoredAny>,
+	#[usage(skip)]
+	#[serde(skip_serializing)]
+	pub(crate) tls: Option<serde::de::IgnoredAny>,
+}
+
+/// The `--auth-*` flags 0.14 had and #3688 removed, with their env vars: a relay
+/// deployed through the environment would otherwise ignore them without a word.
+#[derive(Clone, Debug, Default, usage::Args)]
+#[usage(unknown_flags = "error", args_override_self = false)]
+pub(crate) struct Legacy {
+	#[usage(name = "auth-key", long = "auth-key", env = "MOQ_AUTH_KEY", hide = true)]
+	key: Option<String>,
+	#[usage(name = "auth-key-dir", long = "auth-key-dir", env = "MOQ_AUTH_KEY_DIR", hide = true)]
+	key_dir: Option<String>,
+	#[usage(name = "auth-api", long = "auth-api", env = "MOQ_AUTH_API", hide = true)]
+	api: Option<String>,
+	#[usage(
+		name = "auth-public-api",
+		long = "auth-public-api",
+		env = "MOQ_AUTH_PUBLIC_API",
+		hide = true
+	)]
+	public_api: Option<String>,
+	#[usage(name = "auth-domain", long = "auth-domain", env = "MOQ_AUTH_DOMAIN", hide = true)]
+	domain: Vec<String>,
+	#[usage(
+		name = "auth-mtls-tier",
+		long = "auth-mtls-tier",
+		env = "MOQ_AUTH_MTLS_TIER",
+		hide = true
+	)]
+	mtls_tier: Option<String>,
+	#[usage(
+		name = "auth-tls-root",
+		long = "auth-tls-root",
+		env = "MOQ_AUTH_TLS_ROOT",
+		hide = true
+	)]
+	tls_root: Vec<String>,
+	#[usage(
+		name = "auth-tls-cert",
+		long = "auth-tls-cert",
+		env = "MOQ_AUTH_TLS_CERT",
+		hide = true
+	)]
+	tls_cert: Option<String>,
+	#[usage(name = "auth-tls-key", long = "auth-tls-key", env = "MOQ_AUTH_TLS_KEY", hide = true)]
+	tls_key: Option<String>,
+	#[usage(
+		name = "auth-tls-disable-verify",
+		long = "auth-tls-disable-verify",
+		env = "MOQ_AUTH_TLS_DISABLE_VERIFY",
+		hide = true,
+		default_missing = "true",
+		num_args = 0..=1,
+		require_equals = true
+	)]
+	tls_disable_verify: Option<String>,
 }
 
 impl Config {
@@ -80,6 +162,76 @@ impl Config {
 		let publish: Patterns = self.public.iter().chain(&self.public_publish).cloned().collect();
 		let subscribe: Patterns = self.public.iter().chain(&self.public_subscribe).cloned().collect();
 		(!publish.is_empty() || !subscribe.is_empty()).then(|| Grant::new(publish, subscribe))
+	}
+
+	/// The 0.14 settings in use, each paired with what replaced it. A relay refuses
+	/// to start on any: `key` with `public` would otherwise boot with every JWT
+	/// ignored.
+	pub fn deprecated(&self) -> moq_tokio::cli::Deprecated {
+		let mut found = moq_tokio::cli::Deprecated::default();
+		let legacy = &self.legacy;
+		for (set, flag, env, toml, new) in [
+			(
+				legacy.key.is_some(),
+				"--auth-key",
+				"MOQ_AUTH_KEY",
+				self.key.is_some().then_some("[auth] key"),
+				"--auth-url to `moq auth serve --key`",
+			),
+			(
+				legacy.key_dir.is_some(),
+				"--auth-key-dir",
+				"MOQ_AUTH_KEY_DIR",
+				self.key_dir.is_some().then_some("[auth] key_dir"),
+				"--auth-url to `moq auth serve --key-dir`",
+			),
+			(
+				legacy.api.is_some(),
+				"--auth-api",
+				"MOQ_AUTH_API",
+				self.auth_api.is_some().then_some("[auth] auth_api"),
+				"--auth-url to a server answering the contract",
+			),
+			(
+				legacy.public_api.is_some(),
+				"--auth-public-api",
+				"MOQ_AUTH_PUBLIC_API",
+				None,
+				"--auth-url to a server answering the contract",
+			),
+			(
+				!legacy.domain.is_empty(),
+				"--auth-domain",
+				"MOQ_AUTH_DOMAIN",
+				self.domains.is_some().then_some("[auth] domains"),
+				"an auth server that reads `server_name`",
+			),
+			(
+				legacy.mtls_tier.is_some(),
+				"--auth-mtls-tier",
+				"MOQ_AUTH_MTLS_TIER",
+				self.mtls_tier.is_some().then_some("[auth] mtls_tier"),
+				"--auth-url to `moq auth serve --tier`",
+			),
+			(
+				!legacy.tls_root.is_empty()
+					|| legacy.tls_cert.is_some()
+					|| legacy.tls_key.is_some()
+					|| legacy.tls_disable_verify.is_some(),
+				"--auth-tls-*",
+				"MOQ_AUTH_TLS_*",
+				self.tls.is_some().then_some("[auth.tls]"),
+				"--connect-tls-*, which an https:// --auth-url presents",
+			),
+		] {
+			if set {
+				found.flag(flag, Some(env), new);
+			}
+			if let Some(toml) = toml {
+				found.toml(toml, new, None);
+			}
+		}
+		found
 	}
 
 	/// Whether no source is named at all. Such a relay admits nothing on its own:
@@ -370,6 +522,12 @@ impl Decider {
 							}
 						});
 					}
+					// Nothing here can verify a token, so one is refused rather than ignored:
+					// its holder expects it to count, and the public grant is not what it says.
+					Self::Public(_) if presents_token(&admission.request) => {
+						tracing::debug!(path = %admission.request.path, "a token was presented to public rules");
+						admission.refuse(Error::Refused);
+					}
 					Self::Public(rules) => match rules.authorize(&admission.request.path) {
 						Ok(access) => {
 							let grant = Grant::new(access.publish, access.subscribe);
@@ -387,6 +545,17 @@ impl Decider {
 			}
 		});
 	}
+}
+
+/// Whether `request` carries a token: a SETUP token of any type, or a non-empty
+/// `jwt` query parameter, the convention `moq auth serve` reads.
+fn presents_token(request: &Request) -> bool {
+	request.token.is_some()
+		|| request.query.as_deref().is_some_and(|query| {
+			query
+				.split('&')
+				.any(|pair| pair.strip_prefix("jwt=").is_some_and(|jwt| !jwt.is_empty()))
+		})
 }
 
 /// Admits sessions by queueing every request for one admission decider.
@@ -609,6 +778,35 @@ mod tests {
 			assert!(matches!(err, Error::Refused), "{path}: {err}");
 			assert_eq!(http::StatusCode::from(&err), http::StatusCode::UNAUTHORIZED);
 		}
+	}
+
+	/// Public rules verify nothing, so a token is refused rather than ignored, in
+	/// whichever form it arrives.
+	#[tokio::test]
+	async fn public_rules_refuse_a_token() {
+		let auth = config(None, &["**"])
+			.init("relay-1", &moq_tokio::tls::Connect::default())
+			.unwrap();
+		let mut query = auth.request(moq_auth::Transport::WebSocket, "/");
+		query.query = Some("a=1&jwt=eyJ".into());
+		let mut setup = auth.request(moq_auth::Transport::Quic, "/");
+		setup.token = Some(moq_auth::Token {
+			kind: moq_auth::Token::CAT,
+			value: b"anything".to_vec(),
+		});
+		let mut http = auth.request(moq_auth::Transport::Http, "/");
+		http.query = Some("jwt=eyJ".into());
+		for request in [query, setup, http] {
+			let Err(err) = auth.admit(request).await else {
+				panic!("a token was admitted on the public grant");
+			};
+			assert!(matches!(err, Error::Refused), "{err}");
+		}
+
+		// An empty `jwt=` is no token.
+		let mut empty = auth.request(moq_auth::Transport::WebSocket, "/");
+		empty.query = Some("jwt=&b=2".into());
+		assert!(auth.admit(empty).await.is_ok());
 	}
 
 	/// A certificate is a fact the public rules ignore: it gets exactly what anyone does.
