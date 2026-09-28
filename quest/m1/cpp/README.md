@@ -61,10 +61,10 @@ Confirmed in [#4100](https://github.com/moq-dev/moq/pull/4100):
   burden every call site.
 - Callback interfaces are refused under `error_style = "expected"` until a
   consumer needs one; their bridge is built on `std::exception_ptr`.
-- MSVC is covered by the post-merge nightly, not a branch dispatch: branches
-  never dispatch the nightly.
+- MSVC is covered by `platform.yml` on every pull request, not a branch
+  dispatch of the nightly.
 
-## Quests
+## Required
 
 - [Client settings parity](/quest/m1/cpp/client-config.md) - moq-ffi offers libmoq's client knobs, and the OBS advanced settings get back the ones the migration dropped
 - [Session report parity](/quest/m1/cpp/session-report.md) - a session reports its negotiated draft and reconnect failures, so the OBS dock shows them again
