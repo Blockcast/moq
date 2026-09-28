@@ -227,11 +227,10 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 		stream: &mut Stream<S, Version>,
 		origin: &origin::Consumer,
 		announced: &mut announce::Consumer,
-		prefix: impl crate::AsPath,
 		self_origin: Hop,
 		version: Version,
 	) -> Result<(), Error> {
-		let mut run = AnnounceRun::new(prefix.as_path().to_owned(), self_origin, version);
+		let mut run = AnnounceRun::new(crate::PathOwned::default(), self_origin, version);
 		kio::wait(|waiter| run.poll(stream, origin, announced, waiter)).await
 	}
 }
@@ -733,10 +732,10 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 							| Error::Stream(crate::StreamError::Cancel)
 							| Error::Session(crate::SessionError::Cancel)
 							| Error::Transport(_) => {
-								tracing::debug!(prefix = %origin.absolute(&run.prefix), "announcing cancelled");
+								tracing::debug!(prefix = %origin.absolute(""), "announcing cancelled");
 							}
 							err => {
-								tracing::warn!(%err, prefix = %origin.absolute(&run.prefix), "announcing error");
+								tracing::warn!(%err, prefix = %origin.absolute(""), "announcing error");
 							}
 						}
 						self.stream.take().expect("stream present").writer.abort(&err);
@@ -754,13 +753,16 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 		// fatal stream close), rather than erroring, which would reset the stream.
 		// The wire prefix decodes as a literal path; convert it explicitly to its
 		// subtree grant, refusing anything that cannot be a subtree.
+		// The cursor is rooted at the prefix so every update arrives named as its
+		// wire suffix, a route covering the prefix included: that one presents at
+		// the root, as the empty suffix.
 		let scope = crate::Pattern::subtree(prefix.as_str())
-			.map(crate::Patterns::from)
+			.map(|subtree| subtree.rebase(prefix.as_str()))
 			.unwrap_or_default();
 		let origin = self
 			.shared
 			.origin
-			.scope("", &scope)
+			.scope(&prefix, &scope)
 			.unwrap_or_else(|_| self.shared.origin.empty());
 		// Register the split-horizon peer on the announce cursor too. The origin
 		// model uses this exposure to park a reflected copy before it can replace
@@ -784,6 +786,8 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 /// The announce loop's state, minus the handles it borrows per poll so the test
 /// shim can supply its own.
 struct AnnounceRun {
+	// The requested prefix. Updates arrive named relative to it, but the grant
+	// matches paths relative to the origin's root.
 	prefix: crate::PathOwned,
 	self_origin: Hop,
 	version: Version,
@@ -827,11 +831,11 @@ impl AnnounceRun {
 		}
 	}
 
-	/// Whether our grant lets us announce `prefix` (relative to the origin's root).
-	fn permitted(&self, prefix: &crate::Path) -> bool {
+	/// Whether our grant lets us announce `suffix` (relative to the requested prefix).
+	fn permitted(&self, suffix: &crate::Path) -> bool {
 		self.permit
 			.as_ref()
-			.is_none_or(|permit| permit.matches(prefix.as_str()))
+			.is_none_or(|permit| permit.matches(self.prefix.join(suffix).as_str()))
 	}
 
 	/// Apply a change to our grant: withdraw what it no longer covers and, when it
@@ -851,11 +855,11 @@ impl AnnounceRun {
 			let revoked: Vec<_> = self
 				.live
 				.keys()
-				.filter(|suffix| !self.permitted(&self.prefix.join(*suffix)))
+				.filter(|suffix| !self.permitted(suffix))
 				.cloned()
 				.collect();
 			for suffix in revoked {
-				let absolute = origin.absolute(self.prefix.join(&suffix));
+				let absolute = origin.absolute(&suffix);
 				tracing::debug!(route = %absolute, "announce no longer authorized");
 				self.retract(stream, suffix, &absolute)?;
 			}
@@ -868,7 +872,7 @@ impl AnnounceRun {
 		*announced = origin.announced();
 		let mut current: HashMap<crate::PathOwned, crate::origin::Route> = HashMap::new();
 		while let Some(update) = announced.try_next() {
-			let suffix = self.suffix(&update);
+			let suffix = update.prefix;
 			match update.kind.is_active() {
 				true => current.insert(suffix, update.route),
 				false => current.remove(&suffix),
@@ -878,20 +882,19 @@ impl AnnounceRun {
 		let stale: Vec<_> = self
 			.live
 			.keys()
-			.filter(|suffix| !current.contains_key(*suffix) || !self.permitted(&self.prefix.join(*suffix)))
+			.filter(|suffix| !current.contains_key(*suffix) || !self.permitted(suffix))
 			.cloned()
 			.collect();
 		for suffix in stale {
-			let absolute = origin.absolute(self.prefix.join(&suffix));
+			let absolute = origin.absolute(&suffix);
 			self.retract(stream, suffix, &absolute)?;
 		}
 
 		for (suffix, route) in current {
-			let prefix = self.prefix.join(&suffix);
-			if !self.permitted(&prefix) {
+			if !self.permitted(&suffix) {
 				continue;
 			}
-			let absolute = origin.absolute(&prefix);
+			let absolute = origin.absolute(&suffix);
 			let Some((hops, cost)) = self.outgoing(&route, &absolute) else {
 				continue;
 			};
@@ -912,16 +915,6 @@ impl AnnounceRun {
 			}
 		}
 		Ok(())
-	}
-
-	/// Where an update travels on this stream: its prefix relative to the requested
-	/// prefix, which the origin's scope guarantees it sits under.
-	fn suffix(&self, update: &announce::Update) -> crate::PathOwned {
-		update
-			.prefix
-			.strip_prefix(&self.prefix)
-			.expect("origin returned a route outside the requested prefix")
-			.to_owned()
 	}
 
 	/// The chain and cost to put on the wire for `route`, or `None` when it must
@@ -1013,7 +1006,7 @@ impl AnnounceRun {
 				// We use `try_next()` to synchronously get the initial updates.
 				while let Some(update) = announced.try_next() {
 					let absolute = origin.absolute(&update.prefix);
-					let suffix = self.suffix(&update);
+					let suffix = update.prefix;
 
 					if update.kind.is_active() {
 						if self.outgoing(&update.route, &absolute).is_none() {
@@ -1041,11 +1034,11 @@ impl AnnounceRun {
 				let mut initial: Vec<(crate::PathOwned, Hops, crate::origin::Cost)> = Vec::new();
 				while let Some(update) = announced.try_next() {
 					let absolute = origin.absolute(&update.prefix);
-					let suffix = self.suffix(&update);
+					let suffix = update.prefix;
 
 					if update.kind.is_active() {
 						initial.retain(|(s, ..)| s != &suffix);
-						if !self.permitted(&update.prefix) {
+						if !self.permitted(&suffix) {
 							continue;
 						}
 						let Some((hops, cost)) = self.outgoing(&update.route, &absolute) else {
@@ -1137,9 +1130,9 @@ impl AnnounceRun {
 			};
 
 			let absolute = origin.absolute(&update.prefix);
-			let suffix = self.suffix(&update);
+			let suffix = update.prefix;
 
-			if !update.kind.is_active() || !self.permitted(&update.prefix) {
+			if !update.kind.is_active() || !self.permitted(&suffix) {
 				self.retract(stream, suffix, &absolute)?;
 				continue;
 			}
@@ -2122,7 +2115,7 @@ mod announce_test {
 		let task = tokio::spawn(async move {
 			let mut announced = consumer.announced();
 			let self_origin = consumer.hop();
-			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, "", self_origin, VERSION).await
+			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, self_origin, VERSION).await
 		});
 		settle().await;
 
@@ -2226,7 +2219,7 @@ mod announce_test {
 		let task = tokio::spawn(async move {
 			let mut announced = consumer.announced();
 			let self_origin = consumer.hop();
-			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, "", self_origin, VERSION).await
+			TestPublisher::run_announce(&mut stream, &consumer, &mut announced, self_origin, VERSION).await
 		});
 		settle().await;
 
@@ -3627,7 +3620,6 @@ mod tests {
 			&mut stream,
 			&consumer,
 			&mut announced,
-			crate::Path::new(""),
 			self_origin,
 			Version::Lite01,
 		));

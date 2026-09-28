@@ -87,8 +87,10 @@ Everything here is additive: `Session::auth()` is new, the relay derives the
 grant from the origin handles it already scopes, and AUTH is added to the
 existing lite-06 ALPN.
 
-## Quests
+## Required
 
+- [AUTH_OK preflight](/quest/m1/auth/auth-ok-preflight.md) - an unencodable IETF grant answers NOT_SUPPORTED with nothing written, as JS already does
+- [AUTH endings](/quest/m1/auth/error-codes.md) - an out-of-range AUTH_ERROR code is refused, and both sides settle and recompute grants when a stream ends
 - [Origin narrowing](/quest/m1/auth/narrowing.md) - a live grant narrows in
   place: subscriptions outside it reset, publishes outside it abort, and relay
   revalidation stops closing the session
@@ -97,6 +99,8 @@ existing lite-06 ALPN.
 - [Request tokens](/quest/m1/auth/request-token.md) - an `AUTHORIZATION
   TOKEN` on a moq-transport request authorizes that request when the session
   grant does not, and REQUEST_UPDATE refreshes it
+- [Expired token error](/quest/m1/auth/expired-error.md) - an expired token
+  reports `Error::Expired`, not `Unauthorized`, in Rust, JS, and the bindings
 - [Bindings](/quest/m1/auth/bindings.md) - grants and tokens reach every
   binding through moq-ffi and libmoq
 - [Token in band](/quest/m1/auth/token-in-band.md) - the credential can leave
