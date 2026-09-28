@@ -31,6 +31,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Close codes](/quest/m1/close-codes.md) - a client sees the peer's application close code over WebSocket and raw QUIC, like WebTransport
 - [Raw stream codes](/quest/m1/raw-stream-codes.md) - raw QUIC stream resets and stops carry the application's code, not an HTTP/3-mapped one
 - [Live in apps](/quest/m1/announce-live-apps.md) - the demo and `@moq/room` show "no broadcasts" from the `live` marker, which waits for the first session on page load
+- [Watch refusal](/quest/m1/watch-refusal.md) - `<moq-watch>` shows an origin refusal as an error instead of sitting offline
 - [kio waiter overflow](/quest/m1/kio-waiter-lost.md) - a retained `Waiter` past 8 lists stops adding a duplicate entry to lists it already recorded
 - [Capture re-anchor](/quest/m1/capture-reanchor.md) - a repeating or restarting device clock never rewinds native capture during a fast backlog drain
 - [Splice edge cases](/quest/m1/splice-edges.md) - an unstamped successor, a pruned segment's boundary group, and a warm head during a takeover are each handled correctly
@@ -38,6 +39,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Session death parity](/quest/m1/session-death.md) - a local close ends tracks cleanly in both languages, and JS group readers see the session's error on session death
 - [moqsrc stop](/quest/m1/moqsrc-stop.md) - moqsrc's stop blocks until its session ends, without deadlocking on a blocked pad push
 - [More tests under load](/quest/m1/test-flakes-2.md) - the second round of load-only failures, fixed at the cause
+- [Auth outage clock](/quest/m1/auth-outage-clock.md) - the relay and moq-auth outage tests run on a paused clock again and assert both bounds of `expires`
 - [Interop contention](/quest/m1/interop-contention.md) - two `just test interop --all` matrices pass side by side, and `just test harness` runs from a clean checkout
 - [UnknownSession log flood](/quest/m1/unknown-session-logs.md) - streams reset before their WebTransport header stop being reported as UnknownSession at WARN
 - [Merge queue](/quest/m1/merge-queue.md) - the required checks run on `merge_group`, so a stale green check can no longer break main
@@ -54,6 +56,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Capture control](/quest/m1/capture-control.md) - on dev, `encode::Capture` replaces `CaptureOptions` without a `clock` field (it reads the catalog's), an unsupported `cut()` errors, and dropping the last `Control` cancels in-flight opens
 - [Video surface](/quest/m1/video-surface.md) - on dev, moq-ffi's `native` becomes `surface`, refused on platforms with no surface
 - [HLS discontinuity sequence](/quest/m1/hls-discontinuity-sequence.md) - on dev, `Segment::discontinuity` is the absolute sequence, so every cursor agrees
+- [Auth client CA](/quest/m1/relay-auth-client-ca.md) - on dev, `auth::Config::validate` and `init` take the client-CA flag, so no caller can skip the check
 - [RTMP TLS only](/quest/m1/rtmp-tls-only.md) - an RTMP listener configured for TLS can refuse plaintext instead of sniffing and serving it
 - [HLS linger](/quest/m1/hls-linger.md) - `moq_hls::Server` serves an ended broadcast for its playlist window plus grace, so the moq.pro edge drops its own pool
 - [Remove live()](/quest/m1/remove-live.md) - on dev, importers publish stream timestamps verbatim, the catalog clock maps them to wall time, and an encoder restart becomes a new epoch
