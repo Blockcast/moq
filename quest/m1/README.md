@@ -45,7 +45,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Track tail hardening](/quest/m1/track-tail-hardening.md) - Rust and JS wait out a track's tail by the same rules, with the known hang, count, truncation, grace, and memory holes closed
 - [Session death parity](/quest/m1/session-death.md) - a local close ends tracks cleanly in both languages, and JS group readers see the session's error on session death
 - [JS scoped routes](/quest/m1/js-scoped-routes.md) - a scoped JS origin reader announces the preferred route among those in its scope, like Rust, with the fan-out benchmarked
-- [moq play decode schedule](/quest/m1/play-decode-schedule.md) - `moq play` video keeps valid pictures across rewinds, reordering deeper than 100 ms, and decoder batches larger than three
 - [moqsrc stop](/quest/m1/moqsrc-stop.md) - moqsrc's stop blocks until its session ends, without deadlocking on a blocked pad push
 - [More tests under load](/quest/m1/test-flakes-2.md) - the second round of load-only failures, fixed at the cause
 - [UnknownSession log flood](/quest/m1/unknown-session-logs.md) - streams reset before their WebTransport header stop being reported as UnknownSession at WARN
