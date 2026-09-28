@@ -1,6 +1,6 @@
-import { Decoder as Flate } from "@moq/flate";
 import type * as Moq from "@moq/net";
 import { race } from "@moq/signals";
+import { Decoder as Flate } from "../codec.ts";
 
 import { isDeflate } from "../compression.ts";
 import type { Config as CodecConfig } from "./producer.ts";
@@ -12,7 +12,7 @@ import type { Config as CodecConfig } from "./producer.ts";
  * track rather than rolling. A second group therefore means whatever would have completed the
  * first is gone, so the read reports it instead of handing back the remainder as a continuous log.
  *
- * Mirrors the Rust `moq_binary::Error::Rolled`.
+ * Mirrors the Rust `moq_flate::Error::Rolled`.
  */
 export class Rolled extends Error {
 	constructor() {
@@ -22,7 +22,7 @@ export class Rolled extends Error {
 }
 
 /**
- * Consumes an ordered log of binary payloads from a track, yielding every one in order.
+ * Consumes an ordered log of opaque payloads from a track, yielding every one in order.
  *
  * The log is a single group. That is what makes the mode lossless: rolling to a second group means
  * the payloads that would have completed the first are gone, so a publisher that cannot write ends

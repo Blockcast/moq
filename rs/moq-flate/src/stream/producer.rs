@@ -1,4 +1,4 @@
-//! Publishing an ordered log of binary payloads over a track.
+//! Publishing an ordered log of opaque payloads over a track.
 
 use std::sync::{Arc, Mutex};
 
@@ -8,7 +8,7 @@ use crate::Result;
 
 pub use super::Config;
 
-/// Publishes an ordered log of binary payloads over a track, one payload per frame in a single
+/// Publishes an ordered log of opaque payloads over a track, one payload per frame in a single
 /// group.
 ///
 /// Cheaply clonable: clones share one underlying track and publishing state, so multiple owners
@@ -25,7 +25,7 @@ impl Producer {
 			inner: Arc::new(Mutex::new(Inner {
 				track,
 				group: None,
-				flate: config.compression.is_deflate().then(moq_flate::Encoder::new),
+				flate: config.compression.is_deflate().then(crate::Encoder::new),
 			})),
 		}
 	}
@@ -70,7 +70,7 @@ struct Inner {
 	group: Option<moq_net::group::Producer>,
 
 	/// The DEFLATE encoder, one window for the whole group, `Some` while compressing.
-	flate: Option<moq_flate::Encoder>,
+	flate: Option<crate::Encoder>,
 }
 
 impl Inner {
@@ -79,9 +79,9 @@ impl Inner {
 		// missing a record either way, and carrying on would present that gap as a complete log.
 		// Checked before the group is opened, so nothing is published, and routed through the same
 		// abort so a reader sees the failure rather than a clean end.
-		if self.flate.is_some() && payload.len() as u64 > moq_flate::DEFAULT_MAX_FRAME_SIZE {
+		if self.flate.is_some() && payload.len() as u64 > crate::DEFAULT_MAX_FRAME_SIZE {
 			self.abort(moq_net::Error::FrameTooLarge);
-			return Err(moq_flate::Error::TooLarge(moq_flate::DEFAULT_MAX_FRAME_SIZE).into());
+			return Err(crate::Error::TooLarge(crate::DEFAULT_MAX_FRAME_SIZE));
 		}
 
 		// Open the group before compressing: a failure here must not leave the window ahead of a

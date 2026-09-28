@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Deflate, Inflate } from "fflate";
-import { DEFAULT_MAX_FRAME_SIZE, Decoder, Encoder } from "./index.ts";
+import { DEFAULT_MAX_FRAME_SIZE, Decoder, Encoder } from "./codec.ts";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();

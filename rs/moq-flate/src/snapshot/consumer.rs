@@ -1,4 +1,4 @@
-//! Consuming a binary value from a track.
+//! Consuming an opaque value from a track.
 
 use std::task::Poll;
 
@@ -8,7 +8,7 @@ use crate::Result;
 
 pub use super::Config;
 
-/// Consumes a binary value from a track, yielding the newest one.
+/// Consumes an opaque value from a track, yielding the newest one.
 ///
 /// Jumps to the newest group and reads the value out of it, so a late joiner starts at the current
 /// value rather than replaying superseded ones.
@@ -17,7 +17,7 @@ pub struct Consumer {
 	group: Option<moq_net::group::Consumer>,
 	/// The DEFLATE decoder for the current group, `Some` while decompressing. A snapshot group is
 	/// normally one frame, but the window is per group either way.
-	flate: Option<moq_flate::Decoder>,
+	flate: Option<crate::Decoder>,
 	compression: bool,
 }
 
@@ -55,7 +55,7 @@ impl Consumer {
 			match self.track.poll_next_group(waiter)? {
 				Poll::Ready(Some(group)) => {
 					self.group = Some(group);
-					self.flate = self.compression.then(moq_flate::Decoder::new);
+					self.flate = self.compression.then(crate::Decoder::new);
 				}
 				Poll::Ready(None) => break true,
 				Poll::Pending => break false,

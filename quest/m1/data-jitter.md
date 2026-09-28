@@ -13,7 +13,7 @@ meaningless zero.
 
 ## Plan
 
-- The `moq-binary` and `moq-json` producers stamp each frame with
+- The `moq-flate` and `moq-json` producers stamp each frame with
   `Timestamp::now()` at write, so flush lateness is always zero today. Let a
   payload carry its capture timestamp, written as the frame timestamp, without a
   `_with_x` twin of `update`/`append` (for example, accept a type that converts
@@ -38,10 +38,10 @@ meaningless zero.
   measure bitrate from that instead of the pre-compression payload or
   serialized value: today an unchanged snapshot `update` still counts, and
   DEFLATE can slightly expand an incompressible payload.
-- Mirror the capture timestamp in the published `js/binary` and `js/json`
+- Mirror the capture timestamp in the published `js/flate` and `js/json`
   producers, so browser publishers can produce the same timed tracks.
 
-Public API: additive on `hang`, `moq-binary`, `moq-json`, `moq-mux`,
-`@moq/hang`, `@moq/binary`, and `@moq/json`. Wire: one optional field on data
+Public API: additive on `hang`, `moq-flate`, `moq-json`, `moq-mux`,
+`@moq/hang`, `@moq/flate`, and `@moq/json`. Wire: one optional field on data
 entries.
 

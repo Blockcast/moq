@@ -1,4 +1,4 @@
-//! Publishing a binary value over a track.
+//! Publishing an opaque value over a track.
 
 use std::sync::{Arc, Mutex};
 
@@ -8,7 +8,7 @@ use crate::Result;
 
 pub use super::Config;
 
-/// Publishes a binary value over a track, one value per group.
+/// Publishes an opaque value over a track, one value per group.
 ///
 /// Each [`update`](Self::update) rolls a new group holding the whole value, so a consumer only ever
 /// needs the newest group and older ones are dropped. For a log where every payload survives, use
@@ -71,12 +71,12 @@ impl Inner {
 		let payload = match self.compression {
 			true => {
 				// Compression can take a large value under the group's frame limit, but every consumer
-				// decodes with moq-flate's default output cap, so publishing past it would advertise a
+				// decodes with the default output cap, so publishing past it would advertise a
 				// value that always fails to read. Reject it here instead.
-				if payload.len() as u64 > moq_flate::DEFAULT_MAX_FRAME_SIZE {
-					return Err(moq_flate::Error::TooLarge(moq_flate::DEFAULT_MAX_FRAME_SIZE).into());
+				if payload.len() as u64 > crate::DEFAULT_MAX_FRAME_SIZE {
+					return Err(crate::Error::TooLarge(crate::DEFAULT_MAX_FRAME_SIZE));
 				}
-				moq_flate::Encoder::new().frame(&payload)
+				crate::Encoder::new().frame(&payload)
 			}
 			false => payload,
 		};

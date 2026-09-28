@@ -119,7 +119,7 @@ fn prepare(config: &mut impl AsMut<BinaryConfig>, mode: Mode) -> crate::Result<b
 /// Every [`update`](Self::update) supersedes the last, so a consumer reads only the newest payload.
 /// For a log where every payload survives, use [`Stream`].
 pub struct Snapshot<E: CatalogExt = ()> {
-	inner: moq_binary::snapshot::Producer,
+	inner: moq_flate::snapshot::Producer,
 	listing: Listing,
 	/// Which catalog the entry lives in. The entry's own type is erased by `Listing`.
 	_catalog: PhantomData<fn() -> E>,
@@ -131,11 +131,11 @@ impl<E: CatalogExt> Snapshot<E> {
 		rendition: crate::catalog::Rendition<E, C>,
 		mut config: C,
 	) -> crate::Result<Self> {
-		let mut binary = moq_binary::snapshot::Config::default();
+		let mut binary = moq_flate::snapshot::Config::default();
 		if prepare(&mut config, Mode::Snapshot)? {
-			binary.compression = moq_binary::Compression::Deflate;
+			binary.compression = moq_flate::Compression::Deflate;
 		}
-		let inner = moq_binary::snapshot::Producer::new(track, binary);
+		let inner = moq_flate::snapshot::Producer::new(track, binary);
 		let listing = Listing::new(rendition, config)?;
 		Ok(Self {
 			inner,
@@ -177,7 +177,7 @@ impl<E: CatalogExt> Snapshot<E> {
 /// Every [`append`](Self::append) is preserved and delivered in order. For a latest-value payload,
 /// use [`Snapshot`].
 pub struct Stream<E: CatalogExt = ()> {
-	inner: moq_binary::stream::Producer,
+	inner: moq_flate::stream::Producer,
 	name: String,
 
 	/// Cleared when a terminal failure ends the track, which retires the catalog entry with it. An
@@ -194,11 +194,11 @@ impl<E: CatalogExt> Stream<E> {
 		rendition: crate::catalog::Rendition<E, C>,
 		mut config: C,
 	) -> crate::Result<Self> {
-		let mut binary = moq_binary::stream::Config::default();
+		let mut binary = moq_flate::stream::Config::default();
 		if prepare(&mut config, Mode::Stream)? {
-			binary.compression = moq_binary::Compression::Deflate;
+			binary.compression = moq_flate::Compression::Deflate;
 		}
-		let inner = moq_binary::stream::Producer::new(track, binary);
+		let inner = moq_flate::stream::Producer::new(track, binary);
 		let listing = Listing::new(rendition, config)?;
 		Ok(Self {
 			inner,
@@ -224,7 +224,7 @@ impl<E: CatalogExt> Stream<E> {
 	/// Append one payload to the log.
 	///
 	/// A payload that cannot be written ends the track (see
-	/// [`moq_binary::stream::Producer::append`]) and retires the catalog entry with it. A catalog
+	/// [`moq_flate::stream::Producer::append`]) and retires the catalog entry with it. A catalog
 	/// error publishing the measured bitrate is returned after the payload was written, so the track
 	/// stays open and a retry would duplicate it.
 	pub fn append(&mut self, payload: impl Into<Bytes>) -> crate::Result<()> {
@@ -266,10 +266,10 @@ pub struct Consumer {
 	mode: Mode,
 }
 
-/// Which moq-binary consumer is doing the reading. Private: the caller sees one `Consumer`.
+/// Which moq-flate consumer is doing the reading. Private: the caller sees one `Consumer`.
 enum Inner {
-	Snapshot(moq_binary::snapshot::Consumer),
-	Stream(moq_binary::stream::Consumer),
+	Snapshot(moq_flate::snapshot::Consumer),
+	Stream(moq_flate::stream::Consumer),
 }
 
 impl Consumer {
@@ -286,18 +286,18 @@ impl Consumer {
 
 		let inner = match &config.mode {
 			Mode::Snapshot => {
-				let mut binary = moq_binary::snapshot::Config::default();
+				let mut binary = moq_flate::snapshot::Config::default();
 				if compression {
-					binary.compression = moq_binary::Compression::Deflate;
+					binary.compression = moq_flate::Compression::Deflate;
 				}
-				Inner::Snapshot(moq_binary::snapshot::Consumer::new(track, binary))
+				Inner::Snapshot(moq_flate::snapshot::Consumer::new(track, binary))
 			}
 			Mode::Stream => {
-				let mut binary = moq_binary::stream::Config::default();
+				let mut binary = moq_flate::stream::Config::default();
 				if compression {
-					binary.compression = moq_binary::Compression::Deflate;
+					binary.compression = moq_flate::Compression::Deflate;
 				}
-				Inner::Stream(moq_binary::stream::Consumer::new(track, binary))
+				Inner::Stream(moq_flate::stream::Consumer::new(track, binary))
 			}
 			other => return Err(crate::Error::UnsupportedMode(other.to_string())),
 		};

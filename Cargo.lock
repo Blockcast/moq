@@ -4230,18 +4230,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "moq-binary"
-version = "0.1.5"
-dependencies = [
- "bytes",
- "kio 0.6.0",
- "moq-flate",
- "moq-net",
- "thiserror 2.0.21",
- "tracing",
-]
-
-[[package]]
 name = "moq-boy"
 version = "0.5.6"
 dependencies = [
@@ -4373,7 +4361,10 @@ version = "0.2.0"
 dependencies = [
  "bytes",
  "flate2",
+ "kio 0.6.0",
+ "moq-net",
  "thiserror 2.0.21",
+ "tracing",
 ]
 
 [[package]]
@@ -4466,7 +4457,7 @@ dependencies = [
  "hang",
  "kio 0.6.0",
  "memchr",
- "moq-binary",
+ "moq-flate",
  "moq-json",
  "moq-loc",
  "moq-msf",

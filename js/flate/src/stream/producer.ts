@@ -1,6 +1,6 @@
-import { DEFAULT_MAX_FRAME_SIZE, Encoder as Flate } from "@moq/flate";
 import type * as Moq from "@moq/net";
 import { Time } from "@moq/net";
+import { DEFAULT_MAX_FRAME_SIZE, Encoder as Flate } from "../codec.ts";
 
 import { type Compression, isDeflate } from "../compression.ts";
 
@@ -15,7 +15,7 @@ export interface Config {
 }
 
 /**
- * Publishes an ordered log of binary payloads to a track, one payload per frame in a single group.
+ * Publishes an ordered log of opaque payloads to a track, one payload per frame in a single group.
  */
 export class Producer {
 	#track: Moq.Track.Producer;

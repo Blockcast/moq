@@ -1,5 +1,5 @@
 /**
- * Lossy latest-value binary publishing over MoQ tracks.
+ * Lossy latest-value opaque publishing over MoQ tracks.
  *
  * One opaque value updated over time, for consumers that only care about the current state (a
  * poster image, a serialized state blob). This mode is **lossy** by design: a consumer yields only
