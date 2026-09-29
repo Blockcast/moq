@@ -294,11 +294,12 @@ ui.run((effect) => {
 	);
 });
 
-// Broadcast pill: Online when the active broadcast is live, else Loading/Offline.
+// Broadcast pill: Online when the active broadcast is live, else Loading/Refused/Offline.
 ui.run((effect) => {
 	const watch = effect.get(activeWatch);
-	const stream = watch ? effect.get(watch.broadcast.out.status) : "offline"; // offline | loading | live
+	const stream = watch ? effect.get(watch.broadcast.out.status) : "offline"; // offline | loading | live | error
 	if (stream === "live") setPill("bcast-status", "bcast-text", "Online", "ok");
+	else if (stream === "error") setPill("bcast-status", "bcast-text", "Refused", "bad");
 	else if (watch && stream === "loading") setPill("bcast-status", "bcast-text", "Loading", "wait");
 	else setPill("bcast-status", "bcast-text", "Offline", "bad");
 });
