@@ -39,7 +39,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Session death parity](/quest/m1/session-death.md) - a local close ends tracks cleanly in both languages, and JS group readers see the session's error on session death
 - [Watch and publish under CSP](/quest/m1/csp-assets.md) - blob workers stay the default; strict-CSP apps host the files and set a base URL
 - [More tests under load](/quest/m1/test-flakes-2.md) - the second round of load-only failures, fixed at the cause
-- [Interop audio cold start](/quest/m1/interop-audio-cold-start.md) - the interop audio tone check stops failing on cold start, fixed at its cause
 - [CI runner stalls](/quest/m1/ci-runner-stalls.md) - the 0.4 to 0.8 s freezes of both interop tracks on CI are attributed from a week of nightlies and fixed or told apart from playback bugs
 - [Catalog estimate rate](/quest/m1/catalog-estimate-rate.md) - a rising `jitter`/`delay` estimate republishes the catalog at most once a second, in js/publish and moq-mux
 - [Auth outage clock](/quest/m1/auth-outage-clock.md) - the relay and moq-auth outage tests run on a paused clock again and assert both bounds of `expires`
