@@ -86,7 +86,7 @@ type BroadcastOutput = {
 	active: Signal<Moq.Broadcast.Consumer | undefined>;
 
 	// Why the origin refused the broadcast, while `status` is "error". A refusal is final:
-	// only a fresh request (a new `name` or `origin`, or re-enabling) clears it and asks again.
+	// only a fresh request (a new `name`, `origin`, or `announced`, or re-enabling) clears it and asks again.
 	error: Signal<Error | undefined>;
 
 	// The effective catalog: the fetched one, or a copy of input.catalog in manual mode, minus
