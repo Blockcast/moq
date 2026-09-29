@@ -21,9 +21,10 @@ Decided 2026-09-29 by the maintainer:
   honestly.
 - The name says what it shows: announcements, as they happen.
 - No `ls` alias: it becomes an unknown command, per the no-compat-shim rule.
-- Shell completion (`rs/moq-cli/src/complete.rs`) drops remote broadcast
-  paths and completes flags and subcommands only, with no network. It waits
-  on `Live` today and would otherwise need a timeout.
+- Shell completion (`rs/moq-cli/src/complete.rs`) drops the `BROADCAST`
+  completer, which waits on `Live` today and would otherwise need a timeout.
+  The other completers (local capture devices, catalog renditions) don't read
+  `Live` and stay.
 - The live view is plain terminal redraw. Prefer a maintained crate if the
   redraw grows beyond a few lines. Keep the event-line output byte-for-byte
   compatible with today's `--follow` output so scripts only change the
