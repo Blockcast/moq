@@ -36,9 +36,4 @@ What we saw:
 
 Start from how a newly spliced or parked segment derives its floor for a
 subscriber that asked for group 0, and whether a warm copy's cached groups
-below the new segment's first group stay reachable. The
-[splice edge cases](/quest/m1/splice-edges.md) touch the same code.
-
-## Related
-
-- [Splice edge cases](/quest/m1/splice-edges.md) - other spliced-track cases that lose or mis-judge groups
+below the new segment's first group stay reachable.

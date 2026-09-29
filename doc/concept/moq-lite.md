@@ -224,6 +224,12 @@ anything on its own. Both ends apply it: the publisher skips a group rather
 than sending it, and the subscriber skips it again as it reads, since the
 publisher only ever sees the most tolerant budget across its subscribers.
 
+Across a native route failover, the reader still judges buffered groups against
+the logical track's live edge, including groups it is draining from a retired
+route. A successor group with no timestamp leaves the preceding group's reach
+unbounded until its first frame arrives. A cached open group's prefix remains
+readable across repeated takeovers and idle resumes.
+
 The publisher declares a retention window per track, which bounds how far back
 a fetch or late subscriber can reach. Media tracks default to 30 seconds so a
 segmented egress can still find its segments.

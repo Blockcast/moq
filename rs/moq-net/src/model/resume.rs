@@ -250,10 +250,10 @@ impl ResumeState {
 
 	/// Where the logical track continues past the exclusive group `boundary` of segment
 	/// `id`, below the reader's `cap`: the start of the first group the later segments
-	/// serve there. `None` while none is cached, or it has no frame yet.
+	/// serve there. A draining reader's own segment may already have been pruned.
 	fn successor(&self, id: u64, boundary: u64, cap: Option<u64>) -> Option<Successor> {
-		let index = self.segments.iter().position(|segment| segment.id == id)?;
-		served_start(&self.segments[index + 1..], boundary, cap)
+		let index = self.segments.iter().position(|segment| segment.id > id)?;
+		served_start(&self.segments[index..], boundary, cap)
 	}
 
 	/// Append a segment serving the track from `start` onward, capping (or replacing)
@@ -3301,6 +3301,49 @@ mod test {
 		})
 		.collect();
 		assert_eq!(replayed, vec![0, 1, 2, 3], "a backlog inside the budget crosses whole");
+	}
+
+	#[tokio::test]
+	async fn unstamped_successor_segment_keeps_the_previous_group_unbounded() {
+		let (mut a, a_read) = track_pair("a");
+		let (b, b_read) = track_pair("b");
+		let (mut c, c_read) = track_pair("c");
+		write_group_at(&mut a, 0, "a0", Duration::ZERO);
+		let _unstamped = b.create_group(1u64.into()).unwrap();
+		write_group_at(&mut c, 2, "c2", Duration::from_secs(10));
+		write_group_at(&mut c, 3, "c3", Duration::from_secs(20));
+		let mut producer = Producer::new();
+		producer.switch(a_read, None).unwrap();
+		producer.switch(b_read, Position::group(1)).unwrap();
+		producer.switch(c_read, Position::group(2)).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+		assert_eq!(
+			recv(&mut sub),
+			0,
+			"the unstamped successor must not borrow segment C's start"
+		);
+	}
+
+	#[tokio::test]
+	async fn pruned_segment_boundary_is_judged_against_later_segments() {
+		let (mut a, a_read) = track_pair("a");
+		let mut producer = Producer::new();
+		producer.switch(a_read, None).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+		// Keep A's cursor draining while its newest group advances beyond the late boundary group.
+		write_group_at(&mut a, 0, "a0", Duration::ZERO);
+		assert_eq!(recv(&mut sub), 0);
+		write_group_at(&mut a, 3, "past-boundary", Duration::from_secs(3));
+		for sequence in 3..=(2 + MAX_SEGMENTS as u64) {
+			let (mut track, consumer) = track_pair("later");
+			producer.switch(consumer, Position::group(sequence)).unwrap();
+			write_group_at(&mut track, sequence, "later", Duration::from_secs(sequence * 10));
+			assert_eq!(recv(&mut sub), sequence);
+		}
+		assert!(producer.state.read().pruned.is_some());
+		// A's boundary group arrives after A was pruned; it is stale against group 3's start.
+		write_group_at(&mut a, 2, "a2", Duration::from_secs(2));
+		recv_pending(&mut sub);
 	}
 
 	/// A segment's track never sees the groups of the segments after it: its own edge

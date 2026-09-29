@@ -575,8 +575,8 @@ impl TrackState {
 
 	/// The first servable group's start in `from..cap`, with the slot identity a later
 	/// judgment needs to tell that group from whatever replaces it. `None` when no such
-	/// group is cached or it has no frame yet: an unstamped successor leaves reach
-	/// unbounded, and this does not skip past it to a later group.
+	/// group is cached. An unstamped successor still returns its identity so a wrapping
+	/// splice does not skip past it to a later segment's stamped group.
 	fn served_start(&self, from: u64, cap: Option<u64>) -> Option<ServedStart> {
 		let slot = self
 			.lookup
@@ -587,7 +587,7 @@ impl TrackState {
 		Some(ServedStart {
 			sequence: slot.group.sequence,
 			stamp: slot.stamp,
-			timestamp: slot.group.timestamp()?,
+			timestamp: slot.group.timestamp(),
 		})
 	}
 
@@ -3349,7 +3349,7 @@ impl PartialEq for LiveEdge {
 struct ServedStart {
 	sequence: u64,
 	stamp: u32,
-	timestamp: Timestamp,
+	timestamp: Option<Timestamp>,
 }
 
 /// A successor pushed onto another track's cursor. The timestamp alone is not enough:
@@ -3358,7 +3358,7 @@ struct ServedStart {
 #[derive(Clone)]
 pub(crate) struct Successor {
 	sequence: u64,
-	timestamp: Timestamp,
+	timestamp: Option<Timestamp>,
 	stamp: u32,
 	track: kio::ConsumerWeak<TrackState>,
 }
