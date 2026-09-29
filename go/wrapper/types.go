@@ -70,7 +70,7 @@ type (
 	Video = ffi.MoqVideo
 	// VideoHint supplies catalog fields a video stream can't reveal itself, such as bitrate, filling only the gaps.
 	VideoHint = ffi.MoqVideoHint
-	// VideoDecoderOutput configures what DecodeVideo delivers: an optional resize, a max age, and whether frames keep the decoder's native surface.
+	// VideoDecoderOutput configures what DecodeVideo delivers: an optional resize, a max age, and whether frames keep the decoder's surface (macOS only; refused elsewhere).
 	VideoDecoderOutput = ffi.MoqVideoDecoderOutput
 	// AudioFormat is a single audio codec an importer can parse.
 	AudioFormat = ffi.MoqAudioFormat
