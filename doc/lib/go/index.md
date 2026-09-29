@@ -137,7 +137,10 @@ Each `VideoDecodedFrame` from `DecodeVideo` owns its decoded picture until
 on demand: `VideoPixelFormatI420`, or `VideoPixelFormatRgba` for four bytes a
 pixel. Close frames promptly, since held frames hold decoder buffers. `Resize`
 is best effort: only NVDEC has a built-in scaler, so read each frame's own
-`Width()` and `Height()` rather than assuming it took.
+`Width()` and `Height()` rather than assuming it took. `VideoDecoderOutput{Surface: true}`
+keeps the decoder's surface for `frame.Surface()` instead of downloading it: a
+`VideoSurfacePixelBuffer` whose `Pointer` is the `CVPixelBufferRef`, valid until
+`Close`. Only macOS has one, so `DecodeVideo` fails with `ErrUnsupported` elsewhere.
 
 ## Connection stats
 
