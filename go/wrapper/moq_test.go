@@ -267,8 +267,14 @@ func TestVideoPropertiesUseDefaultedFields(t *testing.T) {
 
 // TestDecodeVideoFrame pins a decoded frame owning its picture: it converts to
 // either CPU layout on demand and stays readable after its consumer is
-// cancelled, until Close.
+// cancelled, until Close. A surface decode also exposes the platform surface,
+// and is refused where no surface variant exists.
 func TestDecodeVideoFrame(t *testing.T) {
+	t.Run("cpu", func(t *testing.T) { testDecodeVideoFrame(t, false) })
+	t.Run("surface", func(t *testing.T) { testDecodeVideoFrame(t, true) })
+}
+
+func testDecodeVideoFrame(t *testing.T, surface bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
@@ -318,7 +324,13 @@ func TestDecodeVideoFrame(t *testing.T) {
 		t.Fatalf("catalog has no %q rendition: %v", track, catalog.Video)
 	}
 
-	decoder, err := bc.DecodeVideo(ctx, track, rendition, moq.VideoDecoderOutput{})
+	decoder, err := bc.DecodeVideo(ctx, track, rendition, moq.VideoDecoderOutput{Surface: surface})
+	if surface && runtime.GOOS != "darwin" {
+		if !errors.Is(err, moq.ErrUnsupported) {
+			t.Fatalf("surface decode off macOS: err = %v, want ErrUnsupported", err)
+		}
+		return
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,6 +351,14 @@ func TestDecodeVideoFrame(t *testing.T) {
 	}
 	defer frame.Close()
 	decoder.Cancel()
+
+	if !surface {
+		if got := frame.Surface(); got != nil {
+			t.Fatalf("CPU decode surface = %#v, want nil", got)
+		}
+	} else if pb, ok := frame.Surface().(moq.VideoSurfacePixelBuffer); !ok || pb.Pointer == 0 {
+		t.Fatalf("surface = %#v, want a non-null VideoSurfacePixelBuffer", frame.Surface())
+	}
 
 	i420, err := frame.Pixels(moq.VideoPixelFormatI420)
 	if err != nil {
