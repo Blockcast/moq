@@ -28,6 +28,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Session close](/quest/m1/session-close.md) - a graceful session end withdraws announces and waits one second for the ack
 - [Graceful close in bindings](/quest/m1/bindings-graceful-close.md) - on dev, `shutdown` drains a session in moq-ffi and every wrapper like Rust, so the wrappers keep the tail of a publish
 - [Raw stream codes](/quest/m1/raw-stream-codes.md) - raw QUIC stream resets and stops carry the application's code, not an HTTP/3-mapped one
+- [WebTransport close upstream](/quest/m1/wt-close-upstream.md) - web-transport-moq delivers the close capsule itself, and moq-tokio's `CLOSE_LINGER` is deleted
 - [Live in apps](/quest/m1/announce-live-apps.md) - the demo and `@moq/room` show "no broadcasts" from the `live` marker, which waits for the first session on page load
 - [Page-load marker](/quest/m1/announce-page-load.md) - an announcement stream opened before the first connection waits for its replay before `live`
 - [Empty state](/quest/m1/announce-empty-state.md) - watch, room, and the demo show "no broadcasts" once `live` arrives with nothing announced
@@ -42,6 +43,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - every stream group in a lite subscription arrives or is dropped by name, and lite-07 drops its stream count for it
 - [FIN wait expiry](/quest/m1/fin-wait-expiry.md) - a group awaiting its FIN ack still expires and follows priority updates on lite and IETF
 - [Cross-relay bursts](/quest/m1/cross-relay-bursts.md) - bursty small-group tracks cross two relays without lost groups, unanswered FETCHes, or stalls
+- [JS closed-track leak](/quest/m1/js-closed-track-leak.md) - on dev, a subscriber that joins a closed JS track with unlimited retention is released instead of cached forever
 - [Session death parity](/quest/m1/session-death.md) - a local close ends tracks cleanly in both languages, and JS group readers see the session's error on session death
 - [Watch video guards](/quest/m1/watch-video-guards.md) - promoting a video track holds the last picture, and an older group never reaches the codec between live deltas
 - [Watch decoder recovery](/quest/m1/watch-decoder-recovery.md) - one malformed packet rebuilds the audio or video decoder instead of ending playback
@@ -75,6 +77,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Data capture in bindings](/quest/m1/data-capture-bindings.md) - moq-ffi and every wrapper pass a data frame's capture time, and the JSON window producer takes one
 - [Moxygen compatibility](/quest/m1/moxygen/README.md) - one subgroup per group, whole-group FETCH, and one datagram per group, never a full moxygen pass
 - [JS IETF reprice](/quest/m1/js-ietf-reprice.md) - `@moq/net`'s IETF publisher reprices a held namespace in place, like Rust, instead of withdraw-then-advertise
+- [Cluster publisher in place](/quest/m1/cluster-publisher-in-place.md) - under the IETF cluster extension a publisher change updates an advertisement in place, like lite, and never splices across publishers
 - [JS IETF datagrams](/quest/m1/js-ietf-datagram.md) - `@moq/net` sends and receives datagram groups over moq-transport, like Rust
 - [#2991](/quest/m1/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - one dynamic producer per track name in both languages, with the sequence namespace surviving a replacement
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - generic on-demand group serving and IETF FETCH for browser publishers
