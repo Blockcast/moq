@@ -570,9 +570,13 @@ export class Producer {
 				// Update demand: once the last subscriber leaves, the consumer wire (watching
 				// {@link unused}) tears the upstream down instead of downloading to nobody.
 				this.#used.set(this.#sinks.size > 0);
-				// The producer closing every sink keeps its mirrors tracked, so what the sink
-				// still buffers ages out with the cache instead of staying pinned.
+				// The producer closing every sink leaves the sink's buffered mirrors readable.
+				// Bounded retention keeps them tracked so they age out with the cache;
+				// unlimited retention never ages anything out, so it leaves them to the reader.
 				if (this.#state.closed.peek() !== undefined) {
+					if (this.#state.info.peek()?.maxAge === undefined) {
+						for (const entry of this.#cache) entry.mirrors.delete(sink);
+					}
 					dispose();
 					return;
 				}
