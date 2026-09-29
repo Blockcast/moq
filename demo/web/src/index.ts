@@ -188,7 +188,7 @@ discovery.run((effect) => {
 	const live = new Set<string>();
 	effect.spawn(async () => {
 		for (;;) {
-			const entry = await Promise.race([effect.cancel, announced.next()]);
+			const entry = await effect.race(announced.next());
 			if (!entry) break;
 			if (entry.kind === "live") continue;
 			const path = entry.prefix;
@@ -439,7 +439,7 @@ ui.run((effect) => {
 	effect.spawn(async () => {
 		try {
 			for (;;) {
-				const value = await Promise.race([effect.cancel, consumer.next()]);
+				const value = await effect.race(consumer.next());
 				if (value === undefined) break;
 				metaSignal.set(value);
 			}
