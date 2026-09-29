@@ -327,8 +327,9 @@ pub struct Segment {
 	pub program_date_time: Option<SystemTime>,
 	/// The absolute timeline discontinuity sequence within this broadcaster.
 	///
-	/// Use the first retained segment's value as `EXT-X-DISCONTINUITY-SEQUENCE` and mark
-	/// changes with `EXT-X-DISCONTINUITY`. Cursors share this sequence regardless of when
+	/// Use the first retained segment's value as `EXT-X-DISCONTINUITY-SEQUENCE`, then write
+	/// `current - previous` `EXT-X-DISCONTINUITY` tags before each later segment; a skipped
+	/// epoch makes that more than one. Cursors share this sequence regardless of when
 	/// they start or which segments they skip. Recreating the broadcaster starts a new
 	/// namespace: start a new recording or map it into a recording-wide sequence.
 	pub discontinuity: u64,

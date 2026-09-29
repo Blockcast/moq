@@ -58,9 +58,13 @@ sequence within one `Broadcaster`. Cursors created at different times report
 the same sequence for the same timeline span, including after a rendition
 rebinds. Skipping unavailable segments does not reset the sequence.
 
-A recorder uses the first retained segment's value for
-`EXT-X-DISCONTINUITY-SEQUENCE` and marks changes with `EXT-X-DISCONTINUITY`.
-The value is a sequence, not a count to add for every segment. Retain the
+HLS numbers a segment as `EXT-X-DISCONTINUITY-SEQUENCE` plus the
+`EXT-X-DISCONTINUITY` tags before it (RFC 8216, section 6.2.1), and matching
+content in every rendition must share that number. A recorder writes the first
+retained segment's value as `EXT-X-DISCONTINUITY-SEQUENCE`, then writes
+`current - previous` `EXT-X-DISCONTINUITY` tags before each later segment. The
+difference can exceed one when the cursor skipped every segment of an epoch, and
+one tag per change would then fall behind sibling renditions. Retain the
 absolute value in the index alongside each segment.
 
 Recreating the broadcaster starts a new sequence namespace. Start a new
