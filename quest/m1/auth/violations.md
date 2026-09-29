@@ -11,7 +11,7 @@ decode, such as a bad pattern or length.
 ## Plan
 
 [AUTH endings](/quest/m1/auth/error-codes.md) (#4550) closes the session only
-on an explicit `ProtocolViolation` in Rust lite, and left four gaps:
+on an explicit `ProtocolViolation` in Rust lite. These gaps remain:
 
 - JS reports the exact oversized code but doesn't close the session. Let the
   JS connection close on an `AuthSession` protocol violation.
@@ -22,6 +22,9 @@ on an explicit `ProtocolViolation` in Rust lite, and left four gaps:
 - On the acceptor side, a presenter's AUTH that fails to decode only aborts
   its stream (Rust lite `AuthServe`, JS `#runBidis`), so a peer can repeat
   malformed AUTH streams without closing the session.
+- Both IETF AUTH acceptors (Rust `Serve::run`, JS `IetfAuthWire.accept`)
+  discard the decoded Request ID, so a reused ID is accepted. Validate it like
+  every other request, where a duplicate is session-fatal.
 
 Close the session on each, in both languages and on both protocols, with one
 regression test per case, and check the lite and IETF draft text agrees. Run
