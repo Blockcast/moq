@@ -555,9 +555,11 @@ async fn a_moved_tier_retags_the_live_session() {
 	relay.abort();
 }
 
-/// A narrower grant closes the session on the next re-check, over TCP and WebSocket.
+/// A narrower grant narrows the live session in place on the next re-check, over TCP
+/// and WebSocket: the deafened path resets with `Unauthorized`, a sibling under the
+/// same prefix keeps flowing, and neither session closes.
 #[tokio::test]
-async fn a_narrower_grant_closes_live_sessions() {
+async fn a_narrower_grant_narrows_live_sessions() {
 	for scheme in ["tcp", "ws"] {
 		let script = Script::new(grant(Duration::from_secs(3600)));
 		let auth = build_auth(script.spawn().await);
@@ -565,16 +567,125 @@ async fn a_narrower_grant_closes_live_sessions() {
 			"tcp" => spawn_relay(auth).await,
 			_ => spawn_ws_relay(auth).await,
 		};
-		let (pub_session, sub_session) = connect_and_round_trip(&room_url(scheme, port)).await;
+		let url = room_url(scheme, port);
 
+		let pub_origin = moq_tokio::origin::spawn();
+		let mut tracks = Vec::new();
+		for path in ["alice/audio", "alice/video"] {
+			let broadcast = pub_origin.create_broadcast(path).expect("create broadcast");
+			let track = broadcast.create_track("media", None).expect("create track");
+			broadcast.announce(Default::default()).expect("announce broadcast");
+			tracks.push((broadcast, track));
+		}
+		let pub_session = tokio::time::timeout(
+			TIMEOUT,
+			client()
+				.with_publisher(pub_origin.consume())
+				.with_reconnect(false)
+				.connect(url.clone())
+				.established(),
+		)
+		.await
+		.expect("publisher connect timeout")
+		.expect("publisher connect failed");
+
+		let sub_origin = moq_tokio::origin::spawn();
+		let sub_consumer = sub_origin.consume();
+		let sub_session = tokio::time::timeout(
+			TIMEOUT,
+			client()
+				.with_subscriber(sub_origin)
+				.with_reconnect(false)
+				.connect(url.clone())
+				.established(),
+		)
+		.await
+		.expect("subscriber connect timeout")
+		.expect("subscriber connect failed");
+
+		let mut subs = Vec::new();
+		for path in ["alice/audio", "alice/video"] {
+			let broadcast = tokio::time::timeout(TIMEOUT, sub_consumer.routed_broadcast(path))
+				.await
+				.expect("announcement timeout")
+				.expect("announced broadcast resolves");
+			subs.push(broadcast.track("media").unwrap().subscribe(None).await.expect("subscribe"));
+		}
+		let send = |index: usize, sequence: u64| {
+			let mut group = tracks[index].1.append_group().expect("append group");
+			group
+				.write_frame(moq_net::Timestamp::ZERO, b"media".as_ref())
+				.expect("write frame");
+			group.finish().expect("finish group");
+			assert_eq!(group.sequence, sequence);
+		};
+		for index in 0..2 {
+			send(index, 0);
+			tokio::time::timeout(TIMEOUT, subs[index].recv_group())
+				.await
+				.expect("recv_group timeout")
+				.expect("recv_group failed")
+				.expect("track closed prematurely");
+		}
+
+		// Deafen alice's audio: everything else stays as admitted.
 		let mut narrow = grant(Duration::from_secs(3600));
-		narrow.publish = ["nobody/**".parse().unwrap()].into_iter().collect();
+		narrow.subscribe = ["alice/video/**".parse().unwrap()].into_iter().collect();
 		script.on_revalidate(Answer::Grant(narrow));
 
-		assert_closed(pub_session, Duration::from_secs(5), &format!("{scheme} publisher")).await;
-		assert_closed(sub_session, Duration::from_secs(5), &format!("{scheme} subscriber")).await;
+		let err = loop {
+			match tokio::time::timeout(TIMEOUT, subs[0].recv_group())
+				.await
+				.expect("the deafened track never ended")
+			{
+				Ok(Some(_)) => continue,
+				Ok(None) => panic!("{scheme}: the deafened track finished instead of ending"),
+				Err(err) => break err,
+			}
+		};
+		assert!(
+			matches!(
+				err,
+				moq_net::Error::Unauthorized | moq_net::Error::Stream(moq_net::StreamError::Unauthorized)
+			),
+			"{scheme}: {err:?}"
+		);
+
+		send(1, 1);
+		let group = tokio::time::timeout(TIMEOUT, subs[1].recv_group())
+			.await
+			.expect("recv_group timeout")
+			.expect("recv_group failed")
+			.expect("the sibling track closed");
+		assert_eq!(group.sequence, 1, "{scheme}");
+
+		for (session, what) in [(pub_session, "publisher"), (sub_session, "subscriber")] {
+			assert!(
+				tokio::time::timeout(Duration::from_millis(200), session.closed())
+					.await
+					.is_err(),
+				"{scheme}: a narrowing must not close the {what}"
+			);
+		}
 		relay.abort();
 	}
+}
+
+/// A re-check that moves the root still closes the session: nothing it holds is
+/// named the same way under the new one.
+#[tokio::test]
+async fn a_moved_root_closes_live_sessions() {
+	let script = Script::new(grant(Duration::from_secs(3600)));
+	let (port, relay) = spawn_relay(build_auth(script.spawn().await)).await;
+	let (pub_session, sub_session) = connect_and_round_trip(&room_url("tcp", port)).await;
+
+	let mut moved = grant(Duration::from_secs(3600));
+	moved.root = Some("elsewhere".into());
+	script.on_revalidate(Answer::Grant(moved));
+
+	assert_closed(pub_session, Duration::from_secs(5), "publisher").await;
+	assert_closed(sub_session, Duration::from_secs(5), "subscriber").await;
+	relay.abort();
 }
 
 /// A refusal on re-check closes the session, and the `end` says why.

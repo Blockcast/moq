@@ -987,3 +987,81 @@ impl Enforce {
 		}
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn patterns(prefixes: &[&str]) -> Patterns {
+		prefixes
+			.iter()
+			.map(|prefix| crate::Pattern::subtree(prefix).unwrap())
+			.collect()
+	}
+
+	fn grant(publish: &[&str], subscribe: &[&str]) -> Grant {
+		Grant {
+			publish: patterns(publish),
+			subscribe: patterns(subscribe),
+			expires: None,
+		}
+	}
+
+	/// A narrowing keeps only what every narrowing so far allows, so a wider one
+	/// changes nothing, and it applies to a version without AUTH too.
+	#[test]
+	fn a_narrowing_only_ever_narrows() {
+		let handle = Handle::new(false);
+		assert!(handle.allows(Direction::Publish, "room/alice/audio"));
+
+		handle.narrow(&grant(&["room/bob"], &["room/alice"]));
+		// What we send is what the peer may subscribe to, and the other way around.
+		assert!(handle.allows(Direction::Publish, "room/alice/audio"));
+		assert!(!handle.allows(Direction::Publish, "room/bob/cam"));
+		assert!(handle.allows(Direction::Subscribe, "room/bob/cam"));
+		assert!(!handle.allows(Direction::Subscribe, "room/alice/audio"));
+
+		handle.narrow(&grant(&[""], &["room/alice/video"]));
+		assert!(!handle.allows(Direction::Publish, "room/alice/audio"));
+		assert!(handle.allows(Direction::Publish, "room/alice/video"));
+		assert!(handle.allows(Direction::Subscribe, "room/bob/cam"));
+
+		handle.narrow(&Grant::all());
+		assert!(!handle.allows(Direction::Publish, "room/alice/audio"));
+		assert!(!handle.allows(Direction::Subscribe, "other"));
+	}
+
+	/// Our own grant does not decide what the peer may offer us, only the ceiling does.
+	#[test]
+	fn the_ceiling_alone_decides_what_the_peer_offers() {
+		let handle = Handle::new(true);
+		let token = handle.present(Bytes::new(), true).unwrap();
+		handle.granted(0, grant(&[], &[]));
+		assert!(!handle.allows(Direction::Subscribe, "room/bob/cam"));
+		assert!(handle.within_ceiling(Direction::Subscribe, "room/bob/cam"));
+
+		handle.narrow(&grant(&["room/alice"], &[]));
+		assert!(!handle.within_ceiling(Direction::Subscribe, "room/bob/cam"));
+		assert!(handle.within_ceiling(Direction::Subscribe, "room/alice/cam"));
+		drop(token);
+	}
+
+	/// The default acceptor answers with its base grant, then with each grant a
+	/// narrowing changes, and stays quiet on a change that leaves it alone.
+	#[test]
+	fn the_default_grant_follows_the_ceiling() {
+		let handle = Handle::new(true);
+		let mut default = DefaultGrant::new(handle.clone(), grant(&["room"], &["room"]));
+		let waiter = kio::Waiter::noop();
+
+		assert_eq!(default.poll(&waiter), Poll::Ready(grant(&["room"], &["room"])));
+		assert!(default.poll(&waiter).is_pending());
+
+		handle.narrow(&grant(&["room"], &["room/alice"]));
+		assert_eq!(default.poll(&waiter), Poll::Ready(grant(&["room"], &["room/alice"])));
+
+		// Wider than the ceiling already is: nothing to tell the peer.
+		handle.narrow(&Grant::all());
+		assert!(default.poll(&waiter).is_pending());
+	}
+}
