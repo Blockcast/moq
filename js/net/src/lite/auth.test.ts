@@ -2,8 +2,9 @@ import { expect, test } from "bun:test";
 import { SessionCode } from "../error.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
-import { AuthError, AuthMessage, AuthOk, decodeAuthReplyMaybe, encodeAuthReply } from "./auth.ts";
+import { AuthError, AuthMessage, AuthOk, decodeAuthReplyMaybe } from "./auth.ts";
 import * as Lite from "./index.ts";
+import * as Message from "./message.ts";
 
 function patterns(...texts: string[]): Path.Patterns {
 	return new Path.Patterns(texts.map((text) => Path.Pattern.parse(text)));
@@ -42,8 +43,8 @@ test("AUTH_OK and AUTH_ERROR round-trip behind their type", async () => {
 	const ok = new AuthOk(patterns("**"), patterns(), 60_000);
 	const err = new AuthError(SessionCode.Unauthorized, "expired");
 	const r = await roundTrip(async (w) => {
-		await encodeAuthReply(w, ok, Lite.Version.DRAFT_06);
-		await encodeAuthReply(w, err, Lite.Version.DRAFT_06);
+		await ok.encode(w, Lite.Version.DRAFT_06);
+		await err.encode(w, Lite.Version.DRAFT_06);
 	});
 	const first = await decodeAuthReplyMaybe(r, Lite.Version.DRAFT_06);
 	expect(first).toBeInstanceOf(AuthOk);
@@ -60,7 +61,9 @@ test("AUTH_OK and AUTH_ERROR round-trip behind their type", async () => {
 
 test("literal and wildcard grants travel exactly, never widened", async () => {
 	const ok = new AuthOk(patterns("room/alice", "room/*/cam", "**/demo.hang"), patterns("", "lobby/**"));
-	const got = await AuthOk.decode(await roundTrip((w) => ok.encode(w, Lite.Version.DRAFT_06)), Lite.Version.DRAFT_06);
+	const r = await roundTrip((w) => ok.encode(w, Lite.Version.DRAFT_06));
+	const got = await decodeAuthReplyMaybe(r, Lite.Version.DRAFT_06);
+	if (!(got instanceof AuthOk)) throw new Error("expected AUTH_OK");
 	expect(got.publish.equals(ok.publish)).toBe(true);
 	expect(got.subscribe.equals(ok.subscribe)).toBe(true);
 });
@@ -68,7 +71,7 @@ test("literal and wildcard grants travel exactly, never widened", async () => {
 // The same bytes as `auth_ok_golden` in `rs/moq-net/src/lite/auth.rs`.
 test("AUTH_OK matches the Rust encoding", async () => {
 	const ok = new AuthOk(patterns("room/*/cam", "**/b.hang"), patterns(""), 1000);
-	const r = await roundTrip((w) => encodeAuthReply(w, ok, Lite.Version.DRAFT_06));
+	const r = await roundTrip((w) => ok.encode(w, Lite.Version.DRAFT_06));
 	const text = (s: string) => [s.length, ...new TextEncoder().encode(s)];
 	expect([...(await r.readAll())]).toEqual([
 		0x00, // AUTH_OK
@@ -81,6 +84,17 @@ test("AUTH_OK matches the Rust encoding", async () => {
 		0x43,
 		0xe8, // expires: 1000ms
 	]);
+});
+
+// Mirrors `oversized_message_is_refused` in `rs/moq-net/src/lite/auth.rs`: the peer would
+// refuse it, so the acceptor withholds it, type included, and resets the stream instead.
+// Building a 64 MiB grant from patterns is too slow, so the body is raw bytes.
+test("a reply larger than the peer reads writes nothing", async () => {
+	const body = new Uint8Array(Message.MAX_MESSAGE_SIZE + 1);
+	const r = await roundTrip(async (w) => {
+		await expect(Message.encode(w, (w) => w.write(body), AuthOk.id)).rejects.toThrow("message too large");
+	});
+	expect((await r.readAll()).byteLength).toBe(0);
 });
 
 test("only valid, canonical patterns decode", async () => {
