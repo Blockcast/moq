@@ -1829,7 +1829,11 @@ struct FrontierState {
 
 /// A track feeding a [`Frontier`], with the produced bytes already sampled.
 struct Source {
+	// Only liveness: once dead, the track can never produce again.
 	track: Weak<cache::Track>,
+	// Strong, so the bytes a track produced before it died are still read, however
+	// its last handles and this frontier's last reference race to drop.
+	production: Arc<Production>,
 	sampled: u64,
 }
 
@@ -1859,20 +1863,16 @@ impl Frontier {
 	pub(crate) fn watch(&self, track: &Arc<cache::Track>) {
 		let Some(inner) = &self.0 else { return };
 		let mut state = inner.state.lock().expect("stats frontier poisoned");
-		// Only a live source can match: a dead one's address may be reused.
-		if state
-			.sources
-			.iter()
-			.any(|s| s.track.upgrade().is_some_and(|live| Arc::ptr_eq(&live, track)))
-		{
+		let production = track.production();
+		if state.sources.iter().any(|s| Arc::ptr_eq(&s.production, production)) {
 			return;
 		}
-		let production = track.production();
 		if state.acked.is_none() {
 			state.acked = Production::load(&production.newest);
 		}
 		state.sources.push(Source {
 			track: Arc::downgrade(track),
+			production: production.clone(),
 			sampled: production.bytes.load(Ordering::Relaxed),
 		});
 	}
@@ -1882,18 +1882,14 @@ impl Frontier {
 	pub(crate) fn unwatch(&self, track: &Arc<cache::Track>) {
 		let Some(inner) = &self.0 else { return };
 		let mut state = inner.state.lock().expect("stats frontier poisoned");
+		let production = track.production();
 		let mut unsampled = 0;
 		state.sources.retain(|s| {
-			let Some(live) = s.track.upgrade() else { return false };
-			if !Arc::ptr_eq(&live, track) {
+			if !Arc::ptr_eq(&s.production, production) {
 				return true;
 			}
 			// What it produced before the cap reached this reader: keep it for the next sample.
-			unsampled += live
-				.production()
-				.bytes
-				.load(Ordering::Relaxed)
-				.saturating_sub(s.sampled);
+			unsampled += production.bytes.load(Ordering::Relaxed).saturating_sub(s.sampled);
 			false
 		});
 		state.unsampled += unsampled;
@@ -1917,11 +1913,10 @@ impl FrontierInner {
 		let mut newest = None;
 		let mut first: Option<Duration> = None;
 		state.sources.retain_mut(|source| {
-			// Only this Weak outliving the track means it can never produce again.
-			let Some(track) = source.track.upgrade() else {
-				return false;
-			};
-			let production = track.production();
+			// Checked before reading: every writer holds the track, so a dead one has
+			// already recorded everything it ever will, and this read is its last.
+			let live = source.track.strong_count() > 0;
+			let production = &source.production;
 			// Acquire pairs with `Production::record`: the edges read below cover these bytes.
 			let bytes = production.bytes.load(Ordering::Acquire);
 			weight += bytes.saturating_sub(source.sampled);
@@ -1930,7 +1925,7 @@ impl FrontierInner {
 			if let Some(at) = Production::load(&production.first) {
 				first = Some(first.map_or(at, |first| first.min(at)));
 			}
-			true
+			live
 		});
 		let newest = newest?;
 		// Opened before the track produced anything: its first frame is where the
@@ -3074,8 +3069,8 @@ mod lag_tests {
 	}
 
 	/// The egress lag bytes recorded so far, without ticking the sampler.
-	fn recorded(h: &Harness) -> u64 {
-		h.stats
+	fn recorded(stats: &Registry) -> u64 {
+		stats
 			.snapshot()
 			.traffic()
 			.into_iter()
@@ -3100,7 +3095,7 @@ mod lag_tests {
 		// nothing to the retired totals.
 		h.produce();
 		h.stats.report(&mut Report::default());
-		assert_eq!(recorded(&h), GROUP_BYTES);
+		assert_eq!(recorded(&h.stats), GROUP_BYTES);
 	}
 
 	#[test]
@@ -3132,10 +3127,38 @@ mod lag_tests {
 		let delivery = Harness::write(&sub, &h.produce());
 		drop(sub);
 		// The delivery still holds the frontier, so it has not closed yet.
-		assert_eq!(recorded(&h), 0);
+		assert_eq!(recorded(&h.stats), 0);
 
 		drop(delivery);
-		assert_eq!(recorded(&h), GROUP_BYTES);
+		assert_eq!(recorded(&h.stats), GROUP_BYTES);
+	}
+
+	#[test]
+	fn the_last_subscriber_samples_a_track_its_own_drop_releases() {
+		let mut h = Harness::new();
+		let sub = h.subscribe();
+		h.produce();
+		// The producer is gone, so the subscriber holds the last reference to the track.
+		drop(h.track);
+		drop(h.broadcast);
+
+		drop(sub);
+		assert_eq!(recorded(&h.stats), GROUP_BYTES);
+	}
+
+	#[test]
+	fn an_in_flight_delivery_samples_a_track_that_already_closed() {
+		let mut h = Harness::new();
+		let sub = h.subscribe();
+		let delivery = Harness::write(&sub, &h.produce());
+		drop(h.track);
+		drop(h.broadcast);
+		drop(sub);
+		assert_eq!(recorded(&h.stats), 0);
+
+		// The track died with the subscriber; the delivery still owes its bytes.
+		drop(delivery);
+		assert_eq!(recorded(&h.stats), GROUP_BYTES);
 	}
 
 	#[test]
