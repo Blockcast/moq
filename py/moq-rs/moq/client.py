@@ -134,13 +134,14 @@ class Client:
     async def __aexit__(self, *exc) -> None:
         self._publisher = None
         self._consumer = None
-        if self._session is not None:
-            self._session.shutdown()
+        try:
+            if self._session is not None:
+                await self._session.shutdown()
+        finally:
             self._session = None
-        if self._inner is not None:
-            self._inner.cancel()
-            self._inner = None
-        self._session = None
+            if self._inner is not None:
+                self._inner.cancel()
+                self._inner = None
 
     def create_broadcast(self, path: str) -> BroadcastProducer:
         """Create an unannounced broadcast at ``path``, invisible until announced. Announce it after populating tracks.

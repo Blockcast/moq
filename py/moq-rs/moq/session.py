@@ -27,7 +27,7 @@ class Session:
         return self
 
     async def __aexit__(self, *exc) -> None:
-        self.shutdown()
+        await self.shutdown()
 
     async def closed(self) -> None:
         """Wait until the session is over.
@@ -65,9 +65,9 @@ class Session:
         """Close the session with the given error code."""
         self._inner.cancel(code)
 
-    def shutdown(self) -> None:
-        """Graceful shutdown; equivalent to `cancel(0)` (0 means no error)."""
-        self._inner.shutdown()
+    async def shutdown(self) -> None:
+        """Drain finished tracks within one second, raising if delivery times out."""
+        await self._inner.shutdown()
 
     def publish(self) -> OriginProducer:
         """The publish-side origin: where local broadcasts are advertised to

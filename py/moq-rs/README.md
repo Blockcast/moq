@@ -143,7 +143,7 @@ client = moq.Client(
   - `.cancel()`. Cancel an in-flight `accept()`/`reject()` call.
 - **`Session`**. An established connection. Holding it keeps the connection alive; it is also an `async with` context manager that shuts down on exit.
   - `await .closed()`. Wait until the session closes.
-  - `.cancel(code)`, `.shutdown()`. Close with an error code, or gracefully (code 0).
+  - `.cancel(code)`, `await session.shutdown()`. Cancel immediately, or drain finished tracks within one second, raising on failure.
   - `.publish() → OriginProducer`, `.consume() → OriginConsumer`. The wired origin sides.
   - `.stats() → ConnectionStats`. Snapshot RTT, bandwidth estimates, and byte/packet counters.
   - `await .status() → ConnectionStatus`, `.epoch()`. Watch reconnects; the epoch counts connections, 1 on the first.
