@@ -130,17 +130,19 @@ export class Producer {
 	 * continue it. Call it when the timeline is about to jump, e.g. an encoder pausing for lack of
 	 * demand or switching source; the next keyframe already rolls the group over on its own.
 	 *
-	 * `end` is where the content stops, estimated from the frame cadence when omitted. After closing
-	 * the group, this publishes a marker group of one empty frame at `end`, or at the live edge
-	 * without one. Without the marker, a group's reach runs to its successor's first frame, so the
+	 * `end` is where the content stops. Without one the group closes with no end estimated from the
+	 * frame cadence, since whatever resumes may land sooner than one frame later and an end past it
+	 * reads as a rewind. After closing the group, this publishes a marker group of one empty frame at
+	 * `end`, or at the live edge without one. Without the marker, a group's reach runs to its successor's first frame, so the
 	 * group before a pause reads as live until whatever resumes it, and a subscriber joining
 	 * mid-break is handed that stale media. The marker bounds it, and it is the latest group a
 	 * joiner lands on. Data tracks only close the group, since an empty payload is data. No marker
 	 * is written until a frame follows the last one. Throws if `end` precedes the last video frame.
 	 */
 	discontinuity(end?: Time.Micro) {
+		// Nothing is measured across the break, so a missing end has no cadence to estimate from.
+		if (end === undefined) this.#interval = undefined;
 		this.#close(end);
-		// Nothing is measured across the break.
 		this.#interval = undefined;
 		const timestamp = end ?? this.#liveEdge;
 		if (this.#format.kind === "data" || this.#marked || timestamp === undefined) return;

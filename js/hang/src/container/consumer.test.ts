@@ -284,6 +284,32 @@ test("Legacy Producer discontinuity marks the break at the caller's end", async 
 	]);
 });
 
+test("Legacy Producer discontinuity writes no end estimated from the cadence", async () => {
+	const track = new Track.Producer("test");
+	const subscriber = replay(track);
+	const producer = new LegacyProducer(track, new LegacyFormat("video"));
+	for (const [index, timestamp] of [0, 33_000, 66_000].entries()) {
+		producer.encode(new Uint8Array([1]), timestamp as Time.Micro, index === 0);
+	}
+	producer.discontinuity();
+	// The capture swap resumes sooner than one frame later: no end past it, so no rewind.
+	producer.encode(new Uint8Array([1]), 80_000 as Time.Micro, true);
+	producer.close();
+
+	expect(await readGroups(subscriber, 2)).toEqual([
+		[
+			0,
+			[
+				[0, 1],
+				[33_000, 1],
+				[66_000, 1],
+			],
+		],
+		[1, [[66_000, 0]]],
+		[2, [[80_000, 1]]],
+	]);
+});
+
 test("Legacy Producer discontinuity marks nothing on a data track or before any frame", async () => {
 	const data = new Track.Producer("data");
 	const producer = new LegacyProducer(data, new LegacyFormat("data"));
