@@ -96,16 +96,16 @@ keep it in the payload.
 telemetry.append(moq_net::Timed::from(packet).at(received_at))?;
 ```
 
-The fMP4, MPEG-TS, and FLV importers publish the source's own timestamps
+The fMP4, MPEG-TS, FLV, and MKV importers publish the source's own timestamps
 (MPEG-TS after unwrapping its 33-bit PTS; fMP4 passthrough keeps each `tfdt`)
 and anchor the catalog's broadcast clock instead: the first frame's timestamp
 maps to the time it arrived, and every track of the input, like every importer
 sharing the catalog, keeps that one mapping. A clock set with
 `Config::with_clock` is never re-anchored, for a recording whose zero names its
-real start. An fMP4 or FLV source that rewinds its timestamps, such as a
-restarted encoder, ends the import with an error; republish it as a new
-broadcast. MPEG-TS instead continues a looping source forward from each track's
-live edge.
+real start. A source that rewinds its timestamps, such as a restarted encoder
+or a looping file wrapping to the top, ends the import with an error, flagged
+MPEG-TS discontinuity or not; republish it as a new broadcast. A flagged
+MPEG-TS discontinuity that jumps forward continues the broadcast.
 
 ```bash
 cargo add moq-mux

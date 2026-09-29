@@ -377,19 +377,10 @@ where
 
 	/// The exclusive presentation end earlier groups have reached, if any.
 	///
-	/// A later [`write`](Self::write) below this is refused. Trusted sources that must
-	/// re-anchor (a PES resync, a capture restart) clamp to it rather than rewind.
+	/// A later [`write`](Self::write) below this is refused. A source with no timestamp of its
+	/// own (a section, a PES without PTS) lands on it.
 	pub fn live_edge(&self) -> Option<moq_net::Timestamp> {
 		self.live_edge
-	}
-
-	/// The lowest timestamp the next [`write`](Self::write) accepts: the live edge, or for a
-	/// keyframe, the edge once the group it closes is counted too.
-	pub(crate) fn floor(&self, keyframe: bool) -> Option<moq_net::Timestamp> {
-		match (self.live_edge, self.end.filter(|_| keyframe)) {
-			(Some(edge), Some(end)) if timestamp_lt(edge, end) => Some(end),
-			(edge, end) => edge.or(end),
-		}
 	}
 
 	/// Write a frame to the track.

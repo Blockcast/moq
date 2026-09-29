@@ -248,7 +248,7 @@ impl<E: CatalogExt> Config<E> {
 	///
 	/// The clock's wall mapping is advertised at the catalog root and fixed for the broadcast.
 	/// Without this, the catalog starts a fresh clock, and a container importer (fMP4, MPEG-TS,
-	/// FLV) re-anchors it on its first timestamp, before writing any frame, so the stream's own
+	/// FLV, MKV) re-anchors it on its first timestamp, before writing any frame, so the stream's own
 	/// timestamps map to the arrival time. Pass one whose PTS zero names the content's real start
 	/// when importing a recording.
 	pub fn with_clock(mut self, clock: crate::Clock) -> Self {
