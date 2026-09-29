@@ -12,5 +12,5 @@ Use per-stream filters (`-filter:v:0`, `-filter:v:1`), scaled to 720p and
 144p to match `hls`. Scaling the 720p source up to 1080p couldn't encode in
 real time on a dev machine. The recipe body moves to `sh/demo/serve-hls.sh`
 when the [tooling line](/quest/m1/tooling/README.md) lands; fix it wherever it
-lives. Check it by fetching both playlists and comparing each rendition's
-`RESOLUTION`.
+lives. Check it by fetching `master.m3u8` and comparing the two renditions'
+`RESOLUTION` attributes.
