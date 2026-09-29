@@ -71,6 +71,7 @@ macro_rules! prefix_cases {
 prefix_cases!(
 	an_unrepresentable_grant_is_unsupported,
 	an_unrepresentable_update_revokes_only_its_token,
+	a_grant_too_large_for_one_message_is_unsupported,
 );
 
 #[tokio::test]
@@ -795,6 +796,47 @@ async fn an_unrepresentable_update_revokes_only_its_token(version: &'static str)
 		t1.closed().await;
 		assert_eq!(t1.grant().peek(), None);
 		wait_for(pair.client.auth().grant(), |g| g == &Some(grant(&["a"], &[]))).await;
+		assert_eq!(pair.client_transport.close_reason(), None);
+	})
+	.await
+	.expect("timed out");
+}
+
+/// A grant that fits no single AUTH_OK is withheld, never trimmed: the presenter is told
+/// it is unsupported, nothing of the message reaches the wire, and the session and the
+/// token that did fit are untouched.
+async fn a_grant_too_large_for_one_message_is_unsupported(version: &'static str) {
+	// Past the u16 message size. The moq-lite ceiling is 64 MiB, too slow to build here;
+	// `lite::auth` tests it on the encoder.
+	let (count, len) = (20, 4_000);
+	within(async {
+		let mut pair = connect(Options {
+			version: Some(version),
+			client_publish: Some(produce_origin(2)),
+			server_subscribe: Some(produce_origin(1)),
+			server_requests: true,
+			..Default::default()
+		})
+		.await;
+		let huge: Patterns = (0..count)
+			.map(|i| Pattern::subtree(&format!("{i}{}", "x".repeat(len))).unwrap())
+			.collect();
+		let mut issued = serve(pair.requests.take().unwrap(), move |token| match token {
+			b"" => Some(grant(&["a"], &[])),
+			b"huge" => Some(Grant {
+				publish: huge.clone(),
+				subscribe: Patterns::new(),
+				expires: None,
+			}),
+			_ => None,
+		});
+		let (_, _setup) = issued.recv().await.unwrap();
+		assert_eq!(granted(&pair.client).await, grant(&["a"], &[]));
+
+		let err = pair.client.auth().add("huge").await.err().expect("too large");
+		assert!(matches!(err, Error::Unsupported), "{err:?}");
+		// No AUTH_OK for it reached the wire: the union is still just the setup grant.
+		assert_eq!(pair.client.auth().grant().peek(), Some(grant(&["a"], &[])));
 		assert_eq!(pair.client_transport.close_reason(), None);
 	})
 	.await

@@ -479,7 +479,12 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 				reason,
 			}),
 		};
-		stream.writer.buffer(&msg)
+		// A grant that cannot be encoded is withheld, never trimmed. Nothing is buffered, and
+		// the reset that follows reads as "unsupported" to the presenter.
+		stream.writer.buffer(&msg).map_err(|err| {
+			tracing::debug!(%err, "auth reply cannot be encoded; refusing the token");
+			Error::Unsupported
+		})
 	}
 }
 

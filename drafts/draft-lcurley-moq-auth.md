@@ -109,6 +109,7 @@ A prefix with no fields covers every namespace, and a count of zero grants none.
 
 An acceptor whose grant is not a union of prefixes, such as one exact namespace without its descendants, MUST NOT widen it to a prefix.
 It sends AUTH_ERROR with NOT_SUPPORTED instead: as the first reply this refuses the token, and after an AUTH_OK it revokes the earlier grant.
+The same holds for a grant too large to encode as one AUTH_OK: an acceptor MUST NOT trim it, and nothing of the AUTH_OK is written.
 Other tokens on the session are unaffected.
 
 
