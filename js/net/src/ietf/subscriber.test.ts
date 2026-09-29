@@ -615,11 +615,11 @@ test("a PUBLISH_NAMESPACE repricing is acknowledged in place", async () => {
 });
 
 /**
- * An update whose first Hop ID differs names a different publisher, whose content is not
- * continuous with what is held. The draft has the sender withdraw and advertise again
- * instead, so the update is refused and the stream closed, which is that withdrawal.
+ * An update whose first Hop ID differs names a different publisher. It still updates the
+ * advertisement in place and the stream stays open. A broadcast already held keeps
+ * draining, while the next consume starts fresh.
  */
-test("a PUBLISH_NAMESPACE update that changes the publisher is refused", async () => {
+test("a PUBLISH_NAMESPACE update that changes the publisher applies in place", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session, cluster: { self: SELF, peer: PEER } });
@@ -642,16 +642,27 @@ test("a PUBLISH_NAMESPACE update that changes the publisher is refused", async (
 	if (!peer) throw new Error("no PUBLISH_NAMESPACE stream");
 	expect(await peer.reader.u53()).toBe(RequestOk.id);
 	await RequestOk.decode(peer.reader, VERSION);
+	const held = subscriber.consume(Path.from("theirs"));
 
 	await peer.writer.u53(PublishNamespaceUpdate.id);
 	await new PublishNamespaceUpdate({ requestId: 3n, update: { hops: [HopSchema.parse(8n), PEER] } }).encode(
 		peer.writer,
 		VERSION,
 	);
-	expect(await peer.reader.u53()).toBe(RequestError.id);
-	await RequestError.decode(peer.reader, VERSION);
+	expect(await peer.reader.u53()).toBe(RequestOk.id);
+	await RequestOk.decode(peer.reader, VERSION);
+	expect(await announced.next()).toMatchObject({
+		prefix: Path.from("theirs"),
+		kind: "updated",
+		route: { hops: [HopSchema.parse(8n), PEER] },
+	});
 
-	// The refusal closed the stream, which withdrew the advertisement.
+	const fresh = subscriber.consume(Path.from("theirs"));
+	expect(fresh.closed).not.toBe(held.closed);
+	expect(held.closed.peek()).toBeUndefined();
+
+	// Still announced: the stream ending is what retracts it.
+	peer.close();
 	await handler;
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "retracted" });
 });

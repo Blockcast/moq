@@ -1082,30 +1082,10 @@ where
 			// An omitted parameter keeps its value, so the update lands on what the peer
 			// already advertised. The parameters exist only on a session that negotiated
 			// the extension; anywhere else they are the peer's violation.
+			// A different original publisher applies in place too: the origin drains what
+			// the old one already serves and never splices the two.
 			held = match &held {
-				Some(current) => {
-					// A different original publisher is a different advertisement, which
-					// the draft has withdrawn and made again: applying it in place would
-					// carry subscriptions across content that is not continuous. Refusing
-					// the update closes the stream, which is the withdrawal the peer owed.
-					if let Some(hops) = &msg.hops
-						&& hops.hops().iter().next() != current.hops.hops().iter().next()
-					{
-						tracing::warn!(%path, "publish_namespace update changes the publisher");
-						self.write_error(
-							stream,
-							msg.request_id,
-							&Error::Unsupported,
-							"a new publisher is a new advertisement",
-						)
-						.await?;
-						if stream.writer.finish().is_ok() {
-							let _ = stream.writer.closed().await;
-						}
-						return Ok(());
-					}
-					Some(msg.apply(current))
-				}
+				Some(current) => Some(msg.apply(current)),
 				None if msg.hops.is_some() || msg.cost.is_some() => {
 					tracing::warn!(%path, "cluster parameters on a session that negotiated none");
 					return Err(Error::ProtocolViolation);
@@ -4716,8 +4696,7 @@ mod tests {
 	}
 
 	/// An update replaces the advertisement in place: the route moves, the refcount does
-	/// not, and the source is not torn down. Only a changed original publisher replaces
-	/// it, since that content is not interchangeable.
+	/// not, and the source is not torn down.
 	#[tokio::test]
 	async fn cluster_update_replaces_in_place() {
 		let (mut subscriber, origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
@@ -5234,12 +5213,11 @@ mod tests {
 		assert_eq!(replies(&log, ietf::RequestOk::ID), 0);
 	}
 
-	/// An update whose first Hop ID differs names a different publisher, whose content
-	/// is not continuous with what is held. The draft has the sender withdraw and
-	/// advertise again instead, so the update is refused and the stream closed, which
-	/// is that withdrawal.
+	/// An update whose first Hop ID differs names a different publisher. It still
+	/// replaces the advertisement in place and the stream stays open: the origin, not the
+	/// session, keeps the two publishers' content apart.
 	#[tokio::test]
-	async fn an_update_that_changes_the_publisher_is_refused() {
+	async fn an_update_that_changes_the_publisher_applies_in_place() {
 		let self_origin = crate::Hop::new(5).unwrap();
 		let peer = peer_9();
 		let (clean, _) = clean_and_looped();
@@ -5255,7 +5233,6 @@ mod tests {
 
 		let path = crate::Path::new("room/host").to_owned();
 		let mut attached = true;
-		let mut result = None;
 		{
 			let mut run = std::pin::pin!(subscriber.run_publish_namespace_updates(
 				&mut stream,
@@ -5265,20 +5242,20 @@ mod tests {
 				&mut attached,
 			));
 			for _ in 0..20 {
-				if let std::task::Poll::Ready(res) = futures::poll!(run.as_mut()) {
-					result = Some(res);
-					break;
-				}
+				assert!(
+					futures::poll!(run.as_mut()).is_pending(),
+					"a publisher change must not close the stream"
+				);
 				settle().await;
 			}
 		}
 
-		assert!(matches!(result, Some(Ok(()))), "refused cleanly, got {result:?}");
-		assert_eq!(replies(&log, ietf::RequestError::ID), 1, "REQUEST_ERROR went out");
-		assert_eq!(replies(&log, ietf::RequestOk::ID), 0);
-		let route = routed_now(&consumer, "room/host").expect("the caller releases the route");
+		assert!(attached, "the advertisement stays attached");
+		assert_eq!(replies(&log, ietf::RequestOk::ID), 1, "REQUEST_OK went out");
+		assert_eq!(replies(&log, ietf::RequestError::ID), 0);
+		let route = routed_now(&consumer, "room/host").expect("still routed");
 		let hops: Vec<_> = route.hops.iter().map(|h| h.id()).collect();
-		assert_eq!(hops, vec![7, 9], "the held path was not replaced");
+		assert_eq!(hops, vec![8, 9], "the held path was replaced");
 	}
 
 	/// A second PUBLISH_NAMESPACE on the stream that already carries one is not an

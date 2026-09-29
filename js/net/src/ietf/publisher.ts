@@ -1150,7 +1150,7 @@ export class Publisher {
 	}
 
 	/**
-	 * Reprice a namespace the peer holds: REQUEST_UPDATE on the request that carries it,
+	 * Update a namespace the peer holds: REQUEST_UPDATE on the request that carries it,
 	 * with only the parameters that changed, then its answer.
 	 *
 	 * Waiting for the answer keeps one update outstanding per stream, which satisfies any
@@ -1160,16 +1160,10 @@ export class Publisher {
 	 * finished too, and an unanswered update is dropped abruptly, since a peer that ignored
 	 * it cannot be assumed to hold either price. Either way the retry re-offers it fresh.
 	 *
-	 * A different original publisher is not an update. draft-lcurley-moq-cluster has it
-	 * withdrawn and advertised again, so the receiver never reads two publishers' content
-	 * as one continuous stream. A NAMESPACE has no such rule and is simply sent again.
+	 * A different original publisher is an update like any other: the receiver drains what
+	 * it already serves from the old one and never splices the two.
 	 */
 	async #update(path: Path.Valid, requests: Requests, { from, to }: Reprice): Promise<Answer> {
-		if (from.hops[0] !== to.hops[0]) {
-			await this.#withdraw(path, requests);
-			return await this.#advertise(path, requests, to);
-		}
-
 		const request = requests.get(path);
 		if (!request) return "dropped";
 

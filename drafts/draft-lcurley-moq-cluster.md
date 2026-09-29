@@ -229,7 +229,8 @@ An endpoint MUST NOT open a second stream for an advertisement it already mainta
 
 An update replaces the old parameters atomically, so a receiver MUST NOT tear down subscriptions or drop cached state because one arrived.
 If the first HOP_PATH entry is unchanged the content is continuous and subscriptions MAY resume on the new route at a group boundary, even when that entry is 0: there is one advertisement, and its stream is the continuity.
-If the publisher did change, the endpoint MUST withdraw the advertisement (PUBLISH_NAMESPACE_DONE or NAMESPACE_DONE) and advertise again rather than update in place.
+If the first entry changed, the publisher changed, and the endpoint still sends an ordinary update.
+The receiver keeps each subscription it is already serving on the old source until that source ends, MUST NOT resume or splice it onto the updated route, and serves new requests from the updated route without state cached from the old publisher.
 
 The expected update is a ROUTE_COST change, which is how a relay signals that it started or stopped carrying the namespace.
 
@@ -267,7 +268,7 @@ Under this extension an advertisement is a path, so a session advertises a names
 
 A receiver MAY still hold paths to several publishers of one namespace and choose between them as it sees fit: serve from the cheapest and move to the next when it fails.
 A refusal moves to another publisher only as {{selection}} allows: once, and only for NO_CAPACITY.
-The advertised path and the served source stay the same publisher: a relay that moves to another MUST withdraw its advertisement and advertise the new path ({{updating}}), so the first Hop ID downstream always names the publisher whose Objects flow.
+A relay that moves to another publisher MUST update its advertisement to the new path ({{updating}}), so the first Hop ID downstream names the publisher that new subscriptions reach.
 Moving between distinct publishers is a discontinuity: their groups are not one sequence, so a subscriber sees an unrelated Location, and a FETCH that succeeds against one may fail against the other.
 
 Redundant publishers of the same content avoid this by sharing a Hop ID ({{hop-ids}}), which makes their paths interchangeable and lets a subscription fail over at a group boundary.
@@ -330,6 +331,7 @@ This document requests one registration in the "REQUEST_ERROR Codes" registry.
 ## moq-cluster-02
 - Defined request resolution against the longest covering prefix and the NO_CAPACITY refusal with its single re-resolution; any other refusal is terminal, including between several publishers of one namespace.
 - A relay does not advertise a namespace because it resolved it; the publisher advertises the concrete namespace once producing.
+- A change of original publisher is an ordinary update instead of a withdrawal and a new advertisement. Subscriptions already served drain the old source; new requests take the updated route.
 
 ## moq-cluster-01
 - Assigned identities are local selection state and MUST NOT be forwarded.

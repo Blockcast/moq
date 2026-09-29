@@ -84,7 +84,10 @@ in flight alone: each track runs to its own end or failure. On moq-lite 05 and
 newer, a clean end requires `SUBSCRIBE_END` before the publisher's FIN. A FIN
 without that declaration fails the subscription with `ProtocolViolation`; older
 moq-lite versions use FIN alone. moq-transport requires `PUBLISH_DONE` before FIN.
-moq-transport sessions behave the same when a namespace is withdrawn.
+moq-transport sessions behave the same when a namespace is withdrawn. A route
+update that changes its first hop, the original publisher, is not a retraction:
+subscriptions in flight drain the old publisher, and new requests resolve
+through the new one.
 
 ### Hidden broadcasts
 

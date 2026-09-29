@@ -242,10 +242,14 @@ export class Subscriber {
 	 * Replace the stored route for a path that is already announced. A no-op when the
 	 * hops and cost did not change; otherwise consumers hear `updated` so a forwarder
 	 * can reprice without retracting.
+	 *
+	 * A new first hop is a new publisher: holders keep their broadcast to drain, but the
+	 * next consume starts fresh rather than reusing the old publisher's cached track info.
 	 */
 	#updateAnnounce(path: Path.Valid, route: Route) {
 		const existing = this.#announced.get(path);
 		if (existing === undefined || routesEqual(existing.route, route)) return;
+		if (existing.route.hops[0] !== route.hops[0]) this.#consumes.evict(path);
 		existing.route = route;
 		console.debug(`announced: broadcast=${path} rerouted`);
 		for (const [consumer, filter] of this.#announcedConsumers) {
@@ -895,20 +899,7 @@ export class Subscriber {
 						throw new ProtocolViolation("cluster parameters on a session that negotiated none");
 					}
 				} else {
-					// A different original publisher is a different advertisement, which the
-					// draft has withdrawn and made again: its content is not continuous with
-					// what is held. Refusing the update closes the stream, which is that
-					// withdrawal.
-					if (update.update.hops !== undefined && update.update.hops[0] !== held.hops[0]) {
-						console.warn(`publish_namespace update changes the publisher: broadcast=${path}`);
-						await stream.writer.u53(RequestError.id);
-						await new RequestError({
-							errorCode: toRequestCode("not_supported", "publish_namespace", version),
-							reasonPhrase: "a new publisher is a new advertisement",
-						}).encode(stream.writer, version);
-						stream.close();
-						return;
-					}
+					// A different original publisher applies in place too, as it does inline.
 					held = Cluster.apply(held, update.update);
 				}
 

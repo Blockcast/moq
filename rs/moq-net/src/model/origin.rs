@@ -780,7 +780,8 @@ impl RouteEntry {
 			Pin::Any => true,
 			Pin::Local => self.local,
 			Pin::Publisher(first) => self.hops.iter().next() == Some(&first),
-			Pin::Route(id) => self.id == id,
+			// An update that names a publisher is a different one, even in place.
+			Pin::Route(id) => self.id == id && self.hops.iter().next().is_none_or(|first| *first == Hop::UNKNOWN),
 		}
 	}
 
@@ -1821,6 +1822,13 @@ impl AnnounceProducer {
 			let Some(entry) = shared.routes.entry_mut(prefix, *id) else {
 				return Err(Error::Closed);
 			};
+			// A new first hop is a new publisher: a later request goes back to the
+			// handler rather than joining what the old one served.
+			if entry.hops.iter().next() != route.hops.iter().next()
+				&& let Some(server) = &entry.server
+			{
+				drop(std::mem::take(&mut server.lock().served));
+			}
 			entry.hops = route.hops.clone();
 			entry.stale = stale;
 			entry.cost = route.cost;
@@ -3371,8 +3379,10 @@ impl Dynamic {
 	/// Re-price the route in place: replace its hops and cost.
 	///
 	/// Consumers observe another active update for the same prefix; sessions
-	/// forward it as a restart, so route churn never looks like new content. The
-	/// prefix is fixed at announce time: to move a route, drop this and call
+	/// forward it as a restart, so route churn never looks like new content. A
+	/// new first hop is a new publisher: broadcasts already served from the old
+	/// one drain, and later requests reach the handler again. The prefix is fixed
+	/// at announce time: to move a route, drop this and call
 	/// [`Producer::dynamic`] again. Fails with [`Error::Closed`] once the origin's
 	/// [`Driver`] has been dropped.
 	pub fn update(&self, route: Route) -> Result<(), Error> {
@@ -6826,6 +6836,86 @@ mod tests {
 		let replacement = broadcast::Info::new().produce();
 		request.accept(&replacement);
 		pending.await.expect("re-request resolves through the rival");
+	}
+
+	/// A route updated in place to a new first hop names a new publisher, whether the
+	/// front started anonymous or named. The in-flight subscription drains the old copy
+	/// until it ends and never splices the new one; a new request gets a fresh front
+	/// through the new publisher, free of the old broadcast's track info.
+	#[tokio::test]
+	async fn a_first_hop_update_drains_the_old_publisher() {
+		for first in [&[][..], &[0][..], &[10][..]] {
+			let (mut rig, server, _source) = ResumeRig::new(first).await;
+			server.update(Route::default().with_hops(hops(&[11]))).unwrap();
+
+			// The old copy keeps flowing to the subscription already reading it.
+			let mut group = rig.incumbent_track.append_group().unwrap();
+			group.write_frame(crate::Timestamp::ZERO, b"draining".as_ref()).unwrap();
+			group.finish().unwrap();
+			let mut group = next_group(&mut rig.subscription)
+				.await
+				.expect("the in-flight subscription survives the update")
+				.expect("track ended early");
+			let frame = group.read_frame().await.expect("read frame").expect("frame");
+			assert_eq!(&frame.payload[..], b"draining", "first hop {first:?}");
+
+			// A new request is a new broadcast from the new publisher, whose track info
+			// differs from what the old front cached.
+			let consumer = rig.producer.consume();
+			let pending = consumer.request_broadcast("room/alice");
+			let request = queued(&server).await;
+			let replacement = broadcast::Info::new().produce();
+			let track = replacement
+				.create_track("video", track::Info::default().with_priority(7))
+				.unwrap();
+			let mut group = track.append_group().unwrap();
+			group.write_frame(crate::Timestamp::ZERO, b"new".as_ref()).unwrap();
+			group.finish().unwrap();
+			request.accept(&replacement);
+
+			let resolved = pending.await.expect("resolves through the new publisher");
+			assert!(
+				!resolved.is_clone(&rig.resolved),
+				"first hop {first:?} joined the old front"
+			);
+			let mut fresh = resolved
+				.track("video")
+				.unwrap()
+				.subscribe(None)
+				.await
+				.expect("the old publisher's track info does not apply");
+			let mut group = next_group(&mut fresh)
+				.await
+				.expect("recv group")
+				.expect("track ended early");
+			let frame = group.read_frame().await.expect("read frame").expect("frame");
+			assert_eq!(&frame.payload[..], b"new");
+
+			// The old copy ending ends the drained subscription, without a group from
+			// the new publisher.
+			rig.incumbent_track.finish().unwrap();
+			let end = next_group(&mut rig.subscription).await;
+			assert!(
+				!matches!(end, Ok(Some(_))),
+				"first hop {first:?} spliced the new publisher into a live subscription"
+			);
+		}
+	}
+
+	/// A named front whose route moves to a new publisher resumes through another route
+	/// from its own publisher, never through the updated one.
+	#[tokio::test]
+	async fn a_first_hop_update_resumes_through_the_same_publisher() {
+		let (mut rig, incumbent, _source) = ResumeRig::new(&[10]).await;
+		let standby_server = rig.standby(&[10, 20]);
+
+		incumbent.update(Route::default().with_hops(hops(&[11]))).unwrap();
+
+		assert_resumes(&mut rig, &standby_server).await;
+		assert!(
+			incumbent.poll_requested_broadcast(&kio::Waiter::noop()).is_pending(),
+			"the front never asks the new publisher"
+		);
 	}
 
 	#[tokio::test]

@@ -29,6 +29,12 @@ are spliced in. If no compatible source remains, the track fails with
 `Unsupported`. New immutable properties require a new track name or broadcast
 identity.
 
+A route whose original publisher (its first hop) changes is updated in place on
+both wire protocols, so the broadcast never briefly vanishes downstream.
+Subscriptions already in flight keep draining the old publisher until it ends
+and are never spliced onto the new one. New requests resolve through the updated
+route as a fresh broadcast, without the old publisher's track properties.
+
 ## Topology
 
 List the peers each relay dials. That's the whole topology.

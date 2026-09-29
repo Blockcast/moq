@@ -1093,7 +1093,7 @@ test("a hop path change behind the same publisher is one REQUEST_UPDATE carrying
 
 /**
  * NAMESPACE has no REQUEST_UPDATE; the receiver reads a repeat as a replacement. That holds
- * for a new original publisher too, as in Rust: only a PUBLISH_NAMESPACE is withdrawn for one.
+ * for a new original publisher too.
  */
 test.each([
 	["a hop path and cost change", [VIA, MID], 8n],
@@ -1131,23 +1131,40 @@ test.each([
 });
 
 /**
- * A different broadcast is not a reprice, and on a PUBLISH_NAMESPACE neither is a different
- * original publisher: the cluster draft has that withdrawn and advertised again, so a
- * receiver never reads two publishers' content as one stream.
+ * A different original publisher updates the PUBLISH_NAMESPACE in place, as any other
+ * change does: withdrawing it would make the namespace briefly vanish downstream.
  */
-const RESTARTS = [
-	[
-		"a republish",
-		(origin: OriginProducer, old: BroadcastProducer) => {
-			const next = origin.createBroadcast(Path.from("mine"));
-			next.announce({ hops: [VIA], cost: 4n });
-			old.close();
-		},
-	],
-	["a first-hop change", (_: OriginProducer, old: BroadcastProducer) => old.announce({ hops: [OTHER], cost: 4n })],
-] as const;
+test("a first-hop change is one REQUEST_UPDATE carrying HOP_PATH, not a withdrawal", async () => {
+	const { self, pub, origin, streams, close } = clustered();
+	try {
+		const broadcast = origin.createBroadcast(Path.from("mine"));
+		broadcast.announce({ hops: [VIA], cost: 4n });
+		void pub.runPublishNamespaces();
 
-test.each(RESTARTS)("%s withdraws the PUBLISH_NAMESPACE and advertises again", async (_, restart) => {
+		const stream = await take(streams);
+		await acceptClustered(stream);
+
+		broadcast.announce({ hops: [OTHER], cost: 4n });
+		expect(await readUpdate(stream)).toEqual({ hops: [OTHER, self], cost: undefined });
+		await acceptPublishNamespace(stream);
+
+		const more = watch(stream.reader.done());
+		await flush();
+		expect(more.state).toBe("pending");
+		expect(streams).toHaveLength(0);
+	} finally {
+		close();
+	}
+});
+
+/** A different broadcast is not an update: it withdraws the old one and advertises again. */
+function republish(origin: OriginProducer, old: BroadcastProducer) {
+	const next = origin.createBroadcast(Path.from("mine"));
+	next.announce({ hops: [VIA], cost: 4n });
+	old.close();
+}
+
+test("a republish withdraws the PUBLISH_NAMESPACE and advertises again", async () => {
 	const { pub, origin, streams, close } = clustered();
 	try {
 		const broadcast = origin.createBroadcast(Path.from("mine"));
@@ -1157,7 +1174,7 @@ test.each(RESTARTS)("%s withdraws the PUBLISH_NAMESPACE and advertises again", a
 		const old = await take(streams);
 		await acceptClustered(old);
 
-		restart(origin, broadcast);
+		republish(origin, broadcast);
 
 		// Draft-17+ withdraws with the FIN alone, and the replacement waits for it.
 		expect(await old.reader.done()).toBe(true);
@@ -1184,7 +1201,6 @@ test("a republish withdraws the solicited NAMESPACE and sends it again", async (
 		expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntry.id);
 		await SubscribeNamespaceEntry.decode(subscription.reader, VERSION, true);
 
-		const [, republish] = RESTARTS[0];
 		republish(origin, broadcast);
 
 		expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntryDone.id);
