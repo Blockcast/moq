@@ -298,6 +298,20 @@ pub struct Capture {
 	pub encode: Options,
 }
 
+/// The keyframe requests shared between the [`Control`]s and the [`Driver`].
+///
+/// One lock covers both fields, so a request is either counted before the driver
+/// learns an encoder refuses cuts (and that encoder's opening keyframe serves it),
+/// or refused outright. None can land unserved in between.
+#[derive(Debug, Default)]
+#[cfg(feature = "capture")]
+struct Requests {
+	/// A running count, so the driver coalesces any number between two frames into one.
+	count: u64,
+	/// The backend that cannot force a keyframe, once the driver has opened it.
+	refused: Option<&'static str>,
+}
+
 /// A handle for controlling a running capture publish.
 ///
 /// Clones control the same track. Dropping the final clone stops the [`Driver`]
@@ -305,9 +319,7 @@ pub struct Capture {
 #[derive(Clone, Debug)]
 #[cfg(feature = "capture")]
 pub struct Control {
-	/// A running count of keyframe requests, so the driver coalesces any number
-	/// between two frames into one.
-	cuts: kio::Producer<u64>,
+	requests: kio::Producer<Requests>,
 }
 
 #[cfg(feature = "capture")]
@@ -330,14 +342,14 @@ impl Control {
 			Codec::H265 => ".hev1",
 		};
 		let track = broadcast.unique_track(suffix, catalog.track_info(hang::catalog::PRIORITY.video))?;
-		let cuts = kio::Producer::new(0);
+		let requests = kio::Producer::new(Requests::default());
 		let driver = Driver {
 			track,
 			catalog,
 			options,
-			cuts: cuts.consume(),
+			requests: requests.weak(),
 		};
-		Ok((Self { cuts }, driver))
+		Ok((Self { requests }, driver))
 	}
 
 	/// Request a keyframe, opening a new group at a frame no earlier than this call.
@@ -348,25 +360,37 @@ impl Control {
 	/// encoder at all-IDR; a request that arrives too soon waits rather than being dropped. A
 	/// request while nothing is watching is served by the keyframe every fresh encoder opens with.
 	///
-	/// A backend that cannot force one ends the [`Driver`] with [`Error::CutUnsupported`] rather
-	/// than let the boundary silently slip to the cadence, so only ask when the boundary matters.
-	pub fn cut(&self) {
-		if let Ok(mut cuts) = self.cuts.write() {
-			*cuts = cuts.wrapping_add(1);
+	/// # Errors
+	///
+	/// Returns [`Error::CutUnsupported`] once the driver knows its backend cannot force a
+	/// keyframe, and queues nothing: groups keep falling on the cadence and the publish carries
+	/// on. The startup probe learns this before the first viewer, and each encoder the driver
+	/// reopens updates it, since a reopen can land on a different backend. Before the probe
+	/// finishes nothing is known, and the request is accepted because it is served anyway: no
+	/// frame has been published yet, and the first one out of any encoder is a keyframe.
+	pub fn cut(&self) -> Result<(), Error> {
+		// Only a `close` fails the write, and nothing closes it; the last handle dropping does.
+		let Ok(mut requests) = self.requests.write() else {
+			return Ok(());
+		};
+		if let Some(name) = requests.refused {
+			return Err(Error::CutUnsupported(name));
 		}
+		requests.count = requests.count.wrapping_add(1);
+		Ok(())
 	}
 }
 
 /// The task that captures, encodes, and publishes the track.
 ///
-/// Runs until the track ends, the capture fails, a requested keyframe cannot be forced, or the
-/// final [`Control`] drops.
+/// Runs until the track ends, the capture fails, or the final [`Control`] drops.
 #[cfg(feature = "capture")]
 pub struct Driver<E: CatalogExt = ()> {
 	track: moq_net::track::Producer,
 	catalog: moq_mux::catalog::Producer<E>,
 	options: Capture,
-	cuts: kio::Consumer<u64>,
+	/// Weak, so the driver never keeps the controls' channel open itself.
+	requests: kio::ProducerWeak<Requests>,
 }
 
 #[cfg(feature = "capture")]
@@ -396,10 +420,11 @@ impl<E: CatalogExt> Driver<E> {
 			track,
 			catalog,
 			options,
-			cuts,
+			requests,
 		} = self;
 		let Capture { capture, encode } = options;
 		let clock = catalog.clock();
+		let controls = requests.consume();
 
 		// Open the camera once to find out what it actually negotiated, since a requested size is
 		// only a hint (macOS ignores it outright) and the encoder is built from the mode, not the
@@ -420,13 +445,16 @@ impl<E: CatalogExt> Driver<E> {
 			probe_config.codec = encode.codec;
 			probe_config.kind = encode.kind.clone();
 			probe_config.color = camera.color();
-			probe_config.probe().await
+			let (rendition, mut sink) = probe_config.probe_sink().await?;
+			// Learned here so a caller finds out before the first viewer, not on its first cut.
+			learn(&requests, refusal(&mut sink).await?);
+			Ok::<_, Error>(rendition)
 		};
 		// Every wait below races the controls closing, so an abandoned publish never holds a camera
 		// or a permission prompt open for an owner that is gone.
 		let rendition = tokio::select! {
 			biased;
-			() = cuts.closed() => {
+			() = controls.closed() => {
 				// A track that already ended has nobody left to tell.
 				let _ = track.finish();
 				return Ok(());
@@ -447,8 +475,8 @@ impl<E: CatalogExt> Driver<E> {
 
 		let result = tokio::select! {
 			biased;
-			() = cuts.closed() => Ok(()),
-			result = capture_loop(&mut producer, &demand, &mut source, &capture, &encode, &clock, &cuts) => result,
+			() = controls.closed() => Ok(()),
+			result = capture_loop(&mut producer, &demand, &mut source, &capture, &encode, &clock, &requests) => result,
 		};
 
 		// This runs only when the loop ends on its own (the track is usually already
@@ -580,6 +608,27 @@ async fn apply_estimate(
 	}
 }
 
+/// Whether `sink` refuses cuts, as the name [`Control::cut`] reports it under.
+#[cfg(feature = "capture")]
+async fn refusal(sink: &mut Sink) -> Result<Option<&'static str>, Error> {
+	match sink.check_cut().await {
+		Ok(()) => Ok(None),
+		Err(Error::CutUnsupported(name)) => Ok(Some(name)),
+		Err(err) => Err(err),
+	}
+}
+
+/// Record whether the encoder just opened refuses cuts, returning the request count
+/// its opening keyframe already serves.
+#[cfg(feature = "capture")]
+fn learn(requests: &kio::ProducerWeak<Requests>, refused: Option<&'static str>) -> u64 {
+	// No controls left, so nobody can ask and the driver is on its way out.
+	let Some(producer) = requests.produce() else { return 0 };
+	let Ok(mut requests) = producer.write() else { return 0 };
+	requests.refused = refused;
+	requests.count
+}
+
 /// A dropped or closed track is the normal end of a publish; any other cause is
 /// a real abort (e.g. a transport reset) worth surfacing rather than treating as
 /// a clean exit.
@@ -643,12 +692,13 @@ async fn capture_loop<E: CatalogExt, S: CaptureSource>(
 	capture: &capture::Config,
 	encode: &Options,
 	clock: &moq_mux::Clock,
-	cuts: &kio::Consumer<u64>,
+	requests: &kio::ProducerWeak<Requests>,
 ) -> Result<(), Error> {
 	// This track's claim on the connection. Taken on the first open, because the
 	// negotiated mode is what finally says how much this encoder can ever send, and
 	// held across reopens so the claim doesn't lapse while the camera is closed.
 	let mut reservation: Option<moq_net::bandwidth::Reservation> = None;
+	let counted = requests.consume();
 
 	loop {
 		// Idle until a viewer subscribes; the track ending is a clean exit. The
@@ -686,6 +736,9 @@ async fn capture_loop<E: CatalogExt, S: CaptureSource>(
 		let Some(mut encoder) = wait_capture(producer, demand, Sink::open(&encoder_config)).await? else {
 			continue;
 		};
+		// A reopen can land on another backend than the probe did, so the controls
+		// learn this one's answer before any request is counted against it.
+		let served = learn(requests, refusal(&mut encoder).await?);
 		tracing::info!(encoder = encoder.name(), device = camera.label(), "capturing");
 
 		// A reopen can negotiate a different mode (a display resized while nothing was
@@ -702,7 +755,7 @@ async fn capture_loop<E: CatalogExt, S: CaptureSource>(
 		// backed-off rate from whatever the link was doing last time.
 		let mut rate = Some((reservation.consumer(), rate::Control::new(rate::Policy::new(ceiling))));
 		// Per encoder, so a reopen forgets the old encoder's last keyframe along with it.
-		let mut forced = Cuts::new(*cuts.read());
+		let mut forced = Cuts::new(served);
 
 		loop {
 			// Race the next frame against the last viewer leaving so we release the
@@ -738,10 +791,9 @@ async fn capture_loop<E: CatalogExt, S: CaptureSource>(
 
 			let Some(mut frame) = frame else { break };
 			frame.timestamp = map_capture_timestamp(capture_epoch, frame.timestamp)?;
-			let requests = *cuts.read();
-			if forced.due(requests, frame.timestamp) {
-				// A refusal ends the publish: the caller asked for a boundary this backend cannot
-				// place, and carrying on at the cadence would drop it without a word.
+			let count = counted.read().count;
+			if forced.due(count, frame.timestamp) {
+				// Never refused: `Control::cut` stops counting once this encoder is known to.
 				encoder.cut().await?;
 			}
 			let started = Instant::now();
@@ -1113,7 +1165,9 @@ mod tests {
 						..Options::default()
 					};
 					let config = capture::Config::default();
-					let requests = kio::Producer::new(0).consume();
+					// Held, so the loop has a channel to report each encoder's cut support into.
+					let controls = kio::Producer::new(Requests::default());
+					let requests = controls.weak();
 					tokio::select! {
 						res = capture_loop(
 							&mut producer,
@@ -1464,6 +1518,8 @@ mod tests {
 				res = &mut run => panic!("the driver ended before the stalled open: {res:?}"),
 				() = until(|| opens.load(Ordering::SeqCst) == expected) => {}
 			}
+			// Nothing has refused a cut: the probe never finished, or its backend can force one.
+			control.cut().unwrap();
 			drop(control);
 			tokio::time::timeout(Duration::from_secs(1), run)
 				.await
@@ -1519,13 +1575,13 @@ mod tests {
 			abandon(control, run, &opens, 2).await;
 		}
 
-		/// A keyframe request the backend cannot force ends the capture with that refusal, rather
-		/// than letting the boundary slip to the cadence without a word.
+		/// A keyframe request the backend cannot force is refused to the caller, and the capture
+		/// carries on at its cadence rather than ending or dropping the request without a word.
 		#[tokio::test]
 		// The guard only keeps other tests out of the process-wide probe log, and this runtime has
 		// one thread, so holding it across an await blocks nothing.
 		#[allow(clippy::await_holding_lock)]
-		async fn a_cut_the_backend_cannot_force_ends_the_capture() {
+		async fn a_cut_the_backend_cannot_force_is_refused() {
 			let _probe = probe::exclusive();
 
 			let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -1546,9 +1602,9 @@ mod tests {
 				..Options::default()
 			};
 			let control = Control {
-				cuts: kio::Producer::new(0),
+				requests: kio::Producer::new(Requests::default()),
 			};
-			let requests = control.cuts.consume();
+			let requests = control.requests.weak();
 			let clock = catalog.clock();
 			let config = capture::Config::default();
 			let mut run = std::pin::pin!(capture_loop(
@@ -1561,23 +1617,24 @@ mod tests {
 				&requests,
 			));
 
-			// A fresh encoder's first frame is a keyframe that serves any earlier request, so ask
-			// only once that frame has reached the codec.
-			camera.push_native(surface(), us(0));
+			// Nothing is known before an encoder opens, and its opening keyframe serves the request.
+			control.cut().unwrap();
 			tokio::select! {
-				res = &mut run => panic!("the capture ended before its first frame: {res:?}"),
-				() = until(|| probe::take().iter().any(|(event, _)| *event == "encode")) => {}
+				res = &mut run => panic!("the capture ended before its encoder opened: {res:?}"),
+				() = until(|| control.requests.read().refused.is_some()) => {}
 			}
-			control.cut();
-			camera.push_native(surface(), us(1_000_000));
-
-			// The encoder answers from its own thread, which mocked time would race, so this waits
-			// on the refusal itself and leaves a hang to the test runner.
-			let err = run.await.expect_err("the backend cannot cut");
+			let err = control.cut().expect_err("the backend cannot cut");
 			assert!(
 				matches!(err, Error::CutUnsupported(name) if name == probe::NO_CUT),
 				"unexpected error: {err:?}"
 			);
+
+			// The refusal ends nothing: the next frame still reaches the codec.
+			camera.push_native(surface(), us(0));
+			tokio::select! {
+				res = &mut run => panic!("the capture ended after a refused cut: {res:?}"),
+				() = until(|| probe::take().iter().any(|(event, _)| *event == "encode")) => {}
+			}
 		}
 	}
 }

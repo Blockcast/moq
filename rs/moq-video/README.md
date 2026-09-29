@@ -100,9 +100,10 @@ Public entry points:
 - `encode::Control::new(...)` does the same but returns a `Control` handle with
   the `Driver` that runs it, like `moq-audio`'s. `Control::cut()` asks for a
   keyframe: requests coalesce, any keyframe serves them (the GOP cadence
-  included), and a forced one lands at least 500ms after any other. A backend
-  that cannot force one ends the `Driver` with `Error::CutUnsupported`, and
-  dropping the last `Control` ends it promptly, even mid-open.
+  included), and a forced one lands at least 500ms after any other. On a
+  backend that cannot force one it returns `Error::CutUnsupported` and the
+  publish carries on. Dropping the last `Control` ends the `Driver` promptly,
+  even mid-open.
 - `encode::Producer` publishes frames you encoded yourself (`publish(&[Encoded])`),
   handling the catalog and framing. Each is published at its own timestamp.
 

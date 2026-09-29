@@ -75,8 +75,7 @@ pub enum Error {
 	BitrateUnsupported(&'static str),
 
 	/// This encoder can't force a group boundary, so a cut was refused rather
-	/// than queued. Groups keep falling where its configured GOP puts them; a
-	/// capture `encode::Driver` ends with it instead.
+	/// than queued. Groups keep falling where its configured GOP puts them.
 	#[error("encoder {0} cannot cut a group on request")]
 	CutUnsupported(&'static str),
 
