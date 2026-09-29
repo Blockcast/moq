@@ -561,7 +561,11 @@ impl Lease {
 
 /// Patterns as one comma-separated line, for logs.
 fn join(patterns: &Patterns) -> String {
-	patterns.iter().map(|pattern| pattern.as_str()).collect::<Vec<_>>().join(",")
+	patterns
+		.iter()
+		.map(|pattern| pattern.as_str())
+		.collect::<Vec<_>>()
+		.join(",")
 }
 
 enum Decider {

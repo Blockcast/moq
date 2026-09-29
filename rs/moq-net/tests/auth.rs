@@ -992,10 +992,7 @@ macro_rules! narrow_cases {
 	};
 }
 
-narrow_cases!(
-	a_narrowing_deafens_one_path,
-	a_narrowing_aborts_what_the_peer_published
-);
+narrow_cases!(a_narrowing_deafens_one_path, a_narrowing_aborts_what_the_peer_published);
 
 #[tokio::test]
 async fn lite_05_narrowing_resets_a_fetch_in_flight() {

@@ -1379,7 +1379,10 @@ where
 			}
 			Entry::Vacant(entry) => {
 				// Nothing the session no longer lets the peer publish is accepted.
-				if !self.auth.within_ceiling(crate::auth::Direction::Subscribe, path.as_str()) {
+				if !self
+					.auth
+					.within_ceiling(crate::auth::Direction::Subscribe, path.as_str())
+				{
 					return Err(Error::Unauthorized);
 				}
 				// Propagates Error::Unauthorized if the namespace is out of scope.
@@ -1470,7 +1473,8 @@ where
 					// own gates, with `Unauthorized`.
 					let mut narrowed = false;
 					while let Poll::Ready(permit) =
-						self.auth.poll_permit(crate::auth::Direction::Subscribe, &mut epoch, waiter)
+						self.auth
+							.poll_permit(crate::auth::Direction::Subscribe, &mut epoch, waiter)
 					{
 						narrowed |= !permit.within_ceiling(path.as_str());
 					}

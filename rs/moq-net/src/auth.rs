@@ -504,7 +504,9 @@ impl Handle {
 	/// Whether the ceiling alone allows `direction` at `path`: for a route the peer
 	/// offers us, which our own grant does not decide.
 	pub(crate) fn within_ceiling(&self, direction: Direction, path: &str) -> bool {
-		self.state.read().parts(direction).1.is_none_or(|ceiling| ceiling.matches(path))
+		let state = self.state.read();
+		let (_, ceiling) = state.parts(direction);
+		ceiling.is_none_or(|ceiling| ceiling.matches(path))
 	}
 
 	/// The peer turned out not to negotiate AUTH: fail every token as unsupported and

@@ -1111,7 +1111,8 @@ impl AnnounceRun {
 			// advertises something it would withdraw, or abort over, a moment later.
 			if let Some(auth) = &self.auth {
 				ready!(auth.poll_setup_answered(waiter));
-				if let Poll::Ready(permit) = auth.poll_permit(crate::auth::Direction::Publish, &mut self.epoch, waiter) {
+				if let Poll::Ready(permit) = auth.poll_permit(crate::auth::Direction::Publish, &mut self.epoch, waiter)
+				{
 					self.permit = permit;
 				}
 			}

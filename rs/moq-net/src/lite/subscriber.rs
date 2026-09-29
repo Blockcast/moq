@@ -339,7 +339,10 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 	/// this session on demand. `None` when we may not accept it: outside our origin's
 	/// scope, or outside what the session still lets the peer publish.
 	fn serve_route(&self, path: &Path, route: crate::origin::Route) -> Option<crate::origin::Dynamic> {
-		if !self.auth.within_ceiling(crate::auth::Direction::Subscribe, path.as_str()) {
+		if !self
+			.auth
+			.within_ceiling(crate::auth::Direction::Subscribe, path.as_str())
+		{
 			tracing::debug!(route = %self.log_path(path), "declining announce outside the narrowed grant");
 			return None;
 		}
@@ -1711,7 +1714,11 @@ mod tests {
 		let broadcast = crate::broadcast::Info::new().produce();
 		let request = broadcast.reserve_track("audio").unwrap();
 		let mut serving = ServeLoop::new(&serve, request, Default::default(), Some(Timescale::default()));
-		let establish = serve.prepare_establish(&mut serving.serving, Subscription::default(), Some(Timescale::default()));
+		let establish = serve.prepare_establish(
+			&mut serving.serving,
+			Subscription::default(),
+			Some(Timescale::default()),
+		);
 		serving.mode = ServeMode::Establish(establish);
 		let gate_run = serve.gate();
 		let mut running = TrackServeRun {

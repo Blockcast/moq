@@ -1930,9 +1930,7 @@ where
 					}
 					// A grant change applies before the next update, so a namespace it no
 					// longer covers is withdrawn rather than re-sent.
-					if let Poll::Ready(permit) =
-						self.auth.poll_permit(crate::auth::Direction::Publish, epoch, waiter)
-					{
+					if let Poll::Ready(permit) = self.auth.poll_permit(crate::auth::Direction::Publish, epoch, waiter) {
 						return Poll::Ready(NamespaceEvent::Regrant(permit));
 					}
 					if let Poll::Ready(update) = announced.poll_next(waiter) {

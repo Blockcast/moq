@@ -4,8 +4,9 @@
 //! or QUIC) or its axum WebSocket path (`serve_ws` over `ws://`), points it at a
 //! scripted auth server, connects a publisher and a subscriber, confirms media
 //! flows, then asserts the relay follows the server's word: a re-check that moves
-//! the tier retags the live session's stats, a narrower grant or a refusal closes it, an outage
-//! keeps it until `expires`, and every close reports `end` with what it moved.
+//! the tier retags the live session's stats, a narrower grant narrows it in place, a
+//! moved root or a refusal closes it, an outage keeps it until `expires`, and every
+//! close reports `end` with what it moved.
 //! The last tests swap the server for an in-process decider answering
 //! `Admissions`, and prove the lease it drives reaches the session the same way.
 
@@ -609,7 +610,14 @@ async fn a_narrower_grant_narrows_live_sessions() {
 				.await
 				.expect("announcement timeout")
 				.expect("announced broadcast resolves");
-			subs.push(broadcast.track("media").unwrap().subscribe(None).await.expect("subscribe"));
+			subs.push(
+				broadcast
+					.track("media")
+					.unwrap()
+					.subscribe(None)
+					.await
+					.expect("subscribe"),
+			);
 		}
 		let send = |index: usize, sequence: u64| {
 			let mut group = tracks[index].1.append_group().expect("append group");
