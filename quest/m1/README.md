@@ -27,7 +27,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Track demand](/quest/m1/track-demand.md) - Rust and JS watch a track's subscribers through `demand()` alone
 - [Error messages](/quest/m1/error-display.md) - Python, Go, and Dart print `MoqError` with Rust's message, as Kotlin and Swift do
 - [Session close](/quest/m1/session-close.md) - a graceful session end withdraws announces and waits one second for the ack
-- [Drain before close](/quest/m1/drain-before-close.md) - a closing client delivers its queued stream finishes, so `moq import` ends the catalog cleanly over a real relay
 - [Raw stream codes](/quest/m1/raw-stream-codes.md) - raw QUIC stream resets and stops carry the application's code, not an HTTP/3-mapped one
 - [Live in apps](/quest/m1/announce-live-apps.md) - the demo and `@moq/room` show "no broadcasts" from the `live` marker, which waits for the first session on page load
 - [Page-load marker](/quest/m1/announce-page-load.md) - an announcement stream opened before the first connection waits for its replay before `live`
