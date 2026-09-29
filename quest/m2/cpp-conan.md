@@ -9,9 +9,10 @@ Windows, macOS, and Linux.
 
 ## Plan
 
-- A `moq-cpp` recipe on a moq-dev remote (Artifactory or a GitHub-hosted `conan`
-  index) that packages the prebuilt release tarball per setting and exports
-  the CMake target from `package_info`.
+- A `moq-cpp` recipe, named after the package, on a moq-dev remote
+  (Artifactory or a GitHub-hosted `conan` index) that packages the prebuilt
+  release tarball per setting and exports the `moq::cpp` CMake target from
+  `package_info`.
 - The recipe reads the release manifest the vcpkg quest introduced, so one
   release bumps both recipes; `release-cpp.yml` publishes to the remote after
   the tarballs land.

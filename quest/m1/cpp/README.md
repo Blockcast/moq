@@ -61,17 +61,16 @@ Confirmed in [#4100](https://github.com/moq-dev/moq/pull/4100):
   burden every call site.
 - Callback interfaces are refused under `error_style = "expected"` until a
   consumer needs one; their bridge is built on `std::exception_ptr`.
-- MSVC is covered by the post-merge nightly, not a branch dispatch: branches
-  never dispatch the nightly.
+- MSVC is covered by `platform.yml` on every pull request, not a branch
+  dispatch of the nightly.
 
-## Quests
+## Required
 
 - [Client settings parity](/quest/m1/cpp/client-config.md) - moq-ffi offers libmoq's client knobs, and the OBS advanced settings get back the ones the migration dropped
 - [Session report parity](/quest/m1/cpp/session-report.md) - a session reports its negotiated draft and reconnect failures, so the OBS dock shows them again
 - [Catalog switch](/quest/m1/cpp/catalog-switch.md) - a catalog update keeps OBS playback running until the replacement track is decoding
 - [OBS stats race test](/quest/m1/cpp/stats-race.md) - a test against the generated bindings proves a retired session's stats are refused
 - [Cancel](/quest/m1/cpp/cancel.md) - a cancelled or consumed future reports `valid() == false`, like `std::future`, and a read of it aborts with a message naming the misuse
-- [C++ standard](/quest/m1/cpp/cxx-standard.md) - a consumer that sets C++23 only on its own target links the package
 
 ## Related
 

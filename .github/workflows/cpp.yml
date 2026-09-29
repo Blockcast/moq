@@ -3,8 +3,7 @@ name: C++
 # Builds and tests the moq C++ package (cpp/moq) with clang, outside Nix. `just
 # check` already runs `just cpp check` with the dev shell's gcc; the dev shell
 # has no clang++, and adding one would change which compiler every other recipe
-# gets as `cc`. MSVC runs in nightly.yml, for the reason the Windows Rust check
-# does: those runners are throttled too hard to gate every pull request.
+# gets as `cc`. MSVC runs in platform.yml, beside the Windows Rust check.
 #
 # Outside Nix the generator comes from `cargo install` at the tag flake.nix
 # pins; see the comment there for every other place that names it.

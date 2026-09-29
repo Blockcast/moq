@@ -73,7 +73,9 @@ foreach(_line IN LISTS _lines)
     endif()
 endforeach()
 
-# The bindings compile here with the including project's standard and flags; see src/moq.cpp.
+# The bindings compile here at the including project's CMAKE_CXX_STANDARD (else the compiler's
+# default, at least C++17) and with its flags; see src/moq.cpp. A standard raised only on a
+# consumer's own target does not reach this library.
 # Named moq-cpp so an in-tree build can sit beside libmoq's `moq` target.
 add_library(moq-cpp STATIC src/moq.cpp)
 add_library(moq::cpp ALIAS moq-cpp)

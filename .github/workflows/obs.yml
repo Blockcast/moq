@@ -5,9 +5,9 @@ name: OBS
 # multi-hundred-MB obs-deps bundle on macOS and Windows.
 #
 # Linux is the platform that needs no bundle at all -- nixpkgs has obs-studio,
-# Qt6 and ffmpeg, so the dev shell is the whole dependency set. The plugin is
-# platform-independent C++ over the generated moq-ffi bindings (cpp/moq), so a
-# Linux compile catches the breakage a macOS developer would otherwise ship
+# Qt6 and ffmpeg, so the `.#obs` shell is the whole dependency set. The plugin
+# is platform-independent C++ over the generated moq-ffi bindings (cpp/moq), so
+# a Linux compile catches the breakage a macOS developer would otherwise ship
 # uncompiled.
 #
 # Narrow trigger, like swift.yml: the plugin's own sources, the C++ package and
@@ -105,7 +105,7 @@ jobs:
       # The same recipe a developer runs on Linux. Warnings are errors here, via
       # the platform's CI preset.
       - name: Build
-        run: nix develop --command just obs ci
+        run: nix develop .#obs --command just obs ci
 
       - name: libmoq C fixtures
-        run: nix develop --command just rs c-tests
+        run: nix develop .#obs --command just rs c-tests

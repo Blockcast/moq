@@ -9,7 +9,8 @@ CI on Windows, macOS, and Linux.
 
 ## Plan
 
-- `moq-dev/vcpkg-registry`: a git registry with a `moq-cpp` port whose portfile
+- `moq-dev/vcpkg-registry`: a git registry with a `moq-cpp` port, named after
+  the package (`find_package(moq-cpp)`, target `moq::cpp`), whose portfile
   downloads the per-target release tarball from `release-cpp.yml` by version
   and hash, installs headers, the static library, and the CMake config, and
   declares `supports` for exactly the release matrix. Versioning follows the
