@@ -651,3 +651,61 @@ test("a probe encode that reports no codec string fails loud", async () => {
 		error.mockRestore();
 	}
 });
+
+// An encoder may pick its level from the frame rate or bitrate, so the probe encodes with both. The
+// bitrate is the ceiling, so a bandwidth grant caps the live encoder without re-probing.
+test("the probe encodes with the frame rate and bitrate ceiling", async () => {
+	using _videoEncoder = installFakeVideoEncoder();
+	const probe = spyOn(FakeVideoEncoder, "isConfigSupported");
+
+	const track = new Moq.Track.Producer("video").accept({ priority: 60 });
+	const sub = track.subscribe();
+	const rendition = {
+		config: new Signal(undefined),
+		track: new Signal<Moq.Track.Producer | undefined>(track),
+		close: () => track.close(),
+	};
+	const capture = {
+		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },
+		out: { display: new Signal({ width: 1280, height: 720 }), frames: new Signal(undefined) },
+	};
+	const estimate = new Signal<number | undefined>(100_000_000);
+	const bandwidth = new Moq.Bandwidth.Allocator(estimate);
+	const encoder = new Encoder("video", {
+		enabled: true,
+		broadcast: { video: () => rendition, baseline: new Baseline() } as never,
+		capture: capture as never,
+		bandwidth,
+	});
+	const accepted = () =>
+		probe.mock.calls.map(([config]) => config).filter((config) => config.codec.startsWith("avc1"));
+
+	try {
+		await settle();
+		const first = accepted().at(-1);
+		expect(first).toMatchObject({ framerate: 30 });
+		expect(first?.bitrate).toBeGreaterThan(0);
+		expect(encoder.out.resolved.peek()?.bitrate).toBe(first?.bitrate);
+
+		// A grant below the ceiling caps the live config but leaves the probe alone.
+		const probes = probe.mock.calls.length;
+		estimate.set(500_000);
+		await settle();
+		expect(encoder.out.resolved.peek()?.bitrate).toBe(500_000);
+		expect(probe.mock.calls.length).toBe(probes);
+
+		// A frame rate change re-probes with the new rate and its larger ceiling.
+		encoder.config.set({ frameRate: 60 });
+		await settle();
+		expect(probe.mock.calls.length).toBeGreaterThan(probes);
+		const second = accepted().at(-1);
+		expect(second).toMatchObject({ framerate: 60 });
+		expect(second?.bitrate).toBeGreaterThan(first?.bitrate ?? 0);
+		expect(encoder.out.catalog.peek()?.framerate).toBe(60);
+	} finally {
+		encoder.close();
+		bandwidth.close();
+		sub.close();
+		probe.mockRestore();
+	}
+});
