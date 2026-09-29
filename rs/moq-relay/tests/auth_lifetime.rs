@@ -627,9 +627,9 @@ async fn a_narrower_grant_narrows_live_sessions() {
 			group.finish().expect("finish group");
 			assert_eq!(group.sequence, sequence);
 		};
-		for index in 0..2 {
+		for (index, sub) in subs.iter_mut().enumerate() {
 			send(index, 0);
-			tokio::time::timeout(TIMEOUT, subs[index].recv_group())
+			tokio::time::timeout(TIMEOUT, sub.recv_group())
 				.await
 				.expect("recv_group timeout")
 				.expect("recv_group failed")
