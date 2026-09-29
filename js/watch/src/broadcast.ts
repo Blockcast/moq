@@ -49,7 +49,8 @@ function filterCatalog(catalog: Catalog.Root, usable: (rel: Path.Relative | unde
 export const CATALOG_FORMATS = [...Catalog.FORMATS, "hangz", "manual"] as const;
 export type CatalogFormat = (typeof CATALOG_FORMATS)[number];
 
-type Status = "offline" | "loading" | "live";
+// "error" means the origin refused the broadcast; `out.error` says why.
+type Status = "offline" | "loading" | "live" | "error";
 
 // Signals the component reads. Whoever owns the backing Signal (the caller, or
 // another component whose output is wired in) does the writing.
@@ -84,7 +85,7 @@ type BroadcastOutput = {
 	status: Signal<Status>;
 	active: Signal<Moq.Broadcast.Consumer | undefined>;
 
-	// Why the origin refused the broadcast, while `status` stays "offline". A refusal is final:
+	// Why the origin refused the broadcast, while `status` is "error". A refusal is final:
 	// only a fresh request (a new `name` or `origin`, or re-enabling) clears it and asks again.
 	error: Signal<Error | undefined>;
 
@@ -242,6 +243,13 @@ export class Broadcast {
 	#runCatalog(effect: Effect): void {
 		const enabled = effect.get(this.in.enabled);
 		if (!enabled) return;
+
+		// Even a manual catalog is unplayable once the origin refuses its media. `#runBroadcast`
+		// clears the error on a fresh request, and this run's cleanup drops back to "offline".
+		if (effect.get(this.#out.error)) {
+			effect.set(this.#out.status, "error", "offline");
+			return;
+		}
 
 		const catalogFormat = effect.get(this.in.catalogFormat);
 		const name = effect.get(this.in.name);

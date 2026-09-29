@@ -237,7 +237,8 @@ describe("refusal", () => {
 			const route = owner.dynamic(Path.from("room"));
 			const requests = route.requested();
 			const name = new Signal(Path.from("room/refused.hang"));
-			const source = new Broadcast({ origin: owner, name, enabled: true, announced, catalogFormat: "hang" });
+			const enabled = new Signal(true);
+			const source = new Broadcast({ origin: owner, name, enabled, announced, catalogFormat: "hang" });
 
 			const first = await requests.next();
 			expect(first.value?.path).toBe(Path.from("room/refused.hang"));
@@ -246,10 +247,10 @@ describe("refusal", () => {
 
 			expect(source.out.error.peek()?.message).toBe("not allowed");
 			expect(source.out.active.peek()).toBeUndefined();
-			expect(source.out.status.peek()).toBe("offline");
+			expect(source.out.status.peek()).toBe("error");
 
 			// Terminal: the handler that said no is never asked again.
-			const again = requests.next();
+			let again = requests.next();
 			let asked = false;
 			void again.then(() => {
 				asked = true;
@@ -257,12 +258,29 @@ describe("refusal", () => {
 			for (let i = 0; i < 5; i++) await settle();
 			expect(asked).toBe(false);
 			expect(source.out.error.peek()?.message).toBe("not allowed");
+			expect(source.out.status.peek()).toBe("error");
 
-			// A fresh request clears the error and asks again.
+			// A new name is a fresh request: it clears the error and asks again.
 			name.set(Path.from("room/other.hang"));
 			const second = await again;
 			expect(second.value?.path).toBe(Path.from("room/other.hang"));
+			await settle();
 			expect(source.out.error.peek()).toBeUndefined();
+			expect(source.out.status.peek()).toBe("offline");
+
+			second.value?.reject(new Error("still not allowed"));
+			await settle();
+			expect(source.out.status.peek()).toBe("error");
+
+			// So is re-enabling.
+			again = requests.next();
+			enabled.set(false);
+			await settle();
+			expect(source.out.error.peek()).toBeUndefined();
+			expect(source.out.status.peek()).toBe("offline");
+			enabled.set(true);
+			const third = await again;
+			expect(third.value?.path).toBe(Path.from("room/other.hang"));
 
 			source.close();
 			route.close();

@@ -13,10 +13,8 @@ export function offlineIndicator(parent: Effect, watch: MoqWatch): HTMLElement {
 	container.appendChild(text);
 
 	parent.run((effect) => {
-		// A refusal says why instead; see `refusedIndicator`.
-		const refused = effect.get(watch.broadcast.out.error) !== undefined;
 		const offline = effect.get(watch.broadcast.out.status) === "offline";
-		container.style.display = offline && !refused ? "" : "none";
+		container.style.display = offline ? "" : "none";
 	});
 
 	return container;
