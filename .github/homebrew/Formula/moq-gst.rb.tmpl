@@ -25,7 +25,8 @@ class MoqGst < Formula
   end
 
   def install
-    lib.install Dir["lib/libgstmoq.*"]
+    # The release tarball keeps the plugin under lib/gstreamer-1.0/.
+    lib.install Dir["lib/gstreamer-1.0/libgstmoq.*"]
   end
 
   def caveats
