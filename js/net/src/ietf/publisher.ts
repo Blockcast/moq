@@ -1020,13 +1020,17 @@ export class Publisher {
 				if (!this.#offerable(key, ns.refused)) continue;
 				answer = await target.advertise(key, snap);
 			}
-			ns.offered.set(key, snap.identity);
-
+			// `offered` pairs with `refused`, so a held or withdrawn path leaves nothing behind.
 			if (answer === "held") {
 				held.set(key, snap);
+				ns.refused.delete(key);
+				ns.offered.delete(key);
 			} else {
 				held.delete(key);
-				if (answer !== "dropped") ns.refused.set(key, answer);
+				if (answer !== "dropped") {
+					ns.refused.set(key, answer);
+					ns.offered.set(key, snap.identity);
+				}
 			}
 		}
 
