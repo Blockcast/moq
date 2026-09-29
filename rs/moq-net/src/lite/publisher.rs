@@ -350,7 +350,7 @@ struct AuthServe<S: crate::transport::poll::Session> {
 	stream: Option<Stream<S, Version>>,
 	/// Shared with the app's [`crate::auth::Request`] / [`crate::auth::Issued`], or
 	/// filled in by the default acceptor.
-	issue: Option<kio::Shared<crate::auth::Issue>>,
+	serving: Option<crate::auth::Serving>,
 	/// Our side is finished: FIN sent, waiting for the acknowledgement.
 	finished: bool,
 }
@@ -364,7 +364,7 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 		Ok(Self {
 			shared,
 			stream: Some(stream),
-			issue: None,
+			serving: None,
 			finished: false,
 		})
 	}
@@ -386,8 +386,8 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 				err
 			}
 		};
-		if let Some(issue) = &self.issue {
-			issue.lock().peer.get_or_insert(err);
+		if let Some(serving) = &self.serving {
+			serving.end(err);
 		}
 		Poll::Ready(Ok(()))
 	}
@@ -396,11 +396,12 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 		let mut cx = Context::from_waker(waiter.waker());
 		let stream = self.stream.as_mut().expect("stream present");
 
-		let issue = match &self.issue {
-			Some(issue) => issue.clone(),
+		let issue = match &self.serving {
+			Some(serving) => serving.issue.clone(),
 			None => {
 				let msg = ready!(stream.reader.poll_decode::<lite::Auth>(&mut cx))?;
-				let issue = crate::auth::Issue::shared();
+				let serving = crate::auth::Serving::new(self.shared.auth.clone());
+				let issue = serving.issue.clone();
 				match self.shared.auth.acceptor() {
 					Some(requests) => {
 						// A closed queue hands the request back, and dropping it refuses
@@ -416,7 +417,7 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 						issue.lock().outbox.push_back(crate::auth::Reply::Grant(grant));
 					}
 				}
-				self.issue = Some(issue.clone());
+				self.serving = Some(serving);
 				issue
 			}
 		};

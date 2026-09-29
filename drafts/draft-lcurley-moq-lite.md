@@ -1372,6 +1372,7 @@ AUTH_ERROR Message {
 
 **Error Code**:
 A code from the [session error registry](#session-error-codes), such as UNAUTHORIZED.
+A code that does not fit in 32 bits is a PROTOCOL_VIOLATION that closes the session.
 
 **Reason Phrase**:
 A human-readable reason, at most 8,192 bytes.

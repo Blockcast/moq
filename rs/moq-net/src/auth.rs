@@ -606,10 +606,34 @@ pub(crate) struct Issue {
 	pub peer: Option<Error>,
 }
 
-impl Issue {
-	/// A fresh stream's shared state.
-	pub(crate) fn shared() -> kio::Shared<Self> {
-		kio::Shared::default()
+/// The serving task's hold on one peer token's [`Issue`].
+///
+/// Dropping it settles [`Issued::closed`] with the session's error, unless the task
+/// already recorded why the stream ended, so no exit path leaves the acceptor waiting.
+pub(crate) struct Serving {
+	pub issue: kio::Shared<Issue>,
+	handle: Handle,
+}
+
+impl Serving {
+	/// A fresh stream's shared state, settled by the session `handle` if the task drops.
+	pub(crate) fn new(handle: Handle) -> Self {
+		Self {
+			issue: kio::Shared::default(),
+			handle,
+		}
+	}
+
+	/// Record why the stream ended on the peer's side; the first reason wins.
+	pub(crate) fn end(&self, err: Error) {
+		self.issue.lock().peer.get_or_insert(err);
+	}
+}
+
+impl Drop for Serving {
+	fn drop(&mut self) {
+		let err = self.handle.state.read().closed().unwrap_or(Error::Cancel);
+		self.end(err);
 	}
 }
 

@@ -466,6 +466,12 @@ where
 					Poll::Pending
 				})
 				.await;
+				// Before this arm's Auth serve tasks drop, so each settles with the
+				// session's error rather than a bare cancel.
+				auth.close(match &res {
+					Ok(()) => Error::Cancel,
+					Err(err) => err.clone(),
+				});
 				if let Err(err) = &res {
 					// Every track this session was receiving ends with its error.
 					subscriber.abort(err);

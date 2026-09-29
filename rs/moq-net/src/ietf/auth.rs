@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 
-use crate::auth::{Grant, Handle, Issue, Reply, Request};
+use crate::auth::{Grant, Handle, Issue, Reply, Request, Serving};
 use crate::coding::{Decode, DecodeError, Encode, EncodeError, Sizer, Stream};
 use crate::{Error, Path, Pattern, Patterns, SessionError};
 
@@ -394,7 +394,8 @@ impl Serve {
 		msg: Auth,
 		version: Version,
 	) {
-		let issue = Issue::shared();
+		let serving = Serving::new(self.handle.clone());
+		let issue = &serving.issue;
 		match self.handle.acceptor() {
 			Some(requests) => {
 				// A closed queue hands the request back, and dropping it refuses the token.
@@ -415,7 +416,7 @@ impl Serve {
 			None => issue.lock().outbox.push_back(Reply::Grant(self.peer_grant)),
 		}
 
-		let err = match serve_issue(&self.runtime, &issue, &mut stream, version).await {
+		let err = match serve_issue(&self.runtime, issue, &mut stream, version).await {
 			Ok(()) => Error::Cancel,
 			Err(err) => {
 				match &err {
@@ -427,7 +428,7 @@ impl Serve {
 				err
 			}
 		};
-		issue.lock().peer.get_or_insert(err);
+		serving.end(err);
 	}
 }
 

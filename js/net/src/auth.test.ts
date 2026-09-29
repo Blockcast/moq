@@ -158,6 +158,36 @@ describe.each([Lite.ALPN_06, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", (pro
 		server.close();
 	});
 
+	test("closing the session drops the grant", async () => {
+		const { client, server } = await connect({ publish: new OriginProducer(), protocol });
+		await waitFor(client.auth.grant, (g) => g !== undefined && g.publish.size > 0);
+
+		// Checked before any stream notices the transport closing.
+		client.close();
+		const closed = client.auth.grant.peek();
+		expect(closed?.publish.size).toBe(0);
+		expect(closed?.subscribe.size).toBe(0);
+		server.close();
+	});
+
+	test("an acceptor that ends a grant sees its stream close", async () => {
+		const { client, server } = await connect({ publish: new OriginProducer(), protocol });
+		const requests = server.auth.requests();
+		const request = await requests.next();
+		const issued = request?.accept(grant(["a"], []));
+		await waitFor(client.auth.grant, (g) => g !== undefined && g.publish.size > 0);
+
+		issued?.close();
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const timeout = new Promise((resolve) => {
+			timer = setTimeout(() => resolve("timeout"), 1000);
+		});
+		expect(await Promise.race([issued?.closed, timeout])).toBeNull();
+		clearTimeout(timer);
+		client.close();
+		server.close();
+	});
+
 	test("a refused setup token grants nothing rather than everything", async () => {
 		const { client, server } = await connect({ publish: new OriginProducer(), protocol });
 		const requests = server.auth.requests();
