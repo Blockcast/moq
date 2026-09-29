@@ -647,9 +647,8 @@ impl Server {
 							let local = self.websocket_local_addr();
 							self.accept.push(async move {
 								let request = server.accept_request(tokio::time::Instant::now().into_std(), crate::transport::Session::new(session)).await?;
-								let authority = url.host_str().filter(|h| !h.is_empty()).map(str::to_owned);
 								let link = Link { remote: Some(accepted.remote), local, alpn: accepted.protocol, ..Default::default() };
-								Ok(Request { transport: Transport::WebSocket, url: Some(url), authority, identity: None, link, kind: RequestKind::Qmux(Box::new(request)) })
+								Ok(Request::websocket(request, url, link))
 							}.boxed());
 						}
 						// One connection's upgrade, not the listener's: a failed
@@ -1266,6 +1265,30 @@ macro_rules! request_map {
 }
 
 impl Request {
+	/// Wrap a WebSocket's paused MoQ handshake with its URL and transport facts.
+	#[cfg(feature = "websocket")]
+	pub fn websocket(
+		handshake: moq_net::server::Handshake<crate::transport::Session<qmux::Session>>,
+		url: Url,
+		link: Link,
+	) -> Self {
+		let authority = url.host_str().filter(|h| !h.is_empty()).map(str::to_owned);
+		Self {
+			transport: Transport::WebSocket,
+			url: Some(url),
+			authority,
+			identity: None,
+			link,
+			kind: RequestKind::Qmux(Box::new(handshake)),
+		}
+	}
+
+	/// Attach the peer identity already verified by the listener's TLS handshake.
+	pub fn with_peer_identity(mut self, identity: crate::tls::PeerIdentity) -> Self {
+		self.identity = Some(identity);
+		self
+	}
+
 	/// Reject the session. The transport is already accepted, so this closes the
 	/// just-established MoQ session rather than answering the transport handshake:
 	/// the `code` (an HTTP-style status the caller passes) maps to a MoQ close reason.

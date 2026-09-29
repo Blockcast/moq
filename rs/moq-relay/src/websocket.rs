@@ -1,7 +1,6 @@
 use futures::{Sink, Stream};
 use qmux::ws::tungstenite;
 use std::{
-	net::SocketAddr,
 	pin::Pin,
 	sync::{Arc, atomic::Ordering},
 	task::{Context, Poll},
@@ -12,10 +11,8 @@ use axum::{
 	http::{HeaderMap, HeaderValue, StatusCode, header::HOST},
 	response::Response,
 };
-use moq_net::origin;
-use moq_net::stats::Session;
 
-use crate::{auth, web::MtlsPeer, web::WebState, web::landing_response};
+use crate::{web::MtlsPeer, web::WebState, web::landing_response};
 
 // One axum extractor per fact the upgrade needs; there is no struct to fold them into.
 #[allow(clippy::too_many_arguments)]
@@ -45,36 +42,13 @@ pub(crate) async fn serve_ws(
 		.map(axum::http::uri::Authority::as_str)
 		.or_else(|| headers.get(HOST).and_then(|value| value.to_str().ok()))
 		.ok_or(StatusCode::BAD_REQUEST)?;
-	// The SETUP has not happened yet, so the role is unknown; the path and query
-	// are the URL's, with the host the client addressed as the server name.
-	let mut request = state
-		.auth
-		.request(moq_auth::Transport::WebSocket, uri.path().to_string());
-	request.query = uri.query().map(str::to_owned);
-	request.server_name = host
+	let host = host
 		.parse::<axum::http::uri::Authority>()
-		.ok()
-		.map(|a| a.host().to_ascii_lowercase());
-	request.remote = Some(remote.0);
-	request.alpn = ws.selected_protocol().and_then(|p| p.to_str().ok()).map(str::to_owned);
-	request.tls = mtls.and_then(|Extension(MtlsPeer(identity))| auth::peer(&identity));
-	let session_id = request.id.clone();
-	let lease = state.auth.admit(request.clone()).await?;
-	let token = lease.token();
-	let publish = state.cluster.publisher(token);
-	// A verified client certificate marks a cluster peer, which discovers hidden
-	// routes; see `connection::authorize`.
-	let subscribe = state
-		.cluster
-		.subscriber(token)
-		.map(|subscribe| subscribe.consume().with_hidden(request.tls.is_some()));
-	let stats = state.cluster.stats.tier(token.tier.clone()).session(&token.root);
-
-	if publish.is_none() && subscribe.is_none() {
-		// Bad token, we can't publish or subscribe.
-		return Err(StatusCode::UNAUTHORIZED.into());
-	}
-	let lease = lease.with_stats(stats.clone());
+		.map_err(|_| StatusCode::BAD_REQUEST)?;
+	let url = format!("ws://{host}{}", uri.path_and_query().map_or("/", |path| path.as_str()))
+		.parse()
+		.map_err(|_| StatusCode::BAD_REQUEST)?;
+	let identity = mtls.map(|Extension(MtlsPeer(identity))| identity);
 
 	Ok(ws.on_upgrade(async move |socket| {
 		let id = state.conn_id.fetch_add(1, Ordering::Relaxed);
@@ -86,155 +60,63 @@ pub(crate) async fn serve_ws(
 		// Unfortunately, we need to convert from Axum to Tungstenite.
 		// Axum uses Tungstenite internally, but it's not exposed to avoid semvar issues.
 		let socket = WebSocketAdapter::new(socket);
-		let session = SessionInputs {
-			id,
-			session: session_id,
-			remote: remote.0,
-			alpn,
-			versions,
-			publish,
-			subscribe,
-			stats,
-			shutdown: state.shutdown.clone(),
-			socket_stats: socket_stats.map(|Extension(s)| s),
-		};
-		let _ = handle_socket(socket, session, lease, Some((state.sessions.clone(), request))).await;
+		let mut link = moq_tokio::server::Link::default();
+		link.remote = Some(remote.0);
+		link.alpn = alpn;
+		let request = websocket_request(socket, url, link, versions, socket_stats.map(|Extension(s)| s)).await;
+		let result = async {
+			let mut request = request?;
+			if let Some(identity) = identity {
+				request = request.with_peer_identity(identity);
+			}
+			crate::Connection::new(request, state.cluster.clone(), state.auth.clone())
+				.with_id(id)
+				.with_shutdown(state.shutdown.clone())
+				.with_sessions(state.sessions.clone())
+				.run()
+				.await
+		}
+		.await;
+		if let Err(err) = result {
+			tracing::warn!(%err, id, "WebSocket session ended");
+		}
 	}))
 }
 
-struct SessionInputs {
-	id: u64,
-	/// The moq-auth session id, the key every auth event for this session shares.
-	session: String,
-	remote: SocketAddr,
-	alpn: Option<String>,
-	versions: moq_net::Versions,
-	publish: Option<origin::Producer>,
-	subscribe: Option<origin::Consumer>,
-	stats: Session,
-	shutdown: crate::shutdown::Observer,
-	/// The kernel's view of the socket under the upgrade, captured at accept time.
-	socket_stats: Option<crate::web::SocketStats>,
-}
+// Keep-alive only bounds a silent transport; a peer answering pings can still
+// withhold SETUP forever. Bound the entire pre-admission handshake separately.
+const SETUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Serve one upgraded WebSocket until it closes or its lease ends.
-///
-/// The session registers in the live table only once the MoQ handshake
-/// completes: listing it earlier would answer 202 for a push this handler
-/// cannot service until SETUP. `pending` carries what to register with, or
-/// `None` for a session that is served but not listed.
-#[tracing::instrument("ws", err, skip_all, fields(id = session.id, remote = %session.remote, session = %session.session))]
-async fn handle_socket<T>(
+async fn websocket_request<T>(
 	socket: T,
-	session: SessionInputs,
-	mut lease: auth::Lease,
-	pending: Option<(crate::session::Registry, moq_auth::Request)>,
-) -> anyhow::Result<()>
+	url: url::Url,
+	link: moq_tokio::server::Link,
+	versions: moq_net::Versions,
+	socket_stats: Option<crate::web::SocketStats>,
+) -> anyhow::Result<moq_tokio::server::Request>
 where
-	T: futures::Stream<Item = Result<tungstenite::Message, tungstenite::Error>>
-		+ futures::Sink<tungstenite::Message, Error = tungstenite::Error>
+	T: Stream<Item = Result<tungstenite::Message, tungstenite::Error>>
+		+ Sink<tungstenite::Message, Error = tungstenite::Error>
 		+ Send
 		+ Unpin
 		+ 'static,
 {
-	let SessionInputs {
-		id: _,
-		session: _,
-		remote: _,
-		alpn,
-		versions,
-		publish,
-		subscribe,
-		stats,
-		mut shutdown,
-		socket_stats,
-	} = session;
-
-	// Wrap the WebSocket in a WebTransport compatibility layer. We have to
-	// forward the negotiated subprotocol explicitly; axum performed the
-	// upgrade, so qmux can't sniff it from the handshake.
-	//
-	// Keep-alive is not optional here. A peer whose host crashes or whose
-	// network drops sends no FIN, so without a Ping/timeout the session stays
-	// open until OS-level TCP keep-alive probes it, typically hours. Every
-	// broadcast it published stays announced for that entire window and the
-	// announce propagates to the rest of the cluster. QUIC gets this from its
-	// idle timeout; WebSocket has no equivalent of its own.
 	let mut upgraded = qmux::ws::Upgraded::new(socket).with_keep_alive(qmux::ws::KeepAlive::default());
-	// Hand qmux the socket we captured before the upgrade erased it, so the session
-	// reports the kernel's RTT (and, on Linux, its delivery rate) from the start
-	// rather than only what QX_PING can measure a round trip later. This is what
-	// fills in the moq-lite PROBE for a WebSocket viewer.
+	// Preserve kernel RTT/delivery-rate stats after axum erases the socket.
 	if let Some(crate::web::SocketStats(stats)) = socket_stats {
 		upgraded = upgraded.with_socket_stats(stats);
 	}
-	let upgraded = match alpn.as_deref() {
-		Some(alpn) => upgraded.with_alpn(alpn),
-		None => upgraded,
-	};
-	let ws = upgraded.accept();
-	// Only set the side the token actually grants. moq-net defaults the
-	// unset side to a fresh no-op origin, which is fine for a
-	// publish-only or subscribe-only token.
-	let mut server = moq_net::Server::new().with_versions(versions).with_stats(stats);
-	if let Some(subscribe) = subscribe {
-		server = server.with_publisher(subscribe);
+	if let Some(alpn) = &link.alpn {
+		upgraded = upgraded.with_alpn(alpn);
 	}
-	if let Some(publish) = publish {
-		server = server.with_subscriber(publish);
-	}
-	// Keep the driver in this task so cancellation tears down the transport.
-	let (session, driver) = server
-		.accept(
-			tokio::time::Instant::now().into_std(),
-			moq_tokio::transport::Session::new(ws),
-		)
-		.await?;
-
-	let driver = moq_net::time::run(driver);
-	tokio::pin!(driver);
-
-	// The handshake is done, so this is a MoQ session now: only now can a push
-	// be serviced, and only now does the session appear in the live table.
-	let registration = pending.map(|(sessions, request)| sessions.register(request));
-
-	loop {
-		let nudged = async {
-			match &registration {
-				Some(registration) => registration.nudged().await,
-				None => std::future::pending().await,
-			}
-		};
-		tokio::select! {
-			err = &mut driver => {
-				lease.close(err.to_string(), crate::connection::session_bytes(&session));
-				return ended(err);
-			}
-			why = lease.ended() => {
-				tracing::info!(%why, "lease ended, closing session");
-				session.abort(moq_net::Error::Unauthorized);
-				// Drive the teardown so the close reaches the peer.
-				let res = ended(driver.await);
-				lease.close(why, crate::connection::session_bytes(&session));
-				return res;
-			}
-			_ = shutdown.started() => {
-				tracing::info!("relay shutting down; draining session");
-				// Unlike QUIC sessions (whose driver is spawned), this driver runs
-				// inline, so keep polling it while the drain waits: the GOAWAY only
-				// reaches the wire through it.
-				let drain = shutdown.drain_session(&session);
-				let mut drain = std::pin::pin!(drain);
-				let res = tokio::select! {
-					err = &mut driver => ended(err),
-					_ = &mut drain => ended(driver.await),
-				};
-				lease.close("shutdown", crate::connection::session_bytes(&session));
-				return res;
-			}
-			() = nudged => lease.revalidate(),
-		}
-	}
+	let session = moq_tokio::transport::Session::new(upgraded.accept());
+	let server = moq_net::Server::new().with_versions(versions);
+	let handshake = tokio::time::timeout(
+		SETUP_TIMEOUT,
+		server.accept_request(tokio::time::Instant::now().into_std(), session),
+	)
+	.await??;
+	Ok(moq_tokio::server::Request::websocket(handshake, url, link))
 }
 
 /// Pick a subprotocol for the upgrade, or fail the handshake outright.
@@ -252,14 +134,6 @@ where
 ///
 /// A client that offers no subprotocol at all is left alone: it upgrades and
 /// negotiates the moq version over moq-lite SETUP instead.
-/// The driver's terminal error as a session outcome: a clean close is not a failure.
-fn ended(err: moq_net::Error) -> anyhow::Result<()> {
-	match err {
-		moq_net::Error::Closed => Ok(()),
-		err => Err(err.into()),
-	}
-}
-
 fn negotiate_subprotocol(ws: WebSocketUpgrade, alpns: &[&str]) -> Result<WebSocketUpgrade, StatusCode> {
 	let supported = supported_subprotocols(alpns);
 
@@ -947,36 +821,16 @@ mod tests {
 		let (server_to_client, client_incoming) = mpsc::unbounded_channel();
 		let frozen = Arc::new(AtomicBool::new(false));
 
-		let session = SessionInputs {
-			id: 0,
-			session: String::new(),
-			remote: "127.0.0.1:0".parse().unwrap(),
-			alpn: Some(alpn.clone()),
-			versions: moq_net::Versions::all(),
-			publish: None,
-			subscribe: None,
-			stats: Session::default(),
-			shutdown: crate::shutdown::Observer::disabled(),
-			// No descriptor to hand over: this drives the transport directly rather
-			// than through an accepted socket.
-			socket_stats: None,
-		};
-		let grant = moq_auth::Grant::new(
-			[moq_auth::Pattern::all()].into_iter().collect(),
-			[moq_auth::Pattern::all()].into_iter().collect(),
-		);
-		let lease = crate::auth::Lease::new("/", moq_auth::lease::Consumer::fixed(grant));
-		let server = tokio::spawn(handle_socket(
+		let mut link = moq_tokio::server::Link::default();
+		link.alpn = Some(alpn.clone());
+		let server = tokio::spawn(websocket_request(
 			Pipe::new(server_incoming, server_to_client, frozen.clone()),
-			session,
-			lease,
+			"ws://localhost/".parse().unwrap(),
+			link,
+			moq_net::Versions::all(),
 			None,
 		));
 
-		// A real qmux peer, so the transport handshake completes and its 10s
-		// timeout is out of the picture before we go silent. It never speaks moq,
-		// so the server is parked awaiting SETUP -- exactly where an idle
-		// publisher's session sits between groups.
 		let client = qmux::ws::Upgraded::new(Pipe::new(
 			client_incoming,
 			client_to_server,
@@ -985,18 +839,52 @@ mod tests {
 		.with_alpn(&alpn)
 		.connect();
 
-		// Paused time only advances once every task is idle, so this resolves
-		// exactly when both ends have settled.
-		tokio::time::sleep(Duration::from_secs(1)).await;
+		let connecting = tokio::spawn(async move {
+			let (session, driver) = moq_net::Client::new()
+				.connect(
+					tokio::time::Instant::now().into_std(),
+					moq_tokio::transport::Session::new(client),
+				)
+				.await
+				.unwrap();
+			(session, tokio::spawn(moq_net::time::run(driver)))
+		});
+		let server = server.await.unwrap().unwrap().ok().await.unwrap();
+		let (client, driver) = connecting.await.unwrap();
 		frozen.store(true, Ordering::Relaxed);
-
-		// Generous versus the 30s deadline: this asserts termination, not timing.
-		tokio::time::timeout(Duration::from_secs(300), server)
+		tokio::time::timeout(Duration::from_secs(300), server.closed())
 			.await
-			.expect("a silent WebSocket peer must be reaped by the keep-alive")
-			.expect("server task panicked")
-			.expect_err("the session ends on the keep-alive timeout, never cleanly");
+			.expect("a silent WebSocket peer must be reaped by the keep-alive");
+		drop(client);
+		driver.abort();
+	}
 
+	#[tokio::test(start_paused = true)]
+	async fn setup_deadline_reaps_a_responsive_peer() {
+		let (client_to_server, server_incoming) = mpsc::unbounded_channel();
+		let (server_to_client, client_incoming) = mpsc::unbounded_channel();
+		let alpn = format!("{}{}", preferred_qmux_prefix(), newest_moq_alpn());
+		let mut link = moq_tokio::server::Link::default();
+		link.alpn = Some(alpn.clone());
+		let server = websocket_request(
+			Pipe::new(server_incoming, server_to_client, Arc::new(AtomicBool::new(false))),
+			"ws://localhost/".parse().unwrap(),
+			link,
+			moq_net::Versions::all(),
+			None,
+		);
+		let client = qmux::ws::Upgraded::new(Pipe::new(
+			client_incoming,
+			client_to_server,
+			Arc::new(AtomicBool::new(false)),
+		))
+		.with_alpn(&alpn)
+		.connect();
+		let err = server
+			.await
+			.err()
+			.expect("a responsive peer withholding SETUP must time out");
+		assert!(err.downcast_ref::<tokio::time::error::Elapsed>().is_some());
 		drop(client);
 	}
 }

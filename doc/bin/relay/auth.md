@@ -40,6 +40,15 @@ behalf: the `jwt` query parameter is a convention of `moq auth serve`, not of
 the relay, and the relay forwards a SETUP token without reading it. An `end` adds `reason`, `duration` in seconds, and `bytes` sent and
 received.
 
+WebSocket admission runs after MoQ SETUP, using the same token, certificate,
+and role facts as QUIC. The client has 10 seconds after the HTTP upgrade to
+complete SETUP. A refusal closes the qmux session with `Unauthorized` instead
+of rejecting the HTTP upgrade with 401. The JS client reports the session
+termination during SETUP (including its reason when the transport delivers
+it); browsers expose a failed HTTP upgrade only as a WebSocket connection
+error. A publisher-only or subscriber-only SETUP also
+prunes the unused direction even when the grant allows both.
+
 **Grant.** `publish` and `subscribe` as pattern unions (`foo/**` is a subtree,
 `**` is everything, an empty list is nothing), `root` (optional; replaces the
 dialed path, which is how a slug aliases to a canonical id), `mounts`
