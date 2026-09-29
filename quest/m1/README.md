@@ -64,7 +64,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [PipeWire duplicate cameras](/quest/m1/pipewire-dup-cameras.md) - a webcam lists once with PipeWire enabled
 - [Catalog wall clock](/quest/m1/catalog-wall-clock.md) - `Clock::wall_clock` keeps the catalog's full precision instead of truncating to milliseconds
 - [Capture control](/quest/m1/capture-control.md) - on dev, `encode::Capture` replaces `CaptureOptions` without a `clock` field (it reads the catalog's), an unsupported `cut()` errors, and dropping the last `Control` cancels in-flight opens
-- [Video surface](/quest/m1/video-surface.md) - on dev, moq-ffi's `native` becomes `surface`, refused on platforms with no surface
 - [HLS discontinuity sequence](/quest/m1/hls-discontinuity-sequence.md) - on dev, `Segment::discontinuity` is the absolute sequence, so every cursor agrees
 - [Auth client CA](/quest/m1/relay-auth-client-ca.md) - on dev, `auth::Config::validate` and `init` take the client-CA flag, so no caller can skip the check
 - [RTMP TLS only](/quest/m1/rtmp-tls-only.md) - an RTMP listener configured for TLS can refuse plaintext instead of sniffing and serving it
