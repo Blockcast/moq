@@ -378,12 +378,15 @@ test("an invalid knob settles the encoder without a config", async () => {
 		out: { display: new Signal({ width: 1920, height: 1080 }) },
 	};
 	const config = new Signal<{ bitrateScale?: number } | undefined>({ bitrateScale: -1 });
+	const probe = spyOn(FakeVideoEncoder, "isConfigSupported");
 	const encoder = new Encoder("video", { enabled: true, capture: capture as never, config });
 	try {
 		await settle();
 		expect(encoder.out.catalog.peek()).toBeUndefined();
 		expect(encoder.settled.peek()).toBe(true);
 		expect(error).toHaveBeenCalled();
+		// Refused before the browser could coerce it into an unsigned bitrate.
+		expect(probe).not.toHaveBeenCalled();
 
 		// Fixing the knob clears the failure and resolves a config.
 		config.set(undefined);
@@ -393,6 +396,7 @@ test("an invalid knob settles the encoder without a config", async () => {
 	} finally {
 		encoder.close();
 		error.mockRestore();
+		probe.mockRestore();
 	}
 });
 
@@ -706,6 +710,46 @@ test("the probe encodes with the frame rate and bitrate ceiling", async () => {
 		encoder.close();
 		bandwidth.close();
 		sub.close();
+		probe.mockRestore();
+	}
+});
+
+// A re-probe keeps the rendition advertised while it runs: dropping it, even for a moment, would
+// tell every subscriber the track went away.
+test("a re-probe swaps the catalog entry in one update", async () => {
+	using _videoEncoder = installFakeVideoEncoder();
+	const probe = spyOn(FakeVideoEncoder, "isConfigSupported");
+	const capture = {
+		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },
+		out: { display: new Signal({ width: 1280, height: 720 }) },
+	};
+	const encoder = new Encoder("video", { enabled: true, capture: capture as never });
+
+	try {
+		await settle();
+		expect(encoder.out.catalog.peek()?.framerate).toBe(30);
+
+		const published: (number | undefined)[] = [];
+		const unsubscribe = encoder.out.catalog.subscribe((catalog) => published.push(catalog?.framerate));
+		try {
+			// A frame rate change re-probes, and the catalog goes straight from the old entry to the new.
+			let probes = probe.mock.calls.length;
+			encoder.config.set({ frameRate: 60 });
+			await settle();
+			expect(probe.mock.calls.length).toBeGreaterThan(probes);
+			expect(published).toEqual([60]);
+
+			// A re-probe that lands on the same config leaves the catalog untouched.
+			probes = probe.mock.calls.length;
+			encoder.config.set({ frameRate: 60, maxPixels: 1280 * 720 });
+			await settle();
+			expect(probe.mock.calls.length).toBeGreaterThan(probes);
+			expect(published).toEqual([60]);
+		} finally {
+			unsubscribe();
+		}
+	} finally {
+		encoder.close();
 		probe.mockRestore();
 	}
 });

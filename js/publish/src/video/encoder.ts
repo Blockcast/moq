@@ -135,7 +135,12 @@ export class Encoder {
 	#dimensions = new Signal<{ width: number; height: number } | undefined>(undefined);
 
 	// The config the browser accepted and encoded a probe frame with, and the codec string it reported.
+	// Kept through a re-probe, so the rendition stays in the catalog until the new probe replaces it.
 	#codec = new Signal<Detected | undefined>(undefined);
+
+	// The probed config capped by the bandwidth grant, and the codec string to advertise for it. One
+	// signal, so the catalog never pairs a new probe's string with the previous config.
+	#live = new Signal<{ config: VideoEncoderConfig; reported: string } | undefined>(undefined);
 
 	// Uncapped target bitrate (pixels, maxBitrate), the reservation's ceiling.
 	#ceiling = new Signal<number | undefined>(undefined);
@@ -423,23 +428,17 @@ export class Encoder {
 	// Returns the catalog for the configured settings, or undefined while disabled / unresolved.
 	#runCatalog(effect: Effect): void {
 		const enabled = effect.get(this.in.enabled);
-		const config = effect.get(this.out.resolved);
-		// Advertise the codec string the probe's encoder reported rather than the one we configured,
-		// so it names the profile and level the bitstream actually carries. The resolved config is
-		// derived from the probe, but can briefly trail a new one within a batch.
-		const detected = effect.get(this.#codec);
-		const matches =
-			detected?.config.codec === config?.codec &&
-			detected?.config.width === config?.width &&
-			detected?.config.height === config?.height &&
-			detected?.config.framerate === config?.framerate;
-		if (!enabled || !config || !detected || !matches) {
+		const live = effect.get(this.#live);
+		if (!enabled || !live) {
 			effect.set(this.#out.catalog, undefined);
 			return;
 		}
 
+		// Advertise the codec string the probe's encoder reported rather than the one we configured,
+		// so it names the profile and level the bitstream actually carries.
+		const { config, reported } = live;
 		const catalog: Catalog.VideoConfig = {
-			codec: detected.reported,
+			codec: reported,
 			bitrate: config.bitrate ? Catalog.u53(config.bitrate) : undefined,
 			framerate: config.framerate,
 			codedWidth: Catalog.u53(config.width),
@@ -453,22 +452,29 @@ export class Encoder {
 		effect.set(this.#out.catalog, catalog);
 	}
 
-	// Probe the hardware for the best codec. Deliberately depends on as little as possible: every
-	// rerun blanks the codec (and with it the resolved config and the catalog entry) for however long
-	// the probe takes, which on a busy GPU process is a long time.
+	// Probe the hardware for the best codec. Deliberately depends on as little as possible, since a
+	// probe on a busy GPU process takes a long time. The previous result stays in place meanwhile, so
+	// a re-probe swaps the catalog entry in one update, or not at all when nothing changed.
 	#runCodec(effect: Effect): void {
-		if (!effect.get(this.in.enabled)) return;
-
+		const enabled = effect.get(this.in.enabled);
 		const dimensions = effect.get(this.#dimensions);
-		if (!dimensions) return;
-
 		const target = effect.get(this.#target);
-		if (!target) return;
+		if (!enabled || !dimensions || !target) {
+			this.#codec.set(undefined);
+			return;
+		}
 
+		// Captured now: the run's signal is replaced once a rerun starts.
+		const superseded = effect.abort;
 		effect.spawn(async () => {
 			try {
-				effect.set(this.#codec, await this.#bestCodec(dimensions, target));
+				const detected = await this.#bestCodec(dimensions, target);
+				if (!superseded.aborted) this.#codec.set(detected);
 			} catch (err) {
+				// A newer probe reports its own outcome.
+				if (superseded.aborted) return;
+
+				this.#codec.set(undefined);
 				this.#fail(effect);
 				throw err;
 			}
@@ -498,7 +504,9 @@ export class Encoder {
 			if (grant != null) bitrate = Math.min(bitrate, grant);
 		}
 
-		effect.set(this.#out.resolved, { ...detected.config, bitrate });
+		const config = { ...detected.config, bitrate };
+		effect.set(this.#out.resolved, config);
+		effect.set(this.#live, { config, reported: detected.reported });
 	}
 
 	#runDimensions(effect: Effect): void {
@@ -682,7 +690,11 @@ function ceiling(codec: string, dimensions: { width: number; height: number }, t
 	// 1080p@30 = 2073600 * 30 * 0.07 = 4.4 Mb/s
 	// 1080p@60 = 2073600 * 45 * 0.07 = 6.5 Mb/s
 	const bitrate = Math.round(maxPixels * target.bitrateScale * framerateFactor * codecBitrateScale(codec));
-	return Math.round(Math.min(bitrate, target.maxBitrate || bitrate));
+	const capped = Math.round(Math.min(bitrate, target.maxBitrate || bitrate));
+
+	// Refuse a bad knob here, before the browser coerces it into an unsigned bitrate.
+	if (!(capped > 0)) throw new Error(`bitrate must be positive: ${capped}`);
+	return capped;
 }
 
 // Encode one frame with a throwaway encoder and return the codec string it reports, like
