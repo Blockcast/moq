@@ -39,9 +39,8 @@ Decisions settled while planning, recorded so review does not relitigate them:
   the union and cancels publications and subscriptions that lose authorization.
   Other authorized work continues on the same session. An empty union leaves
   the session connected with no access, so it can accept a fresh token.
-  [Origin narrowing](/quest/m1/auth/narrowing.md) owns the common resize
-  operation; relay token handling requires it rather than shipping a temporary
-  close-on-shrink policy.
+  `auth::Handle::narrow` is the common resize operation; relay token handling
+  uses it rather than shipping a temporary close-on-shrink policy.
 - **A public grant contains publish patterns, subscribe patterns, and an
   expiry**, in the presenter's own root; the presenter never sees the relay-side
   root, and every token in a union shares the connection's root. Unscoped
@@ -91,9 +90,6 @@ existing lite-06 ALPN.
 
 - [AUTH_OK preflight](/quest/m1/auth/auth-ok-preflight.md) - an unencodable IETF grant answers NOT_SUPPORTED with nothing written, as JS already does
 - [AUTH endings](/quest/m1/auth/error-codes.md) - an out-of-range AUTH_ERROR code is refused, and both sides settle and recompute grants when a stream ends
-- [Origin narrowing](/quest/m1/auth/narrowing.md) - a live grant narrows in
-  place: subscriptions outside it reset, publishes outside it abort, and relay
-  revalidation stops closing the session
 - [Relay tokens](/quest/m1/auth/relay-refresh.md) - the relay verifies tokens
   sent in band, unions their grants, and cancels only work that loses access
 - [Request tokens](/quest/m1/auth/request-token.md) - an `AUTHORIZATION

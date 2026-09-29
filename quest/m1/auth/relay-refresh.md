@@ -36,7 +36,9 @@ expiry, an expiry that leaves the union intact ends only that token, and
   publish-only session never starts receiving announcements because a later
   token happened to carry subscribe prefixes, and swapped in whenever the set
   grows; keep it behind one function, and a shrinking union goes through
-  [Origin narrowing](/quest/m1/auth/narrowing.md) rather than a close.
+  `auth::Handle::narrow` rather than a close. `narrow` only ever narrows, so
+  a union that grows back after a shrink also needs the session's ceiling
+  replaced, not just new origin handles.
 - Expiry: the deadline today is the admitted lease's `closed()` inside one
   `tokio::select!` arm. Select on one lease per token in the set instead, and on any firing recompute the union without it: unchanged
   means `AUTH_ERROR { Expired }` on that token's stream and the session
@@ -79,7 +81,3 @@ expiry, an expiry that leaves the union intact ends only that token, and
   proxy-mode outage on re-check keeps the token.
 
 Additive.
-
-## Required
-
-- [Origin narrowing](/quest/m1/auth/narrowing.md) - the live re-scope a shrinking token union needs, so no temporary close-on-shrink policy ships
