@@ -62,8 +62,10 @@ async function decodePatterns(r: Reader): Promise<Path.Patterns> {
 	return patterns;
 }
 
-/** The grant a token earns, as the acceptor writes it. */
+/** The grant a token earns, as the acceptor writes it. Encodes its own type. */
 export class AuthOk {
+	static id = 0;
+
 	publish: Path.Patterns;
 	subscribe: Path.Patterns;
 	/** Milliseconds until the grant lapses, or undefined for never. */
@@ -93,7 +95,7 @@ export class AuthOk {
 
 	async encode(w: Writer, version: Version): Promise<void> {
 		guardAuth(version);
-		return Message.encode(w, this.#encode.bind(this));
+		return Message.encode(w, this.#encode.bind(this), AuthOk.id);
 	}
 
 	static async decode(r: Reader, version: Version): Promise<AuthOk> {
@@ -102,8 +104,10 @@ export class AuthOk {
 	}
 }
 
-/** The acceptor refusing a token, or revoking it after an AUTH_OK. */
+/** The acceptor refusing a token, or revoking it after an AUTH_OK. Encodes its own type. */
 export class AuthError {
+	static id = 1;
+
 	/** A code from the session error registry. */
 	code: number;
 	reason: string;
@@ -132,7 +136,7 @@ export class AuthError {
 
 	async encode(w: Writer, version: Version): Promise<void> {
 		guardAuth(version);
-		return Message.encode(w, this.#encode.bind(this));
+		return Message.encode(w, this.#encode.bind(this), AuthError.id);
 	}
 
 	static async decode(r: Reader, version: Version): Promise<AuthError> {
@@ -144,24 +148,15 @@ export class AuthError {
 /** A message the acceptor writes on the Auth Stream. */
 export type AuthReply = AuthOk | AuthError;
 
-const AUTH_OK = 0;
-const AUTH_ERROR = 1;
-
-/** Encode an AUTH_OK or AUTH_ERROR behind its type. */
-export async function encodeAuthReply(w: Writer, reply: AuthReply, version: Version): Promise<void> {
-	await w.u53(reply instanceof AuthOk ? AUTH_OK : AUTH_ERROR);
-	await reply.encode(w, version);
-}
-
 /** Decode the next AUTH_OK or AUTH_ERROR, or undefined once the stream ends. */
 export async function decodeAuthReplyMaybe(r: Reader, version: Version): Promise<AuthReply | undefined> {
 	guardAuth(version);
 	if (await r.done()) return undefined;
 	const typ = await r.u53();
 	switch (typ) {
-		case AUTH_OK:
+		case AuthOk.id:
 			return AuthOk.decode(r, version);
-		case AUTH_ERROR:
+		case AuthError.id:
 			return AuthError.decode(r, version);
 		default:
 			throw new Error(`unknown auth reply type: ${typ}`);
@@ -201,11 +196,11 @@ export class LiteAuthWire implements AuthWire {
 	}
 
 	async grant(stream: Stream, grant: WireGrant): Promise<void> {
-		await encodeAuthReply(stream.writer, new AuthOk(grant.publish, grant.subscribe, grant.expires), this.#version);
+		await new AuthOk(grant.publish, grant.subscribe, grant.expires).encode(stream.writer, this.#version);
 	}
 
 	async refuse(stream: Stream, code: SessionCode, reason: string): Promise<void> {
-		await encodeAuthReply(stream.writer, new AuthError(code, reason), this.#version);
+		await new AuthError(code, reason).encode(stream.writer, this.#version);
 	}
 
 	/** Resetting reads as unsupported to the presenter, the same as a peer that predates AUTH. */

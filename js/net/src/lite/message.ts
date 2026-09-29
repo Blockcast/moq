@@ -1,6 +1,11 @@
 import { Reader, Writer } from "../stream.ts";
 
-export async function encode(writer: Writer, f: (w: Writer) => Promise<void>) {
+/** The largest message body a peer reads, matching the reader's ceiling and Rust. */
+export const MAX_MESSAGE_SIZE = 64 * 1024 * 1024;
+
+// Encodes a message with a varint size prefix. A type `id` is written only once the body
+// fits, so a message the peer would refuse leaves nothing on the stream.
+export async function encode(writer: Writer, f: (w: Writer) => Promise<void>, id?: number) {
 	let scratch = new Uint8Array();
 
 	const temp = new Writer(
@@ -33,6 +38,11 @@ export async function encode(writer: Writer, f: (w: Writer) => Promise<void>) {
 	temp.close();
 	await temp.closed;
 
+	if (scratch.byteLength > MAX_MESSAGE_SIZE) {
+		throw new Error(`message too large: ${scratch.byteLength} bytes (max ${MAX_MESSAGE_SIZE})`);
+	}
+
+	if (id !== undefined) await writer.u53(id);
 	await writer.u53(scratch.byteLength);
 	if (scratch.byteLength > 0) {
 		await writer.write(scratch);
