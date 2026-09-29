@@ -141,7 +141,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Catalog warmup](/quest/m1/catalog-warmup.md) - `warmup` on video and audio renditions, in the catalog and the draft
 - [Audio warmup](/quest/m1/audio-warmup.md) - a viewer joining an Opus rendition mid-stream never hears the unconverged first 80 ms
 - [#3021](/quest/m1/3021-moq-gst-anchor-generated-media-timelines-to-wall-clock.md) - GStreamer maps every pad onto one continuous broadcast clock across source restarts
-- [Export linger](/quest/m1/export-linger.md) - every `moq export` waits `--linger` for a broadcast to return, and exits 0 on a clean end and 1 on a drop
 - [TS byte schedule](/quest/m1/ts-export-byte-schedule.md) - moq export ts places PCRs and padding on the byte grid `mpegts.muxRate` implies, so a receiver can clock off arrival
 - [Text availability](/quest/m1/text-schema.md) - a text track publishes its own coverage index instead of copying the media timeline
 - [ID3 catalog section](/quest/m1/id3.md) - timed ID3 as a first-class container-neutral catalog section
