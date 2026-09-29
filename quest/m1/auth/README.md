@@ -88,7 +88,6 @@ existing lite-06 ALPN.
 
 ## Required
 
-- [AUTH_OK preflight](/quest/m1/auth/auth-ok-preflight.md) - an unencodable IETF grant answers NOT_SUPPORTED with nothing written, as JS already does
 - [AUTH endings](/quest/m1/auth/error-codes.md) - an out-of-range AUTH_ERROR code is refused, and both sides settle and recompute grants when a stream ends
 - [Relay tokens](/quest/m1/auth/relay-refresh.md) - the relay verifies tokens
   sent in band, unions their grants, and cancels only work that loses access

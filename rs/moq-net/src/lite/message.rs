@@ -35,6 +35,10 @@ impl<T: Message> Encode<Version> for T {
 		tracing::trace!(?self, "encoding");
 		let mut sizer = Sizer::default();
 		self.encode_msg(&mut sizer, version)?;
+		// The peer refuses anything larger before decoding it, so it never leaves here.
+		if sizer.size > MAX_MESSAGE_SIZE {
+			return Err(EncodeError::TooLarge);
+		}
 		sizer.size.encode(w, version)?;
 		self.encode_msg(w, version)
 	}
