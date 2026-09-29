@@ -93,3 +93,5 @@ upstream release waits in [m4](/quest/m4/README.md).
 - [Audio capture time](/quest/m2/audio-capture-time.md) - native audio stamps a buffer's capture instant, not when the driver reads it
 - [X11 capture transport](/quest/m2/x11-capture-shm.md) - move X11 capture to shared memory and RandR events instead of a per-frame socket copy
 - [Capture frame buffers](/quest/m2/capture-frame-buffers.md) - stop rebuilding a full-frame buffer every tick in the X11 and Windows backends
+
+- [Demo serve-hls renditions](/quest/m2/serve-hls-renditions.md) - `just pub serve-hls` serves 720p and 144p instead of two 256-wide copies
