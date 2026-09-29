@@ -5,7 +5,7 @@
 JSON tracks live under `json` and opaque tracks under `flate` in moq-ffi and
 every wrapper, constructed from a track producer or consumer as in `moq-json`
 and `moq-flate`, and `BroadcastProducer`/`BroadcastConsumer` lose
-`publish_json_*`/`subscribe_json_*` and `publish_binary_*`. The per-language
+`publish_json_*`/`subscribe_json_*` and `publish_flate_*`. The per-language
 namespace pattern this sets is what the other children copy.
 
 ## Plan
