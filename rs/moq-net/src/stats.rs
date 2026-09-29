@@ -1208,37 +1208,38 @@ impl Registry {
 		let mut retired = shared.retired.lock();
 		{
 			let mut entries = shared.entries.lock();
-			for (path, entry) in entries.iter() {
-				let tiers = entry.tiers.lock().expect("stats tiers poisoned");
-				for (tier, counters) in tiers.iter() {
+			entries.retain(|path, entry| {
+				// With only the map's Arc left, and the map locked, no guard can reach
+				// the entry again.
+				let orphan = Arc::strong_count(entry) == 1;
+				let mut tiers = entry.tiers.lock().expect("stats tiers poisoned");
+				tiers.retain(|tier, counters| {
+					// Decided before the readout, so a last bump racing this report (such
+					// as a frontier's final lag sample) lands in this readout or the next,
+					// never after the one that retires the counters.
+					let done = orphan && Arc::strong_count(counters) == 1;
+					if done {
+						// Pairs with the last holder's releasing decrement, so the readout
+						// below sees every bump it made.
+						std::sync::atomic::fence(Ordering::Acquire);
+					}
 					counters.publisher.sample(now);
+					let publisher = counters.publisher.snapshot();
+					let subscriber = counters.subscriber.snapshot();
+					if done {
+						let totals = retired.traffic.entry(tier.clone()).or_default();
+						totals[Role::Publisher.idx()].add(publisher);
+						totals[Role::Subscriber.idx()].add(subscriber);
+					}
 					report.traffic.push(TrafficEntry {
 						path: path.clone(),
 						tier: tier.clone(),
-						publisher: counters.publisher.snapshot(),
-						subscriber: counters.subscriber.snapshot(),
+						publisher,
+						subscriber,
 					});
-				}
-			}
-			// Prune entries no guard holds anymore: with only the map's Arc
-			// left, no future bump can land, so the entry is done. (A guard
-			// created after the readout above still holds the Arc and keeps
-			// its entry alive.)
-			entries.retain(|_, entry| {
-				if Arc::strong_count(entry) > 1 {
-					return true;
-				}
-				let mut tiers = entry.tiers.lock().expect("stats tiers poisoned");
-				tiers.retain(|tier, counters| {
-					if Arc::strong_count(counters) > 1 {
-						return true;
-					}
-					let totals = retired.traffic.entry(tier.clone()).or_default();
-					totals[Role::Publisher.idx()].add(counters.publisher.snapshot());
-					totals[Role::Subscriber.idx()].add(counters.subscriber.snapshot());
-					false
+					!done
 				});
-				!tiers.is_empty()
+				!orphan || !tiers.is_empty()
 			});
 		}
 		{
