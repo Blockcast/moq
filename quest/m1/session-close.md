@@ -32,3 +32,14 @@ the next run is told the namespace is already published. Switch it to the
 graceful `close()` once that exists. If the calling code lives outside this
 repository (moq-interop-runner), that change is a PR there and needs the
 maintainer's approval before posting.
+
+The draft implementation covers moq-lite and modern IETF namespace FINs,
+JavaScript async close, and a one-second deadline. Legacy IETF drafts 14
+through 16 still need their shared control writer drained: virtual request
+close only enqueues PUBLISH_NAMESPACE_DONE and reports completion before
+transport acknowledgement. This is namespace delivery, separate from the
+IETF media-drain quest. Automatic approval review blocked changes to that
+shared control-stream shutdown; maintainer approval is needed to continue.
+
+The external runner migration is tracked in
+[Interop graceful close](/quest/m2/interop-graceful-close.md).

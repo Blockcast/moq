@@ -44,6 +44,7 @@ pub(super) struct PublisherConfig<S: crate::transport::poll::Session> {
 
 /// Context shared by every control-stream child.
 struct Shared<S: crate::transport::poll::Session> {
+	withdrawal: crate::session::Withdrawal,
 	session: S,
 	origin: origin::Consumer,
 	self_origin: Hop,
@@ -153,6 +154,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 		let accept = config.session.clone();
 		Self {
 			shared: Arc::new(Shared {
+				withdrawal: Default::default(),
 				session: config.session,
 				origin: config.origin,
 				self_origin,
@@ -198,11 +200,14 @@ where
 		Poll::Pending
 	}
 
-	/// Whether no control stream still owes the peer data. Announce, probe, and
-	/// goaway streams last as long as the session, so only the serves that end on
-	/// their own count: subscriptions, fetches, and track info replies.
+	/// Withdraw this session's announcements.
+	pub fn close(&self) {
+		self.shared.withdrawal.begin();
+	}
+
+	/// Whether withdrawals and finite control replies have reached the peer.
 	pub fn drained(&self) -> bool {
-		self.shared.owed.load(Ordering::Relaxed) == 0
+		self.shared.withdrawal.drained() && self.shared.owed.load(Ordering::Relaxed) == 0
 	}
 }
 
@@ -480,6 +485,7 @@ impl<S: crate::transport::poll::Session> ProbeServe<S> {
 /// Serves one announce-interest stream: the initial set, then updates as routes,
 /// demand, and the origin change.
 struct AnnounceServe<S: crate::transport::poll::Session> {
+	_withdrawing: crate::session::Withdrawing,
 	shared: Arc<Shared<S>>,
 	stream: Option<Stream<S, Version>>,
 	state: AnnounceState,
@@ -505,6 +511,7 @@ enum AnnounceState {
 impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 	fn new(shared: Arc<Shared<S>>, stream: Stream<S, Version>) -> Self {
 		Self {
+			_withdrawing: shared.withdrawal.register(),
 			shared,
 			stream: Some(stream),
 			state: AnnounceState::Decode,
@@ -549,6 +556,9 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 				}
 				AnnounceState::Run { origin, announced, run } => {
 					let stream = self.stream.as_mut().expect("stream present");
+					if self.shared.withdrawal.poll(waiter).is_ready() {
+						run.withdraw(stream, origin)?;
+					}
 					let res = ready!(run.poll(stream, origin, announced, waiter));
 					if let Err(err) = res {
 						match &err {
@@ -634,6 +644,7 @@ enum AnnouncePhase {
 	/// The version-specific initial burst has not been sent yet.
 	Init,
 	Running,
+	Withdrawing,
 	/// The origin ended: FIN sent, waiting for the acknowledgement.
 	Closing,
 }
@@ -815,6 +826,21 @@ impl AnnounceRun {
 		Ok(())
 	}
 
+	fn withdraw<S: crate::transport::poll::Session>(
+		&mut self,
+		stream: &mut Stream<S, Version>,
+		origin: &origin::Consumer,
+	) -> Result<(), Error> {
+		if matches!(self.phase, AnnouncePhase::Closing) {
+			return Ok(());
+		}
+		for suffix in self.live.keys().cloned().collect::<Vec<_>>() {
+			self.retract(stream, suffix.clone(), &origin.absolute(&suffix))?;
+		}
+		self.phase = AnnouncePhase::Withdrawing;
+		Ok(())
+	}
+
 	/// Stream updates as they arrive. Closure wins the race so a dead peer can't
 	/// stall on a busy announce feed.
 	fn poll<S: crate::transport::poll::Session>(
@@ -834,6 +860,11 @@ impl AnnounceRun {
 		loop {
 			// Deliver the buffered updates before selecting more work.
 			ready!(stream.writer.poll_flush(&mut cx))?;
+
+			if matches!(self.phase, AnnouncePhase::Withdrawing) {
+				stream.writer.finish()?;
+				self.phase = AnnouncePhase::Closing;
+			}
 
 			if matches!(self.phase, AnnouncePhase::Closing) {
 				return stream.writer.poll_closed(&mut cx);
