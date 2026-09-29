@@ -16,7 +16,7 @@ not moq-c.
   `Timed::from(value).at(t)`. The `moq-mux` data producers take
   `Timed<_, Instant>`, map it onto the broadcast clock, and refuse one ahead of
   now (`Error::InvalidCapture`). The moq-ffi producers in
-  `rs/moq-ffi/src/{json,binary}.rs` pass bare values.
+  `rs/moq-ffi/src/{json,flate}.rs` pass bare values.
 - Settled: the capture time is a media timestamp on the broadcast's
   timeline. moq-ffi exposes the broadcast clock's `now()` as a timestamp;
   callers stamp payloads with values taken from it, and moq refuses one ahead
@@ -34,8 +34,8 @@ not moq-c.
   past capture time is accepted and a future one refused.
 - Go (`go/wrapper/moq`) and Python (`py/moq-rs`) wrap only the JSON
   producers; [#4137](https://github.com/moq-dev/moq/pull/4137) added
-  `publish_binary_snapshot` / `publish_binary_stream` to moq-ffi without
-  them. Add hand-written binary wrappers there, capture time included, so
+  `publish_binary_snapshot` / `publish_binary_stream` (now
+  `publish_flate_*`) to moq-ffi without them. Add hand-written flate wrappers there, capture time included, so
   the capture tests cover binary too. The maintainer asked for this. Update
   `doc/lib/{py,swift,kt,go,dart}`.
 
