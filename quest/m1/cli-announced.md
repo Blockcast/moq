@@ -32,6 +32,6 @@ Decided 2026-09-29 by the maintainer:
 Update every invocation: `doc/bin/cli.md`, `doc/bin/inspect.md`,
 `doc/bin/relay/http.md`, `doc/concept/moq-lite.md`, demo recipes, and
 anything else a repo-wide search for `moq ls` finds. Check them against
-`--help`. moq-cli takes a patch bump.
+`--help`.
 
 Public API: moq-cli command rename, which is breaking for scripts. Wire: none.
