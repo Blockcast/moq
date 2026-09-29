@@ -32,9 +32,8 @@ Guidance:
   (PCR advance since the first stream's new generation, not wall time), and
   commit the shift over the streams seen so far when it expires. A stream
   that returns later applies the committed shift, clamped to its edge as
-  below. The `Anchor`/`Lane` split behind `live()` in `moq_mux::clock` solves
-  a similar problem for restarts, but the remove-live quest deletes it, so
-  copy what helps rather than depending on it.
+  below. The deleted `Anchor`/`Lane` split behind `live()` in `moq_mux::clock`
+  (see its git history) solved a similar problem for restarts; copy what helps.
 - A stream whose own edge is still above the shifted timestamp after the
   shared growth (its tail ran longer) is the case that forces growing by the
   maximum. Landing on its edge is accepted today; keep that trade-off.
@@ -48,4 +47,3 @@ Guidance:
 ## Related
 
 - [#3489](/quest/m1/3489-ts-import-stream-liveness.md) - per-PID liveness in the same importer; touches `Stream` but not the shift
-- [Remove live()](/quest/m1/remove-live.md) - deletes the restart anchor; a wrap shift stays input-derived

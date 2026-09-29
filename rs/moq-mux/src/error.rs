@@ -214,8 +214,8 @@ pub enum Error {
 	#[error("invalid timeline timescale: {0}")]
 	InvalidTimescale(u32),
 
-	/// A source timestamp cannot be mapped onto the broadcast clock: it would land before the
-	/// broadcast began or outside the representable range.
+	/// A source's first timestamp cannot anchor the broadcast clock: it is so large that PTS zero
+	/// would land before the moq epoch (2020).
 	#[error("timestamp cannot be mapped onto the broadcast clock: {0}")]
 	UnmappableTimestamp(String),
 	/// Tried to set an application catalog section whose name collides with a

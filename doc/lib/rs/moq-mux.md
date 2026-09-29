@@ -96,13 +96,16 @@ keep it in the payload.
 telemetry.append(moq_net::Timed::from(packet).at(received_at))?;
 ```
 
-The fMP4, MPEG-TS, and FLV importers publish the source's own timestamps unless
-built with `live()`, which translates them onto the catalog's broadcast clock:
-the first frame is live on arrival, every track of the input shares that one
-mapping, and a source that restarts its timestamps continues forward after the
-real idle gap. fMP4 passthrough rewrites each fragment's `tfdt` to match. Use
-it for a live feed with its own zero; publish verbatim only when the catalog's
-clock (`Config::with_clock`) already names the source's zero.
+The fMP4, MPEG-TS, and FLV importers publish the source's own timestamps
+(MPEG-TS after unwrapping its 33-bit PTS; fMP4 passthrough keeps each `tfdt`)
+and anchor the catalog's broadcast clock instead: the first frame's timestamp
+maps to the time it arrived, and every track of the input, like every importer
+sharing the catalog, keeps that one mapping. A clock set with
+`Config::with_clock` is never re-anchored, for a recording whose zero names its
+real start. An fMP4 or FLV source that rewinds its timestamps, such as a
+restarted encoder, ends the import with an error; republish it as a new
+broadcast. MPEG-TS instead continues a looping source forward from each track's
+live edge.
 
 ```bash
 cargo add moq-mux
