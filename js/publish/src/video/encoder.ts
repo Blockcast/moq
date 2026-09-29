@@ -137,6 +137,10 @@ export class Encoder {
 	// The codec the browser will actually encode with, tagged with the inputs it was probed against.
 	#codec = new Signal<Detected | undefined>(undefined);
 
+	// The codec string the encoder's output reported, tagged with the codec it was configured with.
+	// It can be more specific than the probed string: Safari reports the encoder's active profile.
+	#reported = new Signal<{ configured: string; codec: string } | undefined>(undefined);
+
 	// Uncapped target bitrate (pixels, maxBitrate), the reservation's ceiling.
 	#ceiling = new Signal<number | undefined>(undefined);
 
@@ -274,10 +278,15 @@ export class Encoder {
 
 		let lastKeyframe: Time.Micro | undefined;
 		let lastEncoded: Time.Micro | undefined;
+		let configured: string | undefined;
 
 		effect.spawn(async () => {
 			const encoder = new VideoEncoder({
-				output: (frame: EncodedVideoChunk) => {
+				output: (frame: EncodedVideoChunk, metadata?: EncodedVideoChunkMetadata) => {
+					// Only present on the first output after a configure, or when the encoder's config changes.
+					const reported = metadata?.decoderConfig?.codec;
+					if (reported && configured) this.#reported.set({ configured, codec: reported });
+
 					const key = frame.type === "key";
 					if (key) {
 						lastKeyframe = frame.timestamp as Time.Micro;
@@ -309,6 +318,7 @@ export class Encoder {
 				if (!config) return;
 
 				encoder.configure(config);
+				configured = config.codec;
 			});
 
 			effect.run((effect) => {
@@ -413,8 +423,13 @@ export class Encoder {
 			return;
 		}
 
+		// Advertise what the encoder reported, falling back to the probed string until its first output,
+		// so the rendition announces without waiting on demand. Keyed by the configured codec so a codec
+		// switch never keeps a stale string.
+		const reported = effect.get(this.#reported);
+
 		const catalog: Catalog.VideoConfig = {
-			codec: config.codec,
+			codec: reported?.configured === config.codec ? reported.codec : config.codec,
 			bitrate: config.bitrate ? Catalog.u53(config.bitrate) : undefined,
 			framerate: config.framerate,
 			codedWidth: Catalog.u53(config.width),
@@ -592,30 +607,27 @@ export class Encoder {
 		  }
 		| undefined
 	> {
-		// A list of codecs to try, in order of preference.
+		// A list of codecs to try, in order of preference. Only full RFC 6381 strings: Chrome, Firefox,
+		// and Safari all refuse a bare `avc1` or `vp09`, and native players can't decode without the profile.
 		const HARDWARE_CODECS = [
 			// VP9
 			// More likely to have hardware decoding, but hardware encoding is less likely.
 			"vp09.00.10.08",
-			"vp09", // Browser's choice
 
 			// H.264
 			// Almost always has hardware encoding and decoding.
 			"avc1.640028",
 			"avc1.4D401F",
 			"avc1.42E01E",
-			"avc1",
 
 			// AV1
 			// One day will get moved higher up the list, but hardware decoding is rare.
 			"av01.0.08M.08",
-			"av01",
 
 			// HEVC (aka h.265)
 			// More likely to have hardware encoding, but less likely to be supported (licensing issues).
 			// Unfortunately, Firefox doesn't support decoding so it's down here at the bottom.
 			"hev1.1.6.L93.B0",
-			"hev1", // Browser's choice
 
 			// VP8
 			// A terrible codec but it's easy.
@@ -628,7 +640,6 @@ export class Encoder {
 			"avc1.640028", // High
 			"avc1.4D401F", // Main
 			"avc1.42E01E", // Baseline
-			"avc1",
 
 			// VP8
 			"vp8",
@@ -636,12 +647,10 @@ export class Encoder {
 			// VP9
 			// It's a bit more expensive to encode so we shy away from it.
 			"vp09.00.10.08",
-			"vp09",
 
 			// HEVC (aka h.265)
 			// This likely won't work because of licensing issues.
 			"hev1.1.6.L93.B0",
-			"hev1", // Browser's choice
 		];
 
 		// Try hardware encoding first.
