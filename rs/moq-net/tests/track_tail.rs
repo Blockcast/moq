@@ -106,7 +106,7 @@ async fn round(version: &str, late: Late, final_sequence: u64) -> Outcome {
 		(frames, err, tokio::time::Instant::now())
 	});
 
-	tokio::time::timeout(TIMEOUT, track.used())
+	tokio::time::timeout(TIMEOUT, track.demand().used())
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();

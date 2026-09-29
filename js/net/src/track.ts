@@ -399,6 +399,57 @@ let ordered_: {
 	recvDatagram(subscriber: Subscriber): Promise<Datagram | undefined>;
 };
 
+// Constructs a Demand from within this module; assigned in the class's static block.
+let makeDemand: (name: string, used: Getter<boolean>, state: TrackState) => Demand;
+
+/**
+ * A watch-only view of a track's subscriber demand, from {@link Producer.demand}. Mirrors the
+ * Rust `Demand`.
+ *
+ * Lets a publisher gate work (on-demand capture or encoding) on whether anyone is subscribed,
+ * without the ability to write groups or close the track. The consumer wire watches it to tear an
+ * idle upstream subscription down instead of downloading to nobody.
+ */
+export class Demand {
+	/** The track name. */
+	readonly name: string;
+
+	#used: Getter<boolean>;
+	#state: TrackState;
+
+	private constructor(name: string, used: Getter<boolean>, state: TrackState) {
+		this.name = name;
+		this.#used = used;
+		this.#state = state;
+	}
+
+	static {
+		makeDemand = (name, used, state) => new Demand(name, used, state);
+	}
+
+	/** Whether the track currently has any subscribers. Watch it (`effect.get` / `.peek()`) to follow demand. */
+	get used(): Getter<boolean> {
+		return this.#used;
+	}
+
+	/** Resolves once the track has no subscribers (or has closed). Await it to react to demand ending. */
+	async unused(): Promise<void> {
+		while (this.#used.peek() && this.#state.closed.peek() === undefined) {
+			await Signal.race(this.#used, this.#state.closed);
+		}
+	}
+
+	/** Settles once the track closes: `null` on a clean close, or the abort {@link Error}. */
+	get closed(): GetPromise<Error | null> {
+		return this.#state.closed;
+	}
+
+	/** Publisher priority from the committed {@link Info}, or 0 before {@link Request.accept}. */
+	get priority(): number {
+		return this.#state.info.peek()?.priority ?? 0;
+	}
+}
+
 // Constructs a Subscriber from within this module without exposing a public
 // constructor that would leak the unexported TrackState. Assigned in the class's
 // static block.
@@ -448,12 +499,13 @@ export class Producer {
 	// One independent downstream state per live subscriber.
 	#sinks = new Set<TrackState>();
 
-	// Whether any subscriber is currently attached. Exposed as {@link used}; the consumer wire
-	// watches it to tear down an idle upstream, and a publisher can watch it for on-demand capture.
+	// Whether any subscriber is currently attached, watched through {@link demand}.
 	#used = new Signal<boolean>(false);
+	#demand: Demand;
 
 	constructor(name: string) {
 		this.name = name;
+		this.#demand = makeDemand(name, this.#used, this.#state);
 	}
 
 	static {
@@ -521,22 +573,9 @@ export class Producer {
 		return makeSubscriber(this.name, sink);
 	}
 
-	/**
-	 * Whether the track currently has any subscribers.
-	 *
-	 * Watch it (`effect.get` / `.peek()`) to drive on-demand work: a publisher can start and stop
-	 * capture with demand, and the consumer wire watches it to tear an idle upstream subscription
-	 * down instead of downloading to nobody. Pairs with {@link unused}. Mirrors the Rust `Demand`.
-	 */
-	get used(): Getter<boolean> {
-		return this.#used;
-	}
-
-	/** Resolves once the track has no subscribers (or has closed). Await it to react to demand ending. */
-	async unused(): Promise<void> {
-		while (this.#used.peek() && this.#state.closed.peek() === undefined) {
-			await Signal.race(this.#used, this.#state.closed);
-		}
+	/** A watch-only view of this track's subscriber demand. */
+	demand(): Demand {
+		return this.#demand;
 	}
 
 	// Register a downstream sink: seed its info, replay the retained window, and (while
@@ -568,7 +607,7 @@ export class Producer {
 				this.#sinks.delete(sink);
 				this.#updateSubscription();
 				// Update demand: once the last subscriber leaves, the consumer wire (watching
-				// {@link unused}) tears the upstream down instead of downloading to nobody.
+				// {@link Demand.unused}) tears the upstream down instead of downloading to nobody.
 				this.#used.set(this.#sinks.size > 0);
 				if (this.#state.closed.peek() !== undefined) {
 					this.#release(sink);

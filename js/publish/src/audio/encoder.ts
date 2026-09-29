@@ -353,7 +353,7 @@ export class Encoder {
 			effect.subscribe(this.#config, (config) => {
 				const bitrate = config?.catalog.bitrate;
 				if (bitrate === undefined) return;
-				if (!reservation) reservation = allocator.reserve(track, bitrate);
+				if (!reservation) reservation = allocator.reserve(track.demand(), bitrate);
 				else reservation.update(bitrate);
 			});
 			effect.cleanup(() => reservation?.close());
