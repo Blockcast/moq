@@ -218,6 +218,24 @@ test("Legacy Producer rejects a backwards discontinuity without closing the grou
 	expect(timestamps).toEqual([20_000, 30_000, 35_000]);
 });
 
+test("Legacy Producer keeps the cadence after rejecting a backwards discontinuity", async () => {
+	const track = new Track.Producer("test");
+	const subscriber = track.subscribe({ maxAge: Time.Milli(30_000) });
+	const producer = new LegacyProducer(track, new LegacyFormat("video"));
+	producer.encode(new Uint8Array([1]), 20_000 as Time.Micro, true);
+	producer.encode(new Uint8Array([2]), 30_000 as Time.Micro, false);
+	expect(() => producer.discontinuity(10_000 as Time.Micro)).toThrow();
+	producer.close();
+	const group = await subscriber.recvGroup();
+	const timestamps = [];
+	for (;;) {
+		const frame = await group?.readFrame();
+		if (!frame) break;
+		timestamps.push(Varint.decode(frame.payload)[0]);
+	}
+	expect(timestamps).toEqual([20_000, 30_000, 40_000]);
+});
+
 test("Legacy Producer refuses a keyframe that rewinds the timeline", () => {
 	const track = new Track.Producer("test");
 	const producer = new LegacyProducer(track, new LegacyFormat("video"));

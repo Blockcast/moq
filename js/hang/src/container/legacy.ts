@@ -142,8 +142,10 @@ export class Producer {
 	 */
 	discontinuity(end?: Time.Micro) {
 		// Nothing is measured across the break, so a missing end has no cadence to estimate from.
-		this.#interval = undefined;
+		// An explicit end keeps the cadence until #close validates it, in case it throws.
+		if (end === undefined) this.#interval = undefined;
 		this.#close(end);
+		this.#interval = undefined;
 		const timestamp = end ?? this.#liveEdge;
 		if (this.#format.kind === "data" || this.#marked || timestamp === undefined) return;
 
