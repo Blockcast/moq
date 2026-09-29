@@ -73,10 +73,10 @@ withdraw fallback and no negotiation.
   namespace. Emit an in-place update instead. In-flight subscriptions drain
   the old copy, and new requests neither reuse the old publisher's cached
   track info nor splice onto a live subscription, matching Rust.
-- JS sender `js/net/src/ietf/publisher.ts` (`change`): a first-hop change
-  returns an update instead of `"restart"`, so both the PUBLISH_NAMESPACE
-  path (REQUEST_UPDATE) and the inline path (a re-sent NAMESPACE) update in
-  place instead of withdrawing.
+- JS sender `js/net/src/ietf/publisher.ts` (`#update`): the
+  PUBLISH_NAMESPACE path stops withdrawing on a first-hop change and sends a
+  REQUEST_UPDATE, as Rust will; the inline path already re-sends NAMESPACE in
+  place, like Rust's.
 - Docs: `doc/bin/relay/cluster.md`, and any `doc/concept` page that
   describes the cluster extension, say a publisher change updates in place,
   in-flight subscriptions drain the old publisher, and new requests take the

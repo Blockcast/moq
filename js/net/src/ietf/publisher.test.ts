@@ -1091,8 +1091,14 @@ test("a hop path change behind the same publisher is one REQUEST_UPDATE carrying
 	}
 });
 
-/** NAMESPACE has no REQUEST_UPDATE; the receiver reads a repeat as a replacement. */
-test("a solicited namespace is repriced with one NAMESPACE and no NAMESPACE_DONE", async () => {
+/**
+ * NAMESPACE has no REQUEST_UPDATE; the receiver reads a repeat as a replacement. That holds
+ * for a new original publisher too, as in Rust: only a PUBLISH_NAMESPACE is withdrawn for one.
+ */
+test.each([
+	["a hop path and cost change", [VIA, MID], 8n],
+	["a first-hop change", [OTHER], 4n],
+] as const)("a solicited namespace takes %s as one NAMESPACE and no NAMESPACE_DONE", async (_, hops, cost) => {
 	const { self, pair, pub, origin, close } = clustered(true);
 	try {
 		const broadcast = origin.createBroadcast(Path.from("mine"));
@@ -1112,11 +1118,8 @@ test("a solicited namespace is repriced with one NAMESPACE and no NAMESPACE_DONE
 		await RequestOk.decode(subscription.reader, VERSION);
 		expect(await entry()).toMatchObject({ suffix: Path.from("mine"), cluster: { hops: [VIA, self], cost: 4n } });
 
-		broadcast.announce({ hops: [VIA, MID], cost: 8n });
-		expect(await entry()).toMatchObject({
-			suffix: Path.from("mine"),
-			cluster: { hops: [VIA, MID, self], cost: 8n },
-		});
+		broadcast.announce({ hops: [...hops], cost });
+		expect(await entry()).toMatchObject({ suffix: Path.from("mine"), cluster: { hops: [...hops, self], cost } });
 
 		const more = watch(subscription.reader.u53());
 		await flush();
@@ -1128,9 +1131,9 @@ test("a solicited namespace is repriced with one NAMESPACE and no NAMESPACE_DONE
 });
 
 /**
- * A different broadcast is not a reprice, and neither is a different original publisher:
- * the cluster draft has that withdrawn and advertised again, so a receiver never reads two
- * publishers' content as one stream.
+ * A different broadcast is not a reprice, and on a PUBLISH_NAMESPACE neither is a different
+ * original publisher: the cluster draft has that withdrawn and advertised again, so a
+ * receiver never reads two publishers' content as one stream.
  */
 const RESTARTS = [
 	[
@@ -1165,7 +1168,7 @@ test.each(RESTARTS)("%s withdraws the PUBLISH_NAMESPACE and advertises again", a
 	}
 });
 
-test.each(RESTARTS)("%s withdraws the solicited NAMESPACE and sends it again", async (_, restart) => {
+test("a republish withdraws the solicited NAMESPACE and sends it again", async () => {
 	const { pair, pub, origin, close } = clustered(true);
 	try {
 		const broadcast = origin.createBroadcast(Path.from("mine"));
@@ -1181,7 +1184,8 @@ test.each(RESTARTS)("%s withdraws the solicited NAMESPACE and sends it again", a
 		expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntry.id);
 		await SubscribeNamespaceEntry.decode(subscription.reader, VERSION, true);
 
-		restart(origin, broadcast);
+		const [, republish] = RESTARTS[0];
+		republish(origin, broadcast);
 
 		expect(await subscription.reader.u53()).toBe(SubscribeNamespaceEntryDone.id);
 		expect((await SubscribeNamespaceEntryDone.decode(subscription.reader, VERSION)).suffix).toBe(Path.from("mine"));

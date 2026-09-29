@@ -58,26 +58,28 @@ function clusterFor(base: Cluster.Advert | undefined, route: Route): Cluster.Adv
  *
  * - `"same"`: the peer would decode the same advertisement. The cold cost, and the whole
  *   route without Cluster, never reach the wire, so a change there sends nothing.
- * - `"restart"`: nothing is held, nothing is wanted, a different broadcast, or a different
- *   original publisher, which draft-lcurley-moq-cluster has withdrawn and advertised again
- *   so a receiver never reads two publishers' content as one stream.
- * - Otherwise the same broadcast from the same original publisher at a new hop chain or
- *   warm cost, repriced in place with only the parameters that changed.
+ * - `"restart"`: nothing is held, nothing is wanted, or a different broadcast, which is
+ *   withdrawn and advertised again.
+ * - Otherwise the same broadcast at a new hop chain or warm cost: the cluster parameters
+ *   the peer holds and the ones it should, for the target to update.
  */
 function change(
 	base: Cluster.Advert | undefined,
 	held: Advertised | undefined,
 	next: Advertised | undefined,
-): "same" | "restart" | Cluster.Update {
+): "same" | "restart" | Reprice {
 	if (held === undefined || next === undefined || held.identity !== next.identity) return "restart";
-	const x = clusterFor(base, held.route);
-	const y = clusterFor(base, next.route);
-	if (x === undefined || y === undefined) return x === y ? "same" : "restart";
+	const from = clusterFor(base, held.route);
+	const to = clusterFor(base, next.route);
+	if (from === undefined || to === undefined) return from === to ? "same" : "restart";
+	if (from.cost === to.cost && sameHops(from.hops, to.hops)) return "same";
+	return { from, to };
+}
 
-	const hops = sameHops(x.hops, y.hops);
-	if (hops && x.cost === y.cost) return "same";
-	if (x.hops[0] !== y.hops[0]) return "restart";
-	return { hops: hops ? undefined : y.hops, cost: x.cost === y.cost ? undefined : y.cost };
+/** A held advertisement's cluster parameters, and the ones the peer should hold instead. */
+interface Reprice {
+	from: Cluster.Advert;
+	to: Cluster.Advert;
 }
 
 /** Whether two hop paths list the same hops in the same order. */
@@ -133,8 +135,8 @@ interface Target {
 	/** Advertise a namespace the peer does not hold. */
 	advertise(key: Path.Valid, next: Advertised): Promise<Answer>;
 
-	/** Reprice a namespace the peer holds, from the same original publisher. */
-	update(key: Path.Valid, next: Advertised, update: Cluster.Update): Promise<Answer>;
+	/** Reprice a namespace the peer holds: the same broadcast at a new hop chain or cost. */
+	update(key: Path.Valid, next: Advertised, reprice: Reprice): Promise<Answer>;
 
 	/** Withdraw a namespace the peer holds. */
 	withdraw(key: Path.Valid): Promise<void>;
@@ -816,8 +818,9 @@ export class Publisher {
 				(this.#requiresSolicitation || (this.#hidden && hiddenBelow(Path.empty(), covered)));
 
 			// Inline entries always land, and the receiver treats a repeated NAMESPACE as a
-			// replacement, so repricing one is just sending it again. Only a legacy
-			// PUBLISH_NAMESPACE request can be declined.
+			// replacement, so repricing one is just sending it again, a new original
+			// publisher included, as Rust does. Only a legacy PUBLISH_NAMESPACE request can
+			// be declined.
 			const namespace = async (suffix: Path.Valid, snap: Advertised): Promise<Answer> => {
 				await stream.writer.u53(SubscribeNamespaceEntry.id);
 				const cluster = clusterFor(this.#advert, snap.route);
@@ -828,7 +831,7 @@ export class Publisher {
 				? {
 						advertise: (suffix, snap) =>
 							this.#advertise(Path.join(prefix, suffix), requests, clusterFor(this.#advert, snap.route)),
-						update: (suffix, _snap, update) => this.#update(Path.join(prefix, suffix), requests, update),
+						update: (suffix, _snap, reprice) => this.#update(Path.join(prefix, suffix), requests, reprice),
 						withdraw: (suffix) => this.#withdraw(Path.join(prefix, suffix), requests),
 					}
 				: {
@@ -906,7 +909,7 @@ export class Publisher {
 		const requests: Requests = new Map();
 		const target: Target = {
 			advertise: (path, snap) => this.#advertise(path, requests, clusterFor(this.#advert, snap.route)),
-			update: (path, _snap, update) => this.#update(path, requests, update),
+			update: (path, _snap, reprice) => this.#update(path, requests, reprice),
 			withdraw: (path) => this.#withdraw(path, requests),
 		};
 
@@ -1156,11 +1159,24 @@ export class Publisher {
 	 * REQUEST_ERROR closes the peer's side and withdraws the advertisement, so ours is
 	 * finished too, and an unanswered update is dropped abruptly, since a peer that ignored
 	 * it cannot be assumed to hold either price. Either way the retry re-offers it fresh.
+	 *
+	 * A different original publisher is not an update. draft-lcurley-moq-cluster has it
+	 * withdrawn and advertised again, so the receiver never reads two publishers' content
+	 * as one continuous stream. A NAMESPACE has no such rule and is simply sent again.
 	 */
-	async #update(path: Path.Valid, requests: Requests, update: Cluster.Update): Promise<Answer> {
+	async #update(path: Path.Valid, requests: Requests, { from, to }: Reprice): Promise<Answer> {
+		if (from.hops[0] !== to.hops[0]) {
+			await this.#withdraw(path, requests);
+			return await this.#advertise(path, requests, to);
+		}
+
 		const request = requests.get(path);
 		if (!request) return "dropped";
 
+		const update: Cluster.Update = {
+			hops: sameHops(from.hops, to.hops) ? undefined : to.hops,
+			cost: from.cost === to.cost ? undefined : to.cost,
+		};
 		const version = this.#session.version;
 		let answer: Answer;
 		try {
