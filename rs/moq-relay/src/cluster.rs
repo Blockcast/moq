@@ -297,6 +297,20 @@ impl DialTarget {
 		})
 	}
 
+	/// Bind the configured fallback credential before this target enters the
+	/// dial map, so discovery and source takeover cannot inherit it.
+	fn with_token(mut self, token: &str) -> Self {
+		if !token.is_empty()
+			&& !self
+				.url
+				.query_pairs()
+				.any(|(key, value)| key == "jwt" && !value.is_empty())
+		{
+			self.url.query_pairs_mut().append_pair("jwt", token);
+		}
+		self
+	}
+
 	/// Every address to try, [`Self::url`] first.
 	fn addrs(&self) -> Vec<Url> {
 		if self.urls.is_empty() {
@@ -752,12 +766,11 @@ pub struct Config {
 	pub lan: LanConfig,
 
 	/// JWT presented on outbound cluster dials, read from this file. Applied to
-	/// any static, API, or gossip peer whose URL doesn't already carry a
+	/// any static or API peer whose URL doesn't already carry a
 	/// `?jwt=` and whose object entry sets no `token`. An inline `?jwt=` or
 	/// object `token` provides a per-peer credential for static or `connect_api`
-	/// peers. Gossip should use this shared token or mTLS
-	/// because the advertised node URL is public. LAN peers never receive it;
-	/// they authenticate with their mDNS credential.
+	/// peers. Gossip peers use mTLS and never receive the shared token.
+	/// LAN peers authenticate with their mDNS credential instead.
 	#[usage(
 		name = "cluster-token",
 		long = "cluster-token",
@@ -1416,8 +1429,7 @@ impl Cluster {
 		}
 
 		// Token presented on outbound dials whose URL doesn't already carry a
-		// `?jwt=`. This remains the shared credential for any peer without a
-		// per-peer inline token.
+		// `?jwt=`. Only explicitly configured peers receive this credential.
 		let token = match &self.config.token {
 			Some(path) => std::fs::read_to_string(path)
 				.context("failed to read cluster token")?
@@ -1492,14 +1504,15 @@ impl Cluster {
 		let mut supervised: tokio::task::JoinSet<anyhow::Result<()>> = tokio::task::JoinSet::new();
 
 		for peer in &self.config.connect {
-			let target = DialTarget::from_peer(peer).context("invalid --cluster-connect peer URL")?;
+			let target = DialTarget::from_peer(peer)
+				.context("invalid --cluster-connect peer URL")?
+				.with_token(&token);
 			if dialed.contains(&target.key) {
 				continue;
 			}
 			let this = self.clone();
-			let token = token.clone();
 			let peer_for_task = target.clone();
-			let handle = tasks.spawn(this.supervise_remote(peer_for_task, token));
+			let handle = tasks.spawn(this.supervise_remote(peer_for_task));
 			dialed.insert(target, handle, DialSource::Static);
 		}
 
@@ -1541,12 +1554,11 @@ impl Cluster {
 
 			if can_dial {
 				let this = self.clone();
-				let token = token.clone();
 				let dialed = dialed.clone();
 				// Canonical, so the tiebreaker compares the same spelling both sides do.
 				let self_url = canonicalize_peer_key(node);
 				tasks.spawn(async move {
-					this.run_discovery(self_url, token, dialed).await;
+					this.run_discovery(self_url, dialed).await;
 				});
 			}
 
@@ -1588,7 +1600,7 @@ impl Cluster {
 	/// shorter hop" path in origin::Producer delivers re-announces as
 	/// unannounce-then-announce within sub-milliseconds, which clears the
 	/// pending-cleanup timestamp long before the sweep fires.
-	async fn run_discovery(self, self_url: String, token: String, dialed: DialMap) {
+	async fn run_discovery(self, self_url: String, dialed: DialMap) {
 		let Ok(consumer) = self
 			.origin
 			.consume()
@@ -1610,8 +1622,7 @@ impl Cluster {
 				ann = announced.next() => {
 					let Some(update) = ann else { return; };
 					let relative = update.prefix;
-					// The address to dial, which keeps its query: `run_remote` reads
-					// `?cost=` and `?jwt=` off it. The key is only its identity.
+					// Keep the advertised dial policy; the key is only its identity.
 					let peer = advertised_node_url(relative.as_str());
 					let target = match DialTarget::parse(&peer) {
 						Ok(target) => target,
@@ -1631,7 +1642,7 @@ impl Cluster {
 							let target = live.announce(advertisement, target);
 							let mut spawn = |target: DialTarget| {
 								tracing::info!(peer = %target.key, "discovered cluster peer; dialing");
-								tokio::spawn(self.clone().supervise_remote(target, token.clone())).abort_handle()
+								tokio::spawn(self.clone().supervise_remote(target)).abort_handle()
 							};
 							let key = target.key.clone();
 							if dialed.upsert(target, DialSource::Gossip, &mut spawn) {
@@ -1642,7 +1653,7 @@ impl Cluster {
 							GossipUpdate::Current(target) => {
 								let mut spawn = |target: DialTarget| {
 									tracing::info!(peer = %target.key, "cluster peer advertisement changed; redialing");
-									tokio::spawn(self.clone().supervise_remote(target, token.clone())).abort_handle()
+									tokio::spawn(self.clone().supervise_remote(target)).abort_handle()
 								};
 								dialed.upsert(target, DialSource::Gossip, &mut spawn);
 							}
@@ -1654,7 +1665,7 @@ impl Cluster {
 				_ = sweep.tick() => {
 					let mut spawn = |target: DialTarget| {
 						tracing::info!(peer = %target.key, "cluster peer source changed; redialing");
-						tokio::spawn(self.clone().supervise_remote(target, token.clone())).abort_handle()
+						tokio::spawn(self.clone().supervise_remote(target)).abort_handle()
 					};
 					dialed.sweep_stale(Instant::now(), STALE_AFTER, &mut spawn);
 				}
@@ -1667,17 +1678,17 @@ impl Cluster {
 	/// Each candidate is [`Peer::urls`](moq_tokio::mdns::Peer::urls) in order
 	/// (node first) on `/.cluster/<credential>`, with the advertised fingerprint
 	/// pinned. The lower discovery id dials; the other waits inbound. A LAN dial
-	/// never carries `?jwt=` — [`Config::token`] is for static and gossip
+	/// never carries `?jwt=`; [`Config::token`] is for static and API
 	/// peers only.
 	#[cfg(feature = "cluster-lan")]
 	async fn run_mdns(self, dialed: DialMap, mut discovery: moq_tokio::mdns::Discovery) -> anyhow::Result<()> {
 		use moq_tokio::mdns::Event;
 
 		// Logged by key, never by the target's URL, so an inline query stays out of
-		// the logs. Empty token: LAN authenticates with the mDNS credential.
+		// the logs. LAN authenticates with the mDNS credential.
 		let mut spawn = |target: DialTarget| {
 			tracing::info!(peer = %target.key, "dialing LAN cluster peer");
-			tokio::spawn(self.clone().supervise_remote(target, String::new())).abort_handle()
+			tokio::spawn(self.clone().supervise_remote(target)).abort_handle()
 		};
 
 		while let Some(event) = discovery.recv().await {
@@ -1835,7 +1846,7 @@ impl Cluster {
 		// Dedupe against the shared dial map (and filter out self) on stable identity,
 		// while retaining the full dial configuration so a cost or credential update
 		// replaces the existing session.
-		let desired = match parse_peer_list(list, node.as_deref()) {
+		let mut desired = match parse_peer_list(list, node.as_deref()) {
 			Ok(desired) => desired,
 			Err(err) => {
 				tracing::warn!(%err, "invalid cluster.connect_api peer list; keeping current peers");
@@ -1843,38 +1854,28 @@ impl Cluster {
 			}
 		};
 
+		for target in desired.values_mut() {
+			*target = target.clone().with_token(token);
+		}
+
 		dialed.reconcile_api(&desired, |target| {
 			tracing::info!(peer = %target.key, "cluster.connect_api peer; dialing");
-			let handle = tokio::spawn(self.clone().supervise_remote(target, token.to_string()));
+			let handle = tokio::spawn(self.clone().supervise_remote(target));
 			handle.abort_handle()
 		});
 	}
 
-	async fn supervise_remote(self, target: DialTarget, token: String) {
+	async fn supervise_remote(self, target: DialTarget) {
 		let log_peer = target.key.clone();
-		if let Err(err) = self.run_remote(&target, token).await {
+		if let Err(err) = self.run_remote(&target).await {
 			tracing::warn!(%err, peer = %log_peer, "cluster peer connection ended");
 		}
 	}
 
 	#[tracing::instrument("remote", skip_all, err, fields(remote = %target.key))]
-	async fn run_remote(self, target: &DialTarget, token: String) -> anyhow::Result<()> {
-		let mut urls = target.addrs();
+	async fn run_remote(self, target: &DialTarget) -> anyhow::Result<()> {
 		let cost = target.cost;
-		// Apply the shared cluster token unless the URL already carries its own
-		// non-empty `?jwt=` (a per-peer inline token or object `token` wins; the
-		// shared token still covers peers that have none). An empty
-		// `?jwt=` counts as absent, as `moq auth serve` reads it.
-		// LAN dials never get the token: they authenticate with the mDNS credential.
-		if !target.lan && !token.is_empty() {
-			for url in &mut urls {
-				if !url.query_pairs().any(|(key, value)| key == "jwt" && !value.is_empty()) {
-					url.query_pairs_mut().append_pair("jwt", &token);
-				}
-			}
-		}
-
-		let addrs = moq_tokio::Addrs::collect(urls).context("peer advertised no reachable address")?;
+		let addrs = moq_tokio::Addrs::collect(target.addrs()).context("peer advertised no reachable address")?;
 
 		let base_backoff = tokio::time::Duration::from_secs(1);
 		let max_backoff = tokio::time::Duration::from_secs(300);
@@ -2246,6 +2247,131 @@ mod tests {
 
 	fn new_cluster(config: Config) -> anyhow::Result<Cluster> {
 		Cluster::new(Options::new(config))
+	}
+
+	/// A configured mTLS peer can announce another host, but only the configured
+	/// destination receives the shared token.
+	#[tokio::test]
+	async fn gossip_dials_without_the_configured_token() {
+		let _ = moq_tokio::crypto::install_default();
+		let dir = tempfile::tempdir().expect("tempdir");
+		let ca_key = rcgen::KeyPair::generate().unwrap();
+		let mut ca_params = rcgen::CertificateParams::new(Vec::new()).unwrap();
+		ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+		ca_params.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign];
+		let ca = rcgen::CertifiedIssuer::self_signed(ca_params, ca_key).unwrap();
+		let key = rcgen::KeyPair::generate().unwrap();
+		let mut params = rcgen::CertificateParams::new(vec!["localhost".into(), "127.0.0.1".into()]).unwrap();
+		params.extended_key_usages = vec![
+			rcgen::ExtendedKeyUsagePurpose::ServerAuth,
+			rcgen::ExtendedKeyUsagePurpose::ClientAuth,
+		];
+		let cert = params.signed_by(&key, &ca).unwrap();
+		let root = dir.path().join("ca.pem");
+		let cert_path = dir.path().join("peer.pem");
+		let key_path = dir.path().join("peer.key");
+		std::fs::write(&root, ca.pem()).unwrap();
+		std::fs::write(&cert_path, cert.pem()).unwrap();
+		std::fs::write(&key_path, key.serialize_pem()).unwrap();
+		let token = dir.path().join("cluster.jwt");
+		std::fs::write(&token, "shared-cluster-token").unwrap();
+
+		let mut listen = moq_tokio::listen::Config::default();
+		listen.bind = Some("127.0.0.1:0".parse().unwrap());
+		listen.tls.cert = vec![cert_path.clone()];
+		listen.tls.key = vec![key_path.clone()];
+		listen.tls.root = vec![root.clone()];
+		let seed = listen.clone().init(Default::default()).unwrap();
+		let seed_url = format!("https://localhost:{}/", seed.local_addr().unwrap().port());
+		let mut seed = seed.listen().await.unwrap();
+		let discovered = listen.init(Default::default()).unwrap();
+		let discovered_url = format!("https://127.0.0.1:{}/", discovered.local_addr().unwrap().port());
+		let mut discovered = discovered.listen().await.unwrap();
+
+		let mut connect = moq_tokio::connect::Config::default();
+		connect.bind = Some("127.0.0.1:0".parse().unwrap());
+		connect.tls.root = vec![root];
+		connect.tls.cert = Some(cert_path);
+		connect.tls.key = Some(key_path);
+		let client = connect.init(Default::default()).unwrap();
+		let cluster = new_cluster(Config {
+			connect: vec![Peer::new(seed_url)],
+			node: Some("https://0.example/".into()),
+			mesh: Some("true".into()),
+			token: Some(token),
+			..Default::default()
+		})
+		.unwrap()
+		.with_client(client);
+		let started = cluster.start().await.unwrap();
+		let mut tasks = tokio::task::JoinSet::new();
+		tasks.spawn(started.run());
+
+		let request = seed.accept().await.expect("configured dial");
+		assert!(request.peer_identity().is_some(), "mTLS authenticated dialer");
+		assert!(
+			request
+				.url()
+				.unwrap()
+				.query_pairs()
+				.any(|(k, v)| k == "jwt" && v == "shared-cluster-token")
+		);
+		let origin = moq_tokio::origin::spawn();
+		let advertisement = origin
+			.create_broadcast(format!("{MESH_PREFIX}/{discovered_url}"))
+			.unwrap();
+		advertisement.announce(Default::default()).unwrap();
+		let _session = request
+			.with_publisher(origin.consume().with_hidden(true))
+			.ok()
+			.await
+			.unwrap();
+
+		let request = discovered.accept().await.expect("gossip dial");
+		assert!(request.peer_identity().is_some(), "gossip dial still uses mTLS");
+		assert!(
+			!request.url().unwrap().query_pairs().any(|(k, _)| k == "jwt"),
+			"gossip must not receive the configured token"
+		);
+	}
+
+	#[test]
+	fn configured_peer_token_precedence() {
+		for (peer, expected) in [
+			(Peer::new("https://peer.example/"), "shared"),
+			(Peer::new("https://peer.example/?jwt="), "shared"),
+			(Peer::new("https://peer.example/?jwt=inline"), "inline"),
+			(Peer::new("https://peer.example/").with_token("object"), "object"),
+		] {
+			let target = DialTarget::from_peer(&peer).unwrap().with_token("shared");
+			let tokens: Vec<_> = target
+				.url
+				.query_pairs()
+				.filter(|(key, value)| key == "jwt" && !value.is_empty())
+				.map(|(_, value)| value.into_owned())
+				.collect();
+			assert_eq!(tokens, [expected]);
+		}
+	}
+
+	#[tokio::test]
+	async fn source_takeover_keeps_credentials_bound_to_configured_targets() {
+		let gossip = DialTarget::parse("https://peer.example/").unwrap();
+		let api = gossip.clone().with_token("shared");
+		for (first, first_source, fallback, fallback_source) in [
+			(api.clone(), DialSource::Api, gossip.clone(), DialSource::Gossip),
+			(gossip.clone(), DialSource::Gossip, api.clone(), DialSource::Api),
+		] {
+			let dialed = DialMap::default();
+			dialed.insert(first.clone(), placeholder_handle(), first_source);
+			dialed.upsert(fallback.clone(), fallback_source, &mut |_| panic!("inactive source"));
+			let mut spawned = Vec::new();
+			dialed.release(&first.key, first_source, &mut |target| {
+				spawned.push(target);
+				placeholder_handle()
+			});
+			assert_eq!(spawned, [fallback]);
+		}
 	}
 
 	/// A grant's mount reaches the target for subscribe and refuses publish, both

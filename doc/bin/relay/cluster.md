@@ -133,7 +133,7 @@ enabled = true
 ```
 
 A LAN peer authenticates with its mDNS credential on `/.cluster/<credential>`
-and is never handed `cluster.token`; that token is for static and gossip peers
+and is never handed `cluster.token`; that token is for peers listed in `connect` or `connect_api`
 only. The advertisement carries the listener fingerprint when the certificate
 was generated or supplied in-memory, the `node` URL when one is configured,
 and at least one of them. `secret` is optional. Without it, anyone who can
@@ -177,9 +177,11 @@ clients decode it.
 
 Peers dial with **mTLS** (recommended: `listen.tls.root` on the listener,
 `connect.tls.cert`/`key` on the dialer) or a **JWT** (inline `?jwt=` on a peer
-URL, `token` on a peer object, or a shared `cluster.token` file for static and
-gossip peers). The
-accepting relay admits a peer through the same lease as any client: its
+URL, `token` on a peer object, or a shared `cluster.token` file for peers listed
+in `connect` or `connect_api`). Gossip-discovered peers never receive the shared
+token and should authenticate with mTLS. A token-only deployment must list its
+peers in `connect` or `connect_api` instead of relying on gossip to authenticate
+new destinations. The accepting relay admits a peer through the same lease as any client: its
 certificate is reported to the auth server, which grants it, so a mesh needs
 `moq auth serve --mtls-publish '**' --mtls-subscribe '**'` (or a server of
 your own that grants the cluster CA) behind `--auth-url`. A relay on
