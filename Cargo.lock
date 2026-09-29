@@ -2835,13 +2835,13 @@ dependencies = [
 
 [[package]]
 name = "hang"
-version = "0.21.6"
+version = "0.21.8"
 dependencies = [
  "anyhow",
  "bytes",
  "derive_more 2.1.1",
  "hex",
- "kio 0.6.0",
+ "kio 0.6.1",
  "lazy_static",
  "moq-json",
  "moq-mux",
@@ -3802,7 +3802,7 @@ dependencies = [
 
 [[package]]
 name = "kio"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "criterion",
  "futures",
@@ -3884,7 +3884,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 
 [[package]]
 name = "libmoq"
-version = "0.6.6"
+version = "0.6.8"
 
 [[package]]
 name = "libredox"
@@ -4135,7 +4135,7 @@ dependencies = [
 
 [[package]]
 name = "moq-archive"
-version = "0.0.6"
+version = "0.0.8"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4152,7 +4152,7 @@ dependencies = [
 
 [[package]]
 name = "moq-audio"
-version = "0.1.5"
+version = "0.1.7"
 dependencies = [
  "block2 0.6.2",
  "bytes",
@@ -4160,7 +4160,7 @@ dependencies = [
  "dispatch2",
  "fixed-resample",
  "hang",
- "kio 0.6.0",
+ "kio 0.6.1",
  "moq-mux",
  "moq-net",
  "objc2 0.6.4",
@@ -4183,16 +4183,17 @@ dependencies = [
 
 [[package]]
 name = "moq-auth"
-version = "0.1.3"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
  "axum",
  "base64 0.23.1",
  "jsonwebtoken",
- "kio 0.6.0",
+ "kio 0.6.1",
  "moq-auth",
  "moq-pattern",
+ "moq-token",
  "p256",
  "p384",
  "rand 0.10.3",
@@ -4231,10 +4232,10 @@ dependencies = [
 
 [[package]]
 name = "moq-binary"
-version = "0.1.5"
+version = "0.1.7"
 dependencies = [
  "bytes",
- "kio 0.6.0",
+ "kio 0.6.1",
  "moq-flate",
  "moq-net",
  "thiserror 2.0.21",
@@ -4243,7 +4244,7 @@ dependencies = [
 
 [[package]]
 name = "moq-boy"
-version = "0.5.6"
+version = "0.5.8"
 dependencies = [
  "anyhow",
  "boytacean",
@@ -4269,7 +4270,7 @@ dependencies = [
  "bytes",
  "cbindgen",
  "hang",
- "kio 0.6.0",
+ "kio 0.6.1",
  "moq-audio",
  "moq-json",
  "moq-loc",
@@ -4287,7 +4288,7 @@ dependencies = [
 
 [[package]]
 name = "moq-cli"
-version = "0.12.6"
+version = "0.12.8"
 dependencies = [
  "anyhow",
  "axum",
@@ -4325,14 +4326,14 @@ dependencies = [
 
 [[package]]
 name = "moq-e2ee"
-version = "0.0.6"
+version = "0.0.8"
 dependencies = [
  "aws-lc-rs",
  "base64 0.23.1",
  "bytes",
  "criterion",
  "hex",
- "kio 0.6.0",
+ "kio 0.6.1",
  "moq-net",
  "serde_json",
  "thiserror 2.0.21",
@@ -4344,12 +4345,12 @@ dependencies = [
 
 [[package]]
 name = "moq-ffi"
-version = "0.4.6"
+version = "0.4.8"
 dependencies = [
  "bytes",
  "getrandom 0.4.3",
  "hang",
- "kio 0.6.0",
+ "kio 0.6.1",
  "moq-audio",
  "moq-json",
  "moq-mux",
@@ -4378,7 +4379,7 @@ dependencies = [
 
 [[package]]
 name = "moq-gst"
-version = "0.4.6"
+version = "0.4.8"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4397,13 +4398,13 @@ dependencies = [
 
 [[package]]
 name = "moq-hls"
-version = "0.5.6"
+version = "0.5.8"
 dependencies = [
  "axum",
  "bytes",
  "hang",
  "humantime",
- "kio 0.6.0",
+ "kio 0.6.1",
  "m3u8-rs",
  "moq-mux",
  "moq-net",
@@ -4421,12 +4422,12 @@ dependencies = [
 
 [[package]]
 name = "moq-json"
-version = "0.5.3"
+version = "0.5.5"
 dependencies = [
  "bytes",
  "criterion",
  "json-patch",
- "kio 0.6.0",
+ "kio 0.6.1",
  "moq-flate",
  "moq-net",
  "serde",
@@ -4438,7 +4439,7 @@ dependencies = [
 
 [[package]]
 name = "moq-loc"
-version = "0.2.14"
+version = "0.2.16"
 dependencies = [
  "bytes",
  "moq-net",
@@ -4447,7 +4448,7 @@ dependencies = [
 
 [[package]]
 name = "moq-msf"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -4456,7 +4457,7 @@ dependencies = [
 
 [[package]]
 name = "moq-mux"
-version = "0.10.6"
+version = "0.10.8"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -4464,7 +4465,7 @@ dependencies = [
  "futures",
  "h264-parser",
  "hang",
- "kio 0.6.0",
+ "kio 0.6.1",
  "memchr",
  "moq-binary",
  "moq-json",
@@ -4493,14 +4494,14 @@ version = "0.20.0"
 
 [[package]]
 name = "moq-net"
-version = "0.3.5"
+version = "0.3.7"
 dependencies = [
  "arrayvec",
  "bytes",
  "criterion",
  "futures",
  "getrandom 0.4.3",
- "kio 0.6.0",
+ "kio 0.6.1",
  "loom",
  "moq-pattern",
  "num_enum",
@@ -4601,7 +4602,7 @@ dependencies = [
 
 [[package]]
 name = "moq-pattern"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "moq-pattern",
  "serde",
@@ -4610,7 +4611,7 @@ dependencies = [
 
 [[package]]
 name = "moq-relay"
-version = "0.15.6"
+version = "0.15.8"
 dependencies = [
  "anyhow",
  "axum",
@@ -4653,9 +4654,9 @@ dependencies = [
 
 [[package]]
 name = "moq-room"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
- "kio 0.6.0",
+ "kio 0.6.1",
  "moq-auth",
  "moq-json",
  "moq-net",
@@ -4667,7 +4668,7 @@ dependencies = [
 
 [[package]]
 name = "moq-rtc"
-version = "0.3.6"
+version = "0.3.8"
 dependencies = [
  "aws-lc-rs",
  "axum",
@@ -4687,7 +4688,7 @@ dependencies = [
 
 [[package]]
 name = "moq-rtmp"
-version = "0.3.6"
+version = "0.3.8"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -4735,7 +4736,7 @@ dependencies = [
 
 [[package]]
 name = "moq-srt"
-version = "0.3.6"
+version = "0.3.8"
 dependencies = [
  "bytes",
  "futures",
@@ -4751,7 +4752,7 @@ dependencies = [
 
 [[package]]
 name = "moq-stats"
-version = "0.2.6"
+version = "0.2.8"
 dependencies = [
  "futures",
  "moq-json",
@@ -4765,8 +4766,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-token"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "014ed664b93a4a1bde2547fc92604f3147d2087ed7577e069a33bb88662bb57b"
+dependencies = [
+ "aws-lc-rs",
+ "base64 0.23.1",
+ "jsonwebtoken",
+ "p256",
+ "p384",
+ "rsa",
+ "serde",
+ "serde_json",
+ "serde_with",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "moq-tokio"
-version = "0.19.17"
+version = "0.19.19"
 dependencies = [
  "anyhow",
  "bytes",
@@ -4819,12 +4838,12 @@ dependencies = [
 
 [[package]]
 name = "moq-transcode"
-version = "0.1.5"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "bytes",
  "hang",
- "kio 0.6.0",
+ "kio 0.6.1",
  "moq-mux",
  "moq-net",
  "moq-tokio",
@@ -4838,14 +4857,14 @@ dependencies = [
 
 [[package]]
 name = "moq-uring"
-version = "0.0.7"
+version = "0.0.9"
 dependencies = [
  "anyhow",
  "bytes",
  "criterion",
  "http",
  "io-uring",
- "kio 0.6.0",
+ "kio 0.6.1",
  "libc",
  "moq-net",
  "moq-noq-proto",
@@ -4895,7 +4914,7 @@ dependencies = [
 
 [[package]]
 name = "moq-video"
-version = "0.1.5"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "ash",
@@ -4909,7 +4928,7 @@ dependencies = [
  "futures",
  "h264-reader",
  "hang",
- "kio 0.6.0",
+ "kio 0.6.1",
  "libc",
  "libloading 0.9.0",
  "linux-raw-sys 0.12.1",
@@ -4949,6 +4968,7 @@ name = "moq-wasm"
 version = "0.0.0"
 dependencies = [
  "console_error_panic_hook",
+ "futures",
  "getrandom 0.4.3",
  "js-sys",
  "moq-net",
@@ -6813,17 +6833,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 
 [[package]]
-name = "pulldown-cmark"
-version = "0.13.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
-dependencies = [
- "bitflags 2.13.2",
- "memchr",
- "unicase",
-]
-
-[[package]]
 name = "pulseaudio"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6856,16 +6865,6 @@ dependencies = [
  "tracing",
  "web-transport-proto",
  "web-transport-trait",
-]
-
-[[package]]
-name = "quest"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "pulldown-cmark",
- "tempfile",
 ]
 
 [[package]]
@@ -7838,9 +7837,9 @@ dependencies = [
 
 [[package]]
 name = "serde_with"
-version = "3.23.0"
+version = "3.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "935177bb8c0cd8ca1a4e6d1a2ac8988bea69cab4f9d3a31311e012ad27868ea4"
+checksum = "df9adc193c780ef8f159aee8b61e2d5801aaa555e6eb0947fe45530ec506296f"
 dependencies = [
  "base64 0.23.1",
  "bs58",
@@ -7859,9 +7858,9 @@ dependencies = [
 
 [[package]]
 name = "serde_with_macros"
-version = "3.23.0"
+version = "3.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d607aa01a3cb0ad757d6fd216136910db3c97b102fe686585689615a02dbcdc"
+checksum = "3e17bbc68e28663bbbb90df47e058aa7eda4fb445b89fe70457bb94fbccf6e49"
 dependencies = [
  "darling",
  "proc-macro2",
@@ -9218,12 +9217,6 @@ dependencies = [
  "tempfile",
  "windows-sys 0.61.2",
 ]
-
-[[package]]
-name = "unicase"
-version = "2.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dbc4bc3a9f746d862c45cb89d705aa10f187bb96c76001afab07a0d35ce60142"
 
 [[package]]
 name = "unicode-ident"
