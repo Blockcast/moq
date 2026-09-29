@@ -5735,7 +5735,7 @@ mod tests {
 		let mut subscription = subscribing.await.unwrap().expect("subscribe");
 		subscription.recv_group().await.unwrap().expect("the live group");
 		drop(subscription);
-		tokio::time::timeout(Duration::from_secs(1), source.unused())
+		tokio::time::timeout(Duration::from_secs(1), source.demand().unused())
 			.await
 			.expect("parked")
 			.expect("source open");
@@ -5788,7 +5788,7 @@ mod tests {
 		let mut subscription = subscribing.await.unwrap().expect("subscribe");
 		subscription.recv_group().await.unwrap().expect("the catalog");
 		drop(subscription);
-		tokio::time::timeout(Duration::from_secs(1), source.unused())
+		tokio::time::timeout(Duration::from_secs(1), source.demand().unused())
 			.await
 			.expect("parked")
 			.expect("source open");
@@ -5946,7 +5946,7 @@ mod tests {
 
 			drop(reading);
 			drop(subscription);
-			tokio::time::timeout(Duration::from_secs(1), source.unused())
+			tokio::time::timeout(Duration::from_secs(1), source.demand().unused())
 				.await
 				.expect("parked")
 				.expect("source open");
@@ -5985,7 +5985,7 @@ mod tests {
 
 		// Parked: the source copy goes, the delivered group stays warm. The source
 		// then tears its idle track down, so a returning reader asks it afresh.
-		tokio::time::timeout(Duration::from_secs(1), source.unused())
+		tokio::time::timeout(Duration::from_secs(1), source.demand().unused())
 			.await
 			.expect("parked")
 			.expect("source open");
@@ -7394,7 +7394,7 @@ mod tests {
 		drop(group);
 		drop(subscription);
 
-		tokio::time::timeout(Duration::from_secs(1), track.unused())
+		tokio::time::timeout(Duration::from_secs(1), track.demand().unused())
 			.await
 			.expect("source unused should resolve far below TRACK_IDLE_LINGER")
 			.expect("source closed");
@@ -7414,7 +7414,7 @@ mod tests {
 			.expect("track ended early");
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"cached");
 
-		tokio::time::timeout(Duration::from_secs(1), track.used())
+		tokio::time::timeout(Duration::from_secs(1), track.demand().used())
 			.await
 			.expect("returning reader re-splices the source")
 			.expect("source closed");
@@ -7473,7 +7473,7 @@ mod tests {
 		drain(&mut subscription);
 		drop(subscription);
 
-		tokio::time::timeout(Duration::from_secs(1), source.unused())
+		tokio::time::timeout(Duration::from_secs(1), source.demand().unused())
 			.await
 			.expect("parked")
 			.expect("source open");
@@ -7543,7 +7543,7 @@ mod tests {
 		drop(group);
 		drop(subscription);
 
-		tokio::time::timeout(Duration::from_secs(5), track.unused())
+		tokio::time::timeout(Duration::from_secs(5), track.demand().unused())
 			.await
 			.expect("chained unused should resolve far below TRACK_IDLE_LINGER")
 			.expect("source closed");
@@ -7562,7 +7562,7 @@ mod tests {
 			.subscribe(track::Subscription::default().with_max_age(Duration::from_secs(3600)))
 			.await
 			.expect("resubscribe");
-		tokio::time::timeout(Duration::from_secs(5), track.used())
+		tokio::time::timeout(Duration::from_secs(5), track.demand().used())
 			.await
 			.expect("resubscribe should reach the leaf")
 			.expect("source open");
@@ -7577,7 +7577,7 @@ mod tests {
 		drop(group);
 		drop(subscription);
 
-		tokio::time::timeout(Duration::from_secs(5), track.unused())
+		tokio::time::timeout(Duration::from_secs(5), track.demand().unused())
 			.await
 			.expect("second chained unused should resolve far below TRACK_IDLE_LINGER")
 			.expect("source closed");
@@ -7592,7 +7592,7 @@ mod tests {
 		let fetch = edge_resolved.track("video").unwrap().fetch_group(2, None);
 		let mut fetch = std::pin::pin!(fetch);
 		assert!(futures::poll!(fetch.as_mut()).is_pending(), "fetch should re-splice");
-		tokio::time::timeout(Duration::from_secs(5), track.used())
+		tokio::time::timeout(Duration::from_secs(5), track.demand().used())
 			.await
 			.expect("fetch should reach the leaf")
 			.expect("source open");

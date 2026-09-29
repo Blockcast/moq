@@ -429,7 +429,7 @@ impl<V: Serialize> TrackPair<V> {
 
 	/// Whether any consumer exists on either flavor.
 	fn is_used(&self) -> bool {
-		self.plain.is_used() || self.compressed.is_used()
+		self.plain.demand().is_used() || self.compressed.demand().is_used()
 	}
 
 	/// Publish this drain's entries on both flavors (`{}` when there are none)

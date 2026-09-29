@@ -31,6 +31,12 @@ These land with the next breaking release, not the 2026-09-23 train.
   are `publish_flate_snapshot` / `publish_flate_stream`, taking
   `MoqFlateConfig` and returning `MoqFlateSnapshotProducer` /
   `MoqFlateStreamProducer`. The C `moq_publish_binary_*` calls are unchanged.
+- **Track demand is read through `demand()`.** In Rust, `track::Producer`'s
+  `is_used`, `used`, `unused`, and `poll_unused` are `producer.demand().X`.
+  The moq-json snapshot and moq-flate `is_used()` is `demand().is_used()`.
+  In TypeScript, `Track.Producer`'s `used` and `unused()` are
+  `producer.demand().used` and `.unused()`, and `Allocator.reserve` takes
+  `producer.demand()`, replacing the `Bandwidth.Demand` interface.
 
 ## Wire
 

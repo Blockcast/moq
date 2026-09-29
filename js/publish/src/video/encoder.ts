@@ -242,7 +242,7 @@ export class Encoder {
 			effect.subscribe(this.#ceiling, (ceiling) => {
 				if (ceiling === undefined) return;
 				if (!reservation) {
-					reservation = allocator.reserve(track, ceiling);
+					reservation = allocator.reserve(track.demand(), ceiling);
 					this.#reservation.set(reservation);
 				} else {
 					reservation.update(ceiling);

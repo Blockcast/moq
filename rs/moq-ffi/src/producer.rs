@@ -708,7 +708,7 @@ impl MoqTrackProducer {
 	/// Prefer [`demand`](Self::demand), a handle that can wait without borrowing this producer.
 	pub async fn used(&self) -> Result<(), MoqError> {
 		let track = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.clone();
-		crate::ffi::detached(async move { track.used().await }).await
+		crate::ffi::detached(async move { track.demand().used().await }).await
 	}
 
 	/// Wait until this track has no active consumers.
@@ -716,7 +716,7 @@ impl MoqTrackProducer {
 	/// Prefer [`demand`](Self::demand), a handle that can wait without borrowing this producer.
 	pub async fn unused(&self) -> Result<(), MoqError> {
 		let track = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.clone();
-		crate::ffi::detached(async move { track.unused().await }).await
+		crate::ffi::detached(async move { track.demand().unused().await }).await
 	}
 
 	/// Create a consumer that reads from this producer's track.
