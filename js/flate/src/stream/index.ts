@@ -1,5 +1,5 @@
 /**
- * Lossless append-log binary publishing over MoQ tracks.
+ * Lossless append-log opaque publishing over MoQ tracks.
  *
  * An ordered log of opaque payloads, for consumers that care about every one (an event log, a
  * sequence of samples). Nothing is ever superseded: a consumer yields each payload in the order it

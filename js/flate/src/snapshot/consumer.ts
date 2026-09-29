@@ -1,15 +1,15 @@
-import { Decoder as Flate } from "@moq/flate";
 import * as Moq from "@moq/net";
+import { Decoder as Flate } from "../codec.ts";
 
 import { isDeflate } from "../compression.ts";
 import type { Config as CodecConfig } from "./producer.ts";
 
 /**
- * Consumes a binary value from a track, yielding the newest one.
+ * Consumes an opaque value from a track, yielding the newest one.
  *
  * Jumps to the newest group and reads the value out of it, so a late joiner starts at the current
  * value rather than replaying superseded ones. Interoperable with the Rust
- * `moq_binary::snapshot::Consumer`, which collapses the same backlog.
+ * `moq_flate::snapshot::Consumer`, which collapses the same backlog.
  */
 export class Consumer {
 	#track: Moq.Track.Ordered;

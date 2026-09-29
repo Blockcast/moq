@@ -7,7 +7,6 @@ members = [
     "rs/moq-audio",
     "rs/moq-auth",
     "rs/moq-bench",
-    "rs/moq-binary",
     "rs/moq-boy",
     "rs/moq-c",
     "rs/moq-cli",
@@ -50,7 +49,6 @@ default-members = [
     "rs/moq-boy",
     "rs/moq-audio",
     "rs/moq-bench",
-    "rs/moq-binary",
     "rs/moq-cli",
     "rs/moq-e2ee",
     # "rs/moq-ffi",   # requires Python/maturin
@@ -140,7 +138,6 @@ loom = { version = "0.7.2", features = ["futures"] }
 mdns-sd = { version = "0.21", features = ["async"] }
 moq-audio = { version = "0.1.7", path = "rs/moq-audio", default-features = false }
 moq-auth = { version = "0.1.5", path = "rs/moq-auth" }
-moq-binary = { version = "0.1.7", path = "rs/moq-binary" }
 moq-flate = { version = "0.2.0", path = "rs/moq-flate" }
 moq-hls = { version = "0.5.8", path = "rs/moq-hls", default-features = false }
 moq-json = { version = "0.5.5", path = "rs/moq-json" }

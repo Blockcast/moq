@@ -31,7 +31,6 @@ on:
       - "rs/moq-loc/**"
       - "rs/moq-msf/**"
       - "rs/moq-json/**"
-      - "rs/moq-binary/**"
       - "rs/moq-flate/**"
       - "rs/moq-pattern/**"
       - "rs/hang/**"

@@ -1,4 +1,4 @@
-/** How a binary track compresses its frames. `"none"` (the default) is uncompressed payloads. */
+/** How a `Snapshot` or `Stream` track compresses its frames. `"none"` (the default) is uncompressed payloads. */
 export type Compression = "none" | "deflate";
 
 /** Whether `compression` is group-scoped DEFLATE. */

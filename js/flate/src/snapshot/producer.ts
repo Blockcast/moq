@@ -1,6 +1,6 @@
-import { DEFAULT_MAX_FRAME_SIZE, Encoder as Flate } from "@moq/flate";
 import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
+import { DEFAULT_MAX_FRAME_SIZE, Encoder as Flate } from "../codec.ts";
 
 import { type Compression, isDeflate } from "../compression.ts";
 
@@ -17,7 +17,7 @@ export interface Config {
 }
 
 /**
- * Publishes a binary value to a track, one value per group.
+ * Publishes an opaque value to a track, one value per group.
  *
  * Each {@link update} rolls a new group holding the whole value, so a consumer only ever needs the
  * newest group and older ones are dropped. For a log where every payload survives, use the `Stream`
@@ -27,7 +27,7 @@ export class Producer {
 	#track: Moq.Track.Producer;
 	#compress: boolean;
 
-	/** Wrap a track to publish a binary value into it. */
+	/** Wrap a track to publish an opaque value into it. */
 	constructor(config: Producer.Config) {
 		this.#track = config.track;
 		this.#compress = isDeflate(config.compression);

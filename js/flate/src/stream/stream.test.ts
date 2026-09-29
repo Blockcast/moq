@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
-import { DEFAULT_MAX_FRAME_SIZE } from "@moq/flate";
 import { Time, Track } from "@moq/net";
+import { DEFAULT_MAX_FRAME_SIZE } from "../codec.ts";
 import { Consumer, Producer, Rolled } from "./index.ts";
 
 // Ask for a replay window, so the superseded first group is delivered rather than skipped by the

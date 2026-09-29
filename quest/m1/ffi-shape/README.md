@@ -20,8 +20,7 @@ Settled shape:
   binding never sees that split (catalog, import producers, container
   consumers); `json`, `flate`, `audio`, and `video` own their producers and
   consumers. `flate` holds the opaque snapshot and stream tracks moq-ffi
-  publishes as `publish_binary_*` today (#4137), named after the crate they
-  fold into in [moq-binary folds into moq-flate](/quest/m1/flate-binary.md).
+  publishes as `publish_flate_*` today, named after the `moq-flate` crate.
 - A layer's type is constructed from the handles its Rust constructor takes,
   not reached through an accessor on the broadcast: JSON wraps a track
   (`moq_json::snapshot::Producer::new(track, config)`), so it also works on a

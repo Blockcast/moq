@@ -1,4 +1,4 @@
-//! Lossless append-log binary publishing over [`moq-net`](moq_net) tracks.
+//! Lossless append-log opaque publishing over [`moq-net`](moq_net) tracks.
 //!
 //! An ordered log of opaque payloads, for consumers that care about every one (an event log, a
 //! sequence of samples). Nothing is ever superseded: a consumer yields each payload in the order it
@@ -231,11 +231,8 @@ mod test {
 		let mut producer = Producer::new(track, cfg(true));
 
 		assert!(producer.is_used());
-		let oversized = Bytes::from(vec![0u8; moq_flate::DEFAULT_MAX_FRAME_SIZE as usize + 1]);
-		assert!(matches!(
-			producer.append(oversized),
-			Err(crate::Error::Flate(moq_flate::Error::TooLarge(_)))
-		));
+		let oversized = Bytes::from(vec![0u8; crate::DEFAULT_MAX_FRAME_SIZE as usize + 1]);
+		assert!(matches!(producer.append(oversized), Err(crate::Error::TooLarge(_))));
 
 		assert!(!producer.is_used());
 
@@ -312,7 +309,7 @@ mod test {
 
 		for pair in payloads(4).chunks(2) {
 			// Each group is its own DEFLATE stream, which is what a recovery roll would produce.
-			let mut flate = moq_flate::Encoder::new();
+			let mut flate = crate::Encoder::new();
 			let mut group = track.append_group().unwrap();
 			for payload in pair {
 				group
@@ -387,7 +384,7 @@ mod test {
 
 		// Publish sequence 1 before sequence 0, the way reordering delivers them.
 		for sequence in [1u64, 0] {
-			let mut flate = moq_flate::Encoder::new();
+			let mut flate = crate::Encoder::new();
 			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
 			group
 				.write_frame(moq_net::Timestamp::now(), flate.frame(&[sequence as u8; 8]))

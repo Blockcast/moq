@@ -1,4 +1,4 @@
-//! Consuming an ordered log of binary payloads from a track.
+//! Consuming an ordered log of opaque payloads from a track.
 
 use std::task::Poll;
 
@@ -8,7 +8,7 @@ use crate::Result;
 
 pub use super::Config;
 
-/// Consumes an ordered log of binary payloads from a track, yielding every one.
+/// Consumes an ordered log of opaque payloads from a track, yielding every one.
 ///
 /// The log is a single group. That is what makes the mode lossless: rolling to a second group
 /// means the records that would have completed the first are gone, so a publisher that cannot
@@ -28,7 +28,7 @@ pub struct Consumer {
 	/// fails too rather than reporting the rest of the log as a whole one.
 	rolled: bool,
 	/// The DEFLATE decoder for the group, `Some` while decompressing.
-	flate: Option<moq_flate::Decoder>,
+	flate: Option<crate::Decoder>,
 	compression: bool,
 }
 
@@ -68,7 +68,7 @@ impl Consumer {
 					Poll::Ready(Some(_)) if self.taken => self.rolled = true,
 					Poll::Ready(Some(group)) => {
 						self.taken = true;
-						self.flate = self.compression.then(moq_flate::Decoder::new);
+						self.flate = self.compression.then(crate::Decoder::new);
 						self.group = Some(group);
 					}
 					Poll::Ready(None) => return Poll::Ready(Ok(None)),
