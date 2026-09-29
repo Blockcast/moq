@@ -630,7 +630,7 @@ impl TrackState {
 			.filter(|live| self.holds(live.sequence, live.stamp))
 			.map(|live| (live.sequence, live.timestamp));
 		// `outer` and `successor` were revalidated on their own tracks before this lock
-		// was taken ([`LiveEdge::is_live`], [`Successor::start`]). There is no slot for
+		// was taken ([`LiveEdge::is_live`], [`Successor::poll_start`]). There is no slot for
 		// them here, and taking their locks here would nest.
 		let Some((_, timestamp)) = local
 			.into_iter()
@@ -3208,7 +3208,10 @@ impl group::Expiry for GroupExpiry {
 			.edge
 			.filter(LiveEdge::is_live)
 			.map(|live| (live.sequence, live.timestamp));
-		let successor = anchor.successor.as_ref().and_then(Successor::start);
+		let successor = anchor
+			.successor
+			.as_ref()
+			.and_then(|successor| successor.poll_start(waiter));
 
 		let mut expired = false;
 		let _ = self.state.poll(waiter, |state| {
@@ -3297,8 +3300,9 @@ pub(crate) struct Anchor {
 	/// Where the reader's next group past `cap` starts presenting, when another track
 	/// serves it (a splice's next segment). The last group below the cap has no
 	/// successor in its own track, so without this nothing bounds its reach and it is
-	/// never judged stale. `None` while unknown or unstamped. Revalidated like `edge`:
-	/// a cached start must not convict once that group is gone.
+	/// never judged stale. `None` while unknown; an unstamped group leaves reach unbounded
+	/// until its first frame. Revalidated like `edge`: a cached start must not convict
+	/// once that group is gone.
 	pub successor: Option<Successor>,
 }
 
@@ -3365,14 +3369,16 @@ pub(crate) struct Successor {
 
 impl Successor {
 	/// The start this still names, re-read from its own track, or `None` once that
-	/// group is gone or no longer stamped. Takes that track's lock, so never call it
-	/// under another's.
-	fn start(&self) -> Option<Timestamp> {
+	/// group is gone or while it is unstamped. An unstamped start registers `waiter` for
+	/// the first frame, which bounds a reach without touching either track. Takes that
+	/// track's lock, so never call it under another's.
+	fn poll_start(&self, waiter: &kio::Waiter) -> Option<Timestamp> {
 		let state = self.track.read();
 		let slot = state.lookup.get(&self.sequence)?;
 		if slot.stamp != self.stamp || slot.group.is_aborted() {
 			return None;
 		}
+		let _ = slot.group.poll_timestamp(waiter);
 		slot.group.timestamp()
 	}
 }
@@ -3525,7 +3531,10 @@ impl PlainSubscriber {
 			.as_ref()
 			.filter(|live| live.is_live())
 			.map(|live| (live.sequence, live.timestamp));
-		let successor = drift.successor.as_ref().and_then(Successor::start);
+		let successor = drift
+			.successor
+			.as_ref()
+			.and_then(|successor| successor.poll_start(waiter));
 		let presentation = drift.edge.presentation;
 		let cap = drift.edge.cap;
 		let budget = drift.budget;

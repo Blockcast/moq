@@ -3324,6 +3324,41 @@ mod test {
 		);
 	}
 
+	/// A handed-out group parked at its tail is re-judged once its unstamped successor in
+	/// the next segment presents a first frame. That frame touches only the successor's
+	/// group, not either track or the drift anchor, so the read has to watch it directly.
+	#[tokio::test]
+	async fn unstamped_successor_first_frame_wakes_a_parked_read() {
+		use std::task::Context;
+
+		let (a, a_read) = track_pair("a");
+		let (mut b, b_read) = track_pair("b");
+		let mut head = a.create_group(0u64.into()).unwrap();
+		head.write_frame(Timestamp::ZERO, b"a0".to_vec()).unwrap();
+		let mut successor = b.create_group(1u64.into()).unwrap();
+		write_group_at(&mut b, 2, "edge", Duration::from_secs(20));
+		let mut producer = Producer::new();
+		producer.switch(a_read, None).unwrap();
+		producer.switch(b_read, Position::group(1)).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(reading.sequence, 0, "an unbounded reach is not stale");
+		assert_eq!(read(&mut reading), b"a0");
+
+		let (counter, waker) = CountWaker::new();
+		let mut cx = Context::from_waker(&waker);
+		let mut next = std::pin::pin!(reading.read_frame());
+		assert!(next.as_mut().poll(&mut cx).is_pending());
+
+		let before = counter.count();
+		successor
+			.write_frame(Duration::from_secs(1).try_into().unwrap(), b"b1".to_vec())
+			.unwrap();
+		assert!(counter.count() > before, "the successor's first frame lost its wakeup");
+		let result = next.as_mut().poll(&mut cx);
+		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
+	}
+
 	#[tokio::test]
 	async fn pruned_segment_boundary_is_judged_against_later_segments() {
 		let (mut a, a_read) = track_pair("a");
