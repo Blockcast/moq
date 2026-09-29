@@ -794,7 +794,7 @@ async fn noq_client_close_drains_finished_track() {
 		.await
 		.expect("server handshake failed");
 
-	tokio::time::timeout(TIMEOUT, announcements.next())
+	tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
@@ -913,7 +913,7 @@ async fn noq_client_close_drains_migrated_predecessor() {
 		.await
 		.expect("server handshake failed");
 
-	tokio::time::timeout(TIMEOUT, announcements.next())
+	tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
@@ -1048,7 +1048,7 @@ async fn noq_client_close_keeps_predecessor_handover() {
 		.await
 		.expect("server handshake failed");
 
-	tokio::time::timeout(TIMEOUT, announcements.next())
+	tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
