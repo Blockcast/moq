@@ -307,6 +307,19 @@ mod tests {
 		assert_eq!(got.expires, Some(Duration::from_millis(1)));
 	}
 
+	/// A message the peer would refuse as too large is never encoded, so the acceptor can
+	/// answer instead of sending it.
+	#[test]
+	fn oversized_message_is_refused() {
+		let msg = Auth {
+			token: Bytes::from(vec![0; super::super::message::MAX_MESSAGE_SIZE + 1]),
+		};
+		assert!(matches!(
+			msg.encode(&mut Sizer::default(), Version::Lite06),
+			Err(EncodeError::TooLarge)
+		));
+	}
+
 	#[test]
 	fn older_versions_have_no_auth() {
 		for version in [

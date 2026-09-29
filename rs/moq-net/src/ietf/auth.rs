@@ -474,15 +474,16 @@ async fn serve_issue<S: crate::transport::poll::Session>(
 					subscribe: grant.subscribe,
 					expires: grant.expires.map(|at| at.saturating_duration_since(now)),
 				};
-				// Validated before anything is written, so an unrepresentable grant never
-				// leaves half a message on the wire. Never widen it: refuse, which revokes
-				// whatever this stream granted before.
-				if let Err(EncodeError::Unsupported) = ok.encode_msg(&mut Sizer::default(), version) {
-					tracing::debug!("auth grant not representable as prefixes; refusing the token");
+				// Sized as the full message before anything is written, so a grant that cannot
+				// be encoded for any reason (not a prefix subtree, over the u16 message size)
+				// never leaves half a message on the wire. Never widen or trim it: refuse,
+				// which revokes whatever this stream granted before.
+				if let Err(err) = ok.encode(&mut Sizer::default(), version) {
+					tracing::debug!(%err, "auth grant cannot be encoded as one AUTH_OK; refusing the token");
 					issue.lock().done = true;
 					let refused = AuthError {
 						code: NOT_SUPPORTED,
-						reason: "grant not representable as namespace prefixes".to_string(),
+						reason: "grant cannot be encoded as one AUTH_OK".to_string(),
 					};
 					stream.writer.encode_message(&refused).await?;
 					break;
