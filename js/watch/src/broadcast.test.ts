@@ -174,8 +174,8 @@ describe("relativeBroadcast", () => {
 		const { source, owner } = broadcast("a/b");
 		const effect = new Effect();
 		try {
-			// The catalog broadcast is consumed by an effect, which settles a microtask later.
-			await Promise.resolve();
+			// The catalog broadcast is consumed by an effect, which settles a few microtasks later.
+			await settle();
 			const own = source.out.active.peek();
 			expect(own).toBeDefined();
 			expect(source.relativeBroadcast(effect, undefined)).toBe(own);
@@ -228,6 +228,48 @@ describe("blind resolution", () => {
 		owner.close();
 		await settle();
 	});
+});
+
+describe("refusal", () => {
+	for (const announced of [true, false]) {
+		it(`reports a refusal until a fresh request (announced: ${announced})`, async () => {
+			const owner = new Origin.Producer();
+			const route = owner.dynamic(Path.from("room"));
+			const requests = route.requested();
+			const name = new Signal(Path.from("room/refused.hang"));
+			const source = new Broadcast({ origin: owner, name, enabled: true, announced, catalogFormat: "hang" });
+
+			const first = await requests.next();
+			expect(first.value?.path).toBe(Path.from("room/refused.hang"));
+			first.value?.reject(new Error("not allowed"));
+			await settle();
+
+			expect(source.out.error.peek()?.message).toBe("not allowed");
+			expect(source.out.active.peek()).toBeUndefined();
+			expect(source.out.status.peek()).toBe("offline");
+
+			// Terminal: the handler that said no is never asked again.
+			const again = requests.next();
+			let asked = false;
+			void again.then(() => {
+				asked = true;
+			});
+			for (let i = 0; i < 5; i++) await settle();
+			expect(asked).toBe(false);
+			expect(source.out.error.peek()?.message).toBe("not allowed");
+
+			// A fresh request clears the error and asks again.
+			name.set(Path.from("room/other.hang"));
+			const second = await again;
+			expect(second.value?.path).toBe(Path.from("room/other.hang"));
+			expect(source.out.error.peek()).toBeUndefined();
+
+			source.close();
+			route.close();
+			owner.close();
+			await settle();
+		});
+	}
 });
 
 describe("cross-broadcast renditions", () => {
