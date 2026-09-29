@@ -122,7 +122,10 @@ a group stream. Every stats interval the relay samples each subscription's lag,
 the newest frame the track has produced minus the frontier, or the wall-clock
 time the frontier has stood still while newer media exists if that is larger.
 It adds the bytes the track produced during the interval to the bucket that lag
-falls in, and the broadcast's subscriptions sum into one entry.
+falls in, and the broadcast's subscriptions sum into one entry. A subscription
+that ends between two intervals takes one last sample when it closes, so the
+bytes since its previous sample are not lost, even if it opened and closed
+between two ticks.
 
 | Bucket | Lag |
 | --- | --- |

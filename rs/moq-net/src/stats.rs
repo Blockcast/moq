@@ -1954,6 +1954,17 @@ impl FrontierInner {
 	}
 }
 
+impl Drop for FrontierInner {
+	/// The last strong reference (the subscription guard or an in-flight [`Delivery`])
+	/// is gone, so no tick will find this frontier again: record the bytes produced
+	/// since the last sample now, at the lag they last had.
+	fn drop(&mut self) {
+		if let Some((lag, weight)) = self.sample(crate::model::clock::now()) {
+			self.counters.publisher.lag.record(lag, weight);
+		}
+	}
+}
+
 /// One group stream written toward a peer, reported to its subscription's
 /// [`Frontier`]: an acknowledged FIN advances the frontier, anything else that ends
 /// it counts the written media as dropped on drop. Empty (no-op) off the egress side.
@@ -3060,6 +3071,71 @@ mod lag_tests {
 		let now = h.tick();
 		// `a` is one second behind, `b` nearly three; both weigh the same three groups.
 		assert_eq!(grew(&last, &now), vec![(5, 3 * GROUP_BYTES), (6, 3 * GROUP_BYTES)]);
+	}
+
+	/// The egress lag bytes recorded so far, without ticking the sampler.
+	fn recorded(h: &Harness) -> u64 {
+		h.stats
+			.snapshot()
+			.traffic()
+			.into_iter()
+			.find(|(_, role, _)| matches!(role, Role::Publisher))
+			.map_or(0, |(_, _, traffic)| traffic.lag.total())
+	}
+
+	#[test]
+	fn a_subscription_closed_between_ticks_is_sampled_once() {
+		let mut h = Harness::new();
+		let sub = h.subscribe();
+		let last = h.tick();
+		h.produce();
+		drop(sub);
+
+		// The tick that follows finds no frontier, yet the group still lands, at the
+		// 957ms it was behind when the guard dropped.
+		let now = h.tick();
+		assert_eq!(grew(&last, &now), vec![(4, GROUP_BYTES)]);
+
+		// Sampled exactly once: the closing tick pruned the row, and later media adds
+		// nothing to the retired totals.
+		h.produce();
+		h.stats.report(&mut Report::default());
+		assert_eq!(recorded(&h), GROUP_BYTES);
+	}
+
+	#[test]
+	fn a_subscription_closed_mid_interval_adds_only_the_bytes_since_its_last_sample() {
+		let mut h = Harness::new();
+		let sub = h.subscribe();
+		let mut last = h.tick();
+		h.produce();
+		last = {
+			let now = h.tick();
+			assert_eq!(grew(&last, &now), vec![(4, GROUP_BYTES)]);
+			now
+		};
+		h.produce();
+		h.produce();
+		drop(sub);
+
+		let now = h.tick();
+		assert_eq!(
+			grew(&last, &now).iter().map(|(_, bytes)| bytes).sum::<u64>(),
+			2 * GROUP_BYTES
+		);
+	}
+
+	#[test]
+	fn an_in_flight_delivery_defers_the_final_sample_to_its_own_drop() {
+		let mut h = Harness::new();
+		let sub = h.subscribe();
+		let delivery = Harness::write(&sub, &h.produce());
+		drop(sub);
+		// The delivery still holds the frontier, so it has not closed yet.
+		assert_eq!(recorded(&h), 0);
+
+		drop(delivery);
+		assert_eq!(recorded(&h), GROUP_BYTES);
 	}
 
 	#[test]
