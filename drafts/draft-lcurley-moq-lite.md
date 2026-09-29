@@ -1441,6 +1441,7 @@ The `Message Length` describes the payload size on the wire.
 - Removed SUBSCRIBE_DROP and its type 0x2; a group without a Group Stream is not counted.
 - The Subscribe Stream FIN now follows once every counted Group Stream has finished or been reset.
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live advertisement's suffix, and ANNOUNCE_START and ANNOUNCE_UPDATE gain `Hop Base` and `Hop Keep` to copy the tail of a live advertisement's Hop ID list.
+- An AUTH_ERROR code that does not fit in 32 bits is a PROTOCOL_VIOLATION.
 
 ## moq-lite-06
 

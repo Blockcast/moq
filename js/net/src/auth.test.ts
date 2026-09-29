@@ -177,15 +177,14 @@ describe.each([Lite.ALPN_06, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", (pro
 		const issued = request?.accept(grant(["a"], []));
 		await waitFor(client.auth.grant, (g) => g !== undefined && g.publish.size > 0);
 
-		issued?.close();
-		let timer: ReturnType<typeof setTimeout> | undefined;
-		const timeout = new Promise((resolve) => {
-			timer = setTimeout(() => resolve("timeout"), 1000);
-		});
-		expect(await Promise.race([issued?.closed, timeout])).toBeNull();
-		clearTimeout(timer);
-		client.close();
-		server.close();
+		try {
+			issued?.close();
+			// A regression leaves `closed` pending, so the test runner's timeout fails it.
+			expect(await issued?.closed).toBeNull();
+		} finally {
+			client.close();
+			server.close();
+		}
 	});
 
 	test("a refused setup token grants nothing rather than everything", async () => {
