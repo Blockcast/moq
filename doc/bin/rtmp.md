@@ -31,8 +31,8 @@ is unauthenticated; firewall it.
 
 Each push is its own broadcast. Import publishes the encoder's own timestamps
 and anchors the catalog clock on the first frame, so it names the wall time the
-push arrived; an encoder that rewinds its timestamps mid-push ends that push
-with an error.
+push arrived. A group starting before the previous group's start, such as an
+encoder restarting its timestamps mid-push, ends that push with an error.
 
 A player that advertises enhanced-RTMP multitrack receives every rendition.
 Any other player receives one video rendition: the largest picture (then

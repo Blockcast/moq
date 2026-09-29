@@ -102,9 +102,13 @@ and anchor the catalog's broadcast clock instead: the first frame's timestamp
 maps to the time it arrived, and every track of the input, like every importer
 sharing the catalog, keeps that one mapping. A clock set with
 `Config::with_clock` is never re-anchored, for a recording whose zero names its
-real start. A source that rewinds its timestamps, such as a restarted encoder
-or a looping file wrapping to the top, ends the import with an error, flagged
-MPEG-TS discontinuity or not; republish it as a new broadcast. A flagged
+real start.
+
+Group starts never go backwards. A group starting before the previous group's
+start ends the import with `TimestampRewind`, as a restarted encoder or a looping
+file wrapping to the top does, flagged MPEG-TS discontinuity or not; republish
+it as a new broadcast. Frames may still dip below the previous group's content:
+B-frames, and a keyframe overlapping the previous group's last frame. A flagged
 MPEG-TS discontinuity that jumps forward continues the broadcast.
 
 ```bash

@@ -4126,8 +4126,9 @@ mod test {
 		);
 	}
 
-	// #3533: a content join landed a PES PTS a millisecond below the extrapolated high-water
-	// mark. Any step back is a restart, so the import ends rather than shifting it forward.
+	// #3533: a content join landed a PES PTS a millisecond below the last frame published. Each
+	// audio frame is its own group, so that group starts before the previous one: a restart,
+	// which ends the import rather than shifting it forward.
 	#[tokio::test(start_paused = true)]
 	async fn legacy_pes_below_the_live_edge_is_refused() {
 		const MP2_PID: u16 = 0x0061;
@@ -5288,18 +5289,22 @@ mod test {
 		assert!(is_rewind(&err), "{err:?}");
 	}
 
-	/// Every frame lands at or past the end of the groups before it, which is what the
-	/// producer demands. A group's first frame closes the one before, so it clears that
-	/// group too; later frames may present below it (B-frames).
+	/// Group starts never go backwards, and no frame sits below the start of the group before
+	/// its own, which is what the producer demands. Frames may still present below the previous
+	/// group's content (B-frames, an overlapping keyframe).
 	fn assert_forward(frames: &[crate::container::Frame]) {
-		let (mut edge, mut open) = (0, 0);
+		let (mut start, mut floor) = (None, None);
 		for frame in frames {
 			let ts = frame.timestamp.as_micros();
 			if frame.keyframe {
-				edge = edge.max(open);
+				assert!(
+					start.is_none_or(|start| ts >= start),
+					"a group started at {ts} before {start:?}"
+				);
+				floor = start;
+				start = Some(ts);
 			}
-			assert!(ts >= edge, "rewound to {ts} below the edge {edge}");
-			open = open.max(ts);
+			assert!(floor.is_none_or(|floor| ts >= floor), "rewound to {ts} below {floor:?}");
 		}
 	}
 
@@ -5313,9 +5318,9 @@ mod test {
 
 	/// #3798's join: a new IDR presents below the last P-frame on a continuous clock, since
 	/// the B-frames before it presented earlier than the P-frame decoded ahead of them. It
-	/// lands below the live edge, so it is a restart like any other rewind.
+	/// still starts after the previous group did, so it overlaps rather than rewinds.
 	#[tokio::test(start_paused = true)]
-	async fn h264_join_below_a_p_frame_is_refused() {
+	async fn h264_join_below_a_p_frame_publishes() {
 		let mut mux = Mux {
 			out: synth_pmt(&[(StreamType::H264, VIDEO)], false),
 			..Default::default()
@@ -5323,7 +5328,9 @@ mod test {
 		mux.gops(VIDEO, 90_000, 2);
 		// The last P-frame presented at 90_000 + 8 * FRAME; the join lands a frame short.
 		mux.gops(VIDEO, 90_000 + 6 * FRAME, 2);
-		import_refused(&mux.out);
+		let frames = video_frames(&mux.out).await;
+		assert_eq!(frames.len(), 16, "every picture either side of the join");
+		assert_forward(&frames);
 	}
 
 	/// An encoder restart that declares the new clock on the PCR PID still restarts lower

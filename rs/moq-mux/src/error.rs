@@ -163,7 +163,7 @@ pub enum Error {
 	#[error("{0}")]
 	InvalidEnd(#[from] crate::container::InvalidEnd),
 
-	/// A frame's timestamp sits below the live edge earlier groups reached.
+	/// A group starts before the previous group did: the source restarted.
 	#[error("{0}")]
 	TimestampRewind(#[from] crate::container::TimestampRewind),
 
