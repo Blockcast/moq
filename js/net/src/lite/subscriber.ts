@@ -12,6 +12,7 @@ import { type OpenOptions, type Reader, Stream } from "../stream.ts";
 import { TAIL_GRACE_MS, Tail } from "../tail.ts";
 import * as Time from "../time.ts";
 import type * as track from "../track.ts";
+import { untilAborted } from "../util/abort.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import {
@@ -731,24 +732,32 @@ export class Subscriber {
 		sequence: number,
 		options: track.FetchGroupOptions = {},
 	): Promise<netGroup.Consumer> {
+		options.signal?.throwIfAborted();
+
 		// Coalesce onto a still-open fetch of the same group so we don't open a second FETCH
 		// stream (and re-download it); each caller reads an independent mirror.
+		//
+		// Reserve each caller's mirror before the fetch starts or is awaited: the fetch watches
+		// demand from the start, and a fast FIN cannot discard frames before these callers
+		// receive their handles. An abort closes only this caller's mirror, so the stream is
+		// cancelled once the last one leaves.
 		const key = JSON.stringify([broadcast, track, sequence]);
 		let entry = this.#fetches.get(key);
-		if (!entry || entry.group.isClosed) {
+		let consumer: netGroup.Consumer;
+		if (entry && !entry.group.isClosed) {
+			consumer = entry.group.mirror();
+		} else {
 			const group = new netGroup.Producer(sequence);
-			entry = { group, accepted: this.#runFetch(broadcast, track, sequence, options, group) };
+			consumer = group.mirror();
+			entry = { group, accepted: this.#runFetch(broadcast, track, sequence, options.priority ?? 0, group) };
 			this.#fetches.set(key, entry);
 			void group.closed.then(() => {
 				if (this.#fetches.get(key)?.group === group) this.#fetches.delete(key);
 			});
 		}
 
-		// Reserve each caller's mirror before awaiting acceptance so the pump sees demand,
-		// and a fast FIN cannot discard frames before these callers receive their handles.
-		const consumer = entry.group.mirror();
 		try {
-			await entry.accepted;
+			await untilAborted(entry.accepted, options.signal);
 			return consumer;
 		} catch (err) {
 			consumer.close();
@@ -757,12 +766,13 @@ export class Subscriber {
 	}
 
 	// Open the FETCH stream and pump the response into the shared group. Setup errors close the
-	// group, evict the entry, and reject every caller waiting for acceptance.
+	// group, evict the entry, and reject every caller waiting for acceptance. A setup every caller
+	// has abandoned is cancelled the same way.
 	async #runFetch(
 		broadcast: Path.Valid,
 		track: string,
 		sequence: number,
-		options: track.FetchGroupOptions,
+		priority: number,
 		group: netGroup.Producer,
 	): Promise<void> {
 		try {
@@ -773,10 +783,10 @@ export class Subscriber {
 			// Lite has no FETCH_OK, so a publisher that never answers would hold the setup forever.
 			// Subscriber.close() closing the group releases every caller at any stage, and resets
 			// the streams the setup opened.
-			const setup = this.#fetchSetup(broadcast, track, sequence, options);
+			const setup = this.#fetchSetup(broadcast, track, sequence, priority, group);
 			let accepted: { stream: Stream; info: TrackInfo };
 			try {
-				accepted = await untilClosed(group, setup);
+				accepted = await untilAbandoned(group, setup);
 			} catch (err: unknown) {
 				// A setup that finishes just after the close hands back a stream nobody will read.
 				void setup.then(
@@ -794,20 +804,21 @@ export class Subscriber {
 	}
 
 	// Resolve the track's timescale, then open the FETCH stream and wait for it to be accepted.
+	// Closing the group during that wait resets the stream.
 	async #fetchSetup(
 		broadcast: Path.Valid,
 		track: string,
 		sequence: number,
-		options: track.FetchGroupOptions,
+		priority: number,
+		group: netGroup.Producer,
 	): Promise<{ stream: Stream; info: TrackInfo }> {
-		const info = await this.#trackInfo(broadcast, track);
-		const priority = options.priority ?? 0;
+		const info = await untilClosed(group, this.#trackInfo(broadcast, track));
 		return this.#exchange({ sendOrder: sendOrder({ priority }) }, async (stream) => {
 			await stream.writer.u53(StreamId.Fetch);
 			await new FetchMessage({ broadcast, track, priority, group: sequence }).encode(stream.writer, this.version);
 			// A byte or an empty-group FIN accepts the fetch; a reset rejects it.
 			// done() buffers that byte so the response pump can decode it normally.
-			await stream.reader.done();
+			await untilClosed(group, stream.reader.done());
 			return { stream, info };
 		});
 	}
@@ -1193,6 +1204,17 @@ async function untilClosed<T>(group: netGroup.Producer, step: Promise<T>): Promi
 	const closed = group.closed.peek();
 	if (closed !== undefined) throw closed ?? new Error("fetch closed before it was accepted");
 	return value as T;
+}
+
+// Like untilClosed, but also cancels once every reader has left. Demand is level-triggered, so a
+// caller that coalesces onto the group before the check re-arms it.
+async function untilAbandoned<T>(group: netGroup.Producer, step: Promise<T>): Promise<T> {
+	const idle: unique symbol = Symbol("idle");
+	for (;;) {
+		const value = await untilClosed(group, race([step, group.unused().then((): typeof idle => idle)]));
+		if (value !== idle) return value as T;
+		if (!group.used.peek()) throw new StreamError(StreamCode.Cancel, { message: "cancel" });
+	}
 }
 
 /**
