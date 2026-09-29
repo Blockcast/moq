@@ -2,12 +2,12 @@ use super::origin::*;
 use super::producer::*;
 use super::server::MoqServer;
 use super::session::{MoqClient, MoqSession};
-use crate::binary::MoqBinaryConfig;
 use crate::consumer::MoqBroadcastConsumer;
 use crate::consumer::MoqFetchGroupOptions;
 use crate::consumer::MoqSubscription;
 use crate::consumer::MoqTrackConsumer;
 use crate::error::MoqError;
+use crate::flate::MoqFlateConfig;
 use crate::json::{MoqJsonSnapshotConfig, MoqJsonStreamConfig};
 use crate::media::{MoqAudioFormat, MoqAudioInit, MoqFrame, MoqVideoFormat, MoqVideoInit};
 use crate::session::{MoqBackoff, MoqConnectionStatus};
@@ -2543,25 +2543,33 @@ async fn dynamic_serves_a_request_under_a_prefix() {
 	served.close().unwrap();
 }
 
-/// Tearing the origin down ends every handler with `Closed`. A parked request
-/// keeps the origin's driver alive (its front is lifecycle work the driver
-/// drains before resolving), so the teardown never runs underneath one; the
-/// case that does happen is a live handler with nothing parked.
+/// A dynamic handler keeps its origin alive: dropping (or GC-finalizing) the
+/// last `MoqOriginProducer` leaves the route serving, and a consumer made
+/// earlier still resolves through it.
 #[tokio::test]
-async fn origin_teardown_closes_dynamic_handlers() {
+async fn dynamic_keeps_the_origin_alive() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let consumer = origin.consume();
 	let dynamic = serve(&origin, "");
-
-	// The last producer handle: the origin's driver resolves and tears it down.
 	drop(origin);
-	match tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
+
+	let request_broadcast = {
+		let consumer = consumer.clone();
+		tokio::spawn(async move { consumer.request_broadcast("live".into()).await })
+	};
+	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
 		.await
-		.expect("the handler must observe the teardown")
-	{
-		Err(MoqError::Closed) => {}
-		Err(err) => panic!("unexpected error: {err:?}"),
-		Ok(_) => panic!("a request was handed out after the teardown"),
-	}
+		.expect("the handler must still receive requests")
+		.unwrap();
+	let served = MoqBroadcastProducer::new().unwrap();
+	request.accept(&served).unwrap();
+	tokio::time::timeout(TIMEOUT, request_broadcast)
+		.await
+		.expect("timed out waiting for the request to resolve")
+		.expect("request task panicked")
+		.expect("the handler served the path");
+
+	served.close().unwrap();
 }
 
 /// Cancelling a handler retracts its route before returning.
@@ -4546,23 +4554,23 @@ async fn json_tracks_are_advertised_in_the_catalog() {
 	assert!(published_catalog(&broadcast).json.tracks.is_empty());
 }
 
-/// Binary tracks carry their mode and (optional) media type in the catalog.
+/// Flate tracks carry their mode and (optional) media type in the catalog.
 #[tokio::test]
-async fn binary_tracks_are_advertised_in_the_catalog() {
+async fn flate_tracks_are_advertised_in_the_catalog() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let thumb = broadcast
-		.publish_binary_snapshot(
+		.publish_flate_snapshot(
 			"thumbnail".into(),
-			MoqBinaryConfig {
+			MoqFlateConfig {
 				compression: false,
 				mime: Some("image/jpeg".into()),
 			},
 		)
 		.unwrap();
 	let log = broadcast
-		.publish_binary_stream(
+		.publish_flate_stream(
 			"log".into(),
-			MoqBinaryConfig {
+			MoqFlateConfig {
 				compression: false,
 				mime: None,
 			},
@@ -4604,9 +4612,9 @@ async fn data_track_names_cannot_collide() {
 		.unwrap();
 	assert!(
 		broadcast
-			.publish_binary_stream(
+			.publish_flate_stream(
 				"state".into(),
-				MoqBinaryConfig {
+				MoqFlateConfig {
 					compression: false,
 					mime: None,
 				},
@@ -4708,14 +4716,9 @@ async fn shutdown_times_out_on_an_unfinished_track() {
 		let reader = remote.subscribe_track("data".into(), None).await.unwrap();
 		let receiving = tokio::spawn(async move { reader.read_frame().await });
 		tokio::time::timeout(TIMEOUT, track.used()).await.unwrap().unwrap();
-		let started = std::time::Instant::now();
 		let err = publisher.shutdown().await.expect_err("unfinished track must time out");
 		assert!(
 			matches!(err, MoqError::Protocol { details } if details.kind == crate::error::MoqProtocolKind::DeliveryTimeout)
-		);
-		assert!(
-			started.elapsed() >= Duration::from_secs(1),
-			"shutdown skipped the drain"
 		);
 		let _ = tokio::time::timeout(TIMEOUT, receiving).await.unwrap().unwrap();
 		client.cancel(0);

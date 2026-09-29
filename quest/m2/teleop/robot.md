@@ -72,8 +72,7 @@ The framing is where the guarantee lives, not the subscription flags:
 - Announce-prefix fan-in, generalised from `rs/moq-boy/src/input.rs`.
 - The two delivery classes, as the snapshot and stream modes with the group
   structure and `Info::max_age` each one needs: `moq-json`'s for JSON, and the
-  opaque-bytes ones for binary frames (`moq-binary`, folding into `moq-flate`
-  per [moq-binary folds into moq-flate](/quest/m1/flate-binary.md)).
+  opaque-bytes ones for binary frames (`moq-flate`).
 - Per-stage timestamp instrumentation, generalised from moq-boy's `status`
   track. Check it against the publisher-reported stats broadcast
   ([client stats](/quest/m1/qos/stats/schema.md), moq#2734) before adding a
