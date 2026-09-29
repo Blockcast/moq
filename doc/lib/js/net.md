@@ -117,8 +117,8 @@ An established connection's `await connection.close()` withdraws its
 announcements and waits up to one second for delivery before disconnecting.
 It rejects if delivery fails or times out, and closes the transport either way.
 Use `connection.abort()` for immediate shutdown. Reconnecting connection
-handles keep their synchronous `close()` disposal behavior. Legacy IETF
-drafts 14 through 16 do not yet wait for shared control-stream delivery.
+handles keep their synchronous `close()` disposal behavior. IETF drafts 14
+through 16 send their withdrawals without waiting.
 
 Examples in
 [`js/net/examples/`](https://github.com/moq-dev/moq/tree/main/js/net/examples).

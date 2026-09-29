@@ -170,7 +170,7 @@ impl Session {
 	/// is still live never finishes, so finish or abort tracks before closing.
 	///
 	/// Both protocols withdraw this session's announcements and wait for their
-	/// delivery, except IETF drafts 14 through 16 only enqueue withdrawals.
+	/// delivery. IETF drafts 14 through 16 send withdrawals without waiting, and
 	/// IETF media streams are not drained yet.
 	pub async fn close(self) -> Result<(), Error> {
 		if let Ok(mut close) = self.close.write()
@@ -554,10 +554,7 @@ struct WithdrawalState {
 
 impl Withdrawal {
 	pub(crate) fn begin(&self) {
-		let mut state = self.0.lock();
-		if !state.closing {
-			state.closing = true;
-		}
+		self.0.lock().closing = true;
 	}
 
 	pub(crate) fn poll(&self, waiter: &kio::Waiter) -> Poll<()> {

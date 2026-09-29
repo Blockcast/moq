@@ -63,8 +63,8 @@ peer has not acknowledged yet. `session.close().await` first waits, up to one
 second, for finished tracks to deliver their last groups and FIN, returning
 `Error::Timeout` if it gave up. Finish or abort live tracks before calling it.
 Both protocols withdraw the session's announcements and wait for delivery
-under that same deadline, except legacy IETF drafts 14 through 16 still
-only enqueue their withdrawals. IETF media streams are not drained yet. Dropping the driver
+under that same deadline. IETF drafts 14 through 16 send withdrawals without
+waiting, and IETF media streams are not drained yet. Dropping the driver
 cancels the session. `moq-tokio` and `moq-wasm` drive sessions for their
 callers.
 

@@ -557,7 +557,7 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 				AnnounceState::Run { origin, announced, run } => {
 					let stream = self.stream.as_mut().expect("stream present");
 					if self.shared.withdrawal.poll(waiter).is_ready() {
-						run.withdraw(stream, origin)?;
+						run.withdraw(stream, origin, announced)?;
 					}
 					let res = ready!(run.poll(stream, origin, announced, waiter));
 					if let Err(err) = res {
@@ -743,7 +743,7 @@ impl AnnounceRun {
 	) -> Result<(), Error> {
 		match self.version {
 			Version::Lite01 | Version::Lite02 => {
-				let mut init = Vec::new();
+				let mut init: Vec<(crate::PathOwned, Hops, crate::origin::Cost)> = Vec::new();
 
 				// Send ANNOUNCE_INIT as the first message with all currently active routes.
 				// We use `try_next()` to synchronously get the initial updates.
@@ -759,22 +759,25 @@ impl AnnounceRun {
 					let suffix = update.prefix;
 
 					if active {
-						if self.outgoing(&update.route, &absolute).is_none() {
+						let Some((hops, cost)) = self.outgoing(&update.route, &absolute) else {
 							continue;
-						}
+						};
 						tracing::debug!(route = %absolute, "announce");
-						if !init.contains(&suffix) {
-							init.push(suffix);
-						}
+						init.retain(|(s, ..)| s != &suffix);
+						init.push((suffix, hops, cost));
 					} else {
 						// A potential race: a just-announced route already retracted.
 						tracing::debug!(route = %absolute, "unannounce");
-						init.retain(|p| p != &suffix);
+						init.retain(|(s, ..)| s != &suffix);
 					}
 				}
 
-				let announce_init = lite::AnnounceInit { suffixes: init };
-				stream.writer.buffer(&announce_init)?;
+				let suffixes = init.iter().map(|(suffix, ..)| suffix.clone()).collect();
+				stream.writer.buffer(&lite::AnnounceInit { suffixes })?;
+				// Record the initial set so a later end reaches the peer.
+				for (suffix, hops, cost) in init {
+					self.live.insert(suffix, Advertised { id: None, hops, cost });
+				}
 			}
 			_ if self.version.has_announce_ok() => {
 				// Drain the current active set synchronously (like the Lite01/02 path),
@@ -826,13 +829,18 @@ impl AnnounceRun {
 		Ok(())
 	}
 
+	/// Retract every live announcement and FIN once flushed. An unanswered request
+	/// still gets its initial burst first, since the peer expects that before a FIN.
 	fn withdraw<S: crate::transport::poll::Session>(
 		&mut self,
 		stream: &mut Stream<S, Version>,
 		origin: &origin::Consumer,
+		announced: &mut announce::Consumer,
 	) -> Result<(), Error> {
-		if matches!(self.phase, AnnouncePhase::Closing) {
-			return Ok(());
+		match self.phase {
+			AnnouncePhase::Withdrawing | AnnouncePhase::Closing => return Ok(()),
+			AnnouncePhase::Init => self.init(stream, origin, announced)?,
+			AnnouncePhase::Running => {}
 		}
 		for suffix in self.live.keys().cloned().collect::<Vec<_>>() {
 			self.retract(stream, suffix.clone(), &origin.absolute(&suffix))?;
@@ -3600,6 +3608,66 @@ mod tests {
 		assert!(
 			!writes.windows(b"echoed".len()).any(|w| w == b"echoed"),
 			"echoed broadcast filtered from ANNOUNCE_INIT"
+		);
+	}
+
+	/// A broadcast sent in ANNOUNCE_INIT is live like any other, so its end reaches
+	/// the peer instead of being treated as never advertised.
+	#[tokio::test]
+	async fn announce_init_broadcast_ends() {
+		let self_origin = crate::Hop::new(1).unwrap();
+		let origin = crate::origin::Config::new(self_origin).produce();
+		let cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
+
+		let gate = kio::Producer::new(true);
+		let session = SinkSession::gated_bi(gate.consume());
+		let log = session.log.clone();
+		let mut stream = Stream::open(&mut session.clone(), Version::Lite01).await.unwrap();
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+		let mut run = std::pin::pin!(Publisher::<SinkSession>::run_announce(
+			&mut stream,
+			&consumer,
+			&mut announced,
+			self_origin,
+			Version::Lite01,
+		));
+		assert!(futures::poll!(run.as_mut()).is_pending());
+		drop(cam);
+		tokio::time::timeout(std::time::Duration::from_secs(10), async {
+			while log.writes.lock().unwrap().windows(3).filter(|w| *w == b"cam").count() < 2 {
+				assert!(futures::poll!(run.as_mut()).is_pending());
+				tokio::task::yield_now().await;
+			}
+		})
+		.await
+		.expect("the initial broadcast's end was never sent");
+	}
+
+	/// A close that lands before the initial burst still sends it, then ends every
+	/// broadcast, so the peer never sees a FIN in place of ANNOUNCE_INIT.
+	#[tokio::test]
+	async fn withdraw_before_init_sends_the_initial_burst() {
+		let self_origin = crate::Hop::new(1).unwrap();
+		let origin = crate::origin::Config::new(self_origin).produce();
+		let _cam = origin.announce("cam", crate::origin::Route::default()).unwrap();
+
+		let gate = kio::Producer::new(true);
+		let session = SinkSession::gated_bi(gate.consume());
+		let log = session.log.clone();
+		let mut stream = Stream::open(&mut session.clone(), Version::Lite01).await.unwrap();
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+
+		let mut run = AnnounceRun::new(self_origin, Version::Lite01);
+		run.withdraw(&mut stream, &consumer, &mut announced).unwrap();
+		let _ = kio::wait(|waiter| Poll::Ready(run.poll(&mut stream, &consumer, &mut announced, waiter))).await;
+
+		let writes = log.writes.lock().unwrap();
+		assert_eq!(
+			writes.windows(b"cam".len()).filter(|w| *w == b"cam").count(),
+			2,
+			"ANNOUNCE_INIT carries the broadcast, then its end follows"
 		);
 	}
 

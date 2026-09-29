@@ -92,8 +92,8 @@ second for transport acknowledgement before disconnecting. Rust uses
 established connection. An abort skips the withdrawal and ends immediately.
 The source origin remains usable by other sessions. Acknowledgement confirms
 transport delivery, not that the peer application has finished processing it.
-Legacy IETF drafts 14 through 16 do not yet wait for their shared control
-stream to deliver the withdrawals.
+IETF drafts 14 through 16 send their withdrawals on the shared control stream
+without waiting, since it has no FIN to acknowledge.
 
 ### Hidden broadcasts
 
