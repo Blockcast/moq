@@ -50,3 +50,25 @@ and `--cors-origin` opens it to browsers.
 H.264/H.265 and AAC/Opus renditions are served. Import handles classic HLS;
 LL-HLS parts are not implemented yet. The library is
 [`moq-hls`](https://docs.rs/moq-hls).
+
+## Recording segments
+
+`moq_hls::export::segments::Segment::discontinuity` is the absolute timeline
+sequence within one `Broadcaster`. Cursors created at different times report
+the same sequence for the same timeline span, including after a rendition
+rebinds. Skipping unavailable segments does not reset the sequence.
+
+A recorder uses the first retained segment's value for
+`EXT-X-DISCONTINUITY-SEQUENCE` and marks changes with `EXT-X-DISCONTINUITY`.
+The value is a sequence, not a count to add for every segment. Retain the
+absolute value in the index alongside each segment.
+
+Recreating the broadcaster starts a new sequence namespace. Start a new
+recording/playlist, or explicitly map the new broadcaster's sequences into a
+recording-wide sequence with a discontinuity at the boundary. Do not compare
+raw values across broadcaster instances or infer a restart from zero alone.
+
+When updating moq.pro's moq-hls pin to this breaking release, update its recorder
+and index together: store the returned sequence directly instead of accumulating
+per-cursor break counts. Existing indexes containing counts need conversion
+within their original recording namespace before combining them with new data.
