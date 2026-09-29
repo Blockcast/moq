@@ -7,9 +7,10 @@ name: Release Kotlin lib
 # when it isn't, so merging a `moq.version` bump ships a new release while any
 # other push is a no-op.
 #
-# The wrapper is pure Kotlin layered on `dev.moq:moq-ffi`; its POM depends on
-# moq-ffi via a floating range so consumers float to the newest bindings patch
-# without the wrapper being re-cut. We still generate the UniFFI bindings here
+# The wrapper is pure Kotlin layered on `dev.moq:moq-ffi`; its Gradle metadata
+# depends on moq-ffi via a floating range so consumers float to the newest
+# bindings patch without the wrapper being re-cut. Maven reads the platform
+# POMs instead, which pin the bindings this workflow passes as moqffi.version. We still generate the UniFFI bindings here
 # so the sibling `:moq-ffi` project compiles (the wrapper resolves it via the
 # project substitution in kt/moq/build.gradle.kts); native libs aren't needed
 # because JNA is compileOnly.
@@ -65,6 +66,7 @@ jobs:
        startsWith(github.event.workflow_run.head_branch, 'moq-ffi-v'))
     outputs:
       version: ${{ steps.version.outputs.version }}
+      ffi_version: ${{ steps.ffi.outputs.version }}
       should_publish: ${{ steps.decide.outputs.should_publish }}
 
     steps:
@@ -208,11 +210,13 @@ jobs:
         if: github.event_name != 'pull_request' && steps.recheck.outputs.exists != 'true'
         env:
           MOQ_VERSION: ${{ needs.check-version.outputs.version }}
+          FFI_VERSION: ${{ needs.check-version.outputs.ffi_version }}
           ORG_GRADLE_PROJECT_signingInMemoryKey: ${{ secrets.SIGNING_KEY }}
           ORG_GRADLE_PROJECT_signingInMemoryKeyPassword: ${{ secrets.SIGNING_PASSWORD }}
         run: |
           gradle -p kt \
             -Pmoq.version="$MOQ_VERSION" \
+            -Pmoqffi.version="$FFI_VERSION" \
             -Pandroid.enabled=true \
             :moq:publishAndReleaseToMavenCentral --no-configuration-cache
 
@@ -220,8 +224,20 @@ jobs:
         if: github.event_name == 'pull_request'
         env:
           MOQ_VERSION: ${{ needs.check-version.outputs.version }}
+          FFI_VERSION: ${{ needs.check-version.outputs.ffi_version }}
         run: |
           gradle -p kt \
             -Pmoq.version="$MOQ_VERSION" \
+            -Pmoqffi.version="$FFI_VERSION" \
             -Pandroid.enabled=true \
             :moq:publishToMavenLocal --no-configuration-cache
+          # Maven reads only the POM, where the substituted :moq-ffi project's
+          # version stands in for the declared range. Anything but the released
+          # bindings leaves a Maven consumer unable to resolve the wrapper.
+          for pom in ~/.m2/repository/dev/moq/moq-*/"$MOQ_VERSION"/*.pom; do
+            ffi=$(sed -n '/<artifactId>moq-ffi[^<]*<\/artifactId>/{n;s/.*<version>\(.*\)<\/version>.*/\1/p;}' "$pom")
+            if [[ "$ffi" != "$FFI_VERSION" ]]; then
+              echo "::error::$pom depends on moq-ffi '$ffi', not the released $FFI_VERSION"
+              exit 1
+            fi
+          done

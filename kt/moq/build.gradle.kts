@@ -14,7 +14,10 @@
 //
 // Local builds and CI resolve `moq-ffi` from the sibling project via the
 // dependency substitution below, so tests run against freshly-built bindings.
-// The published POM keeps the range (substitution only affects resolution).
+// The Gradle module metadata keeps the range. The POM does not: Kotlin rewrites it
+// to the resolved platform artifact (`moq-ffi-jvm`), which the substitution makes
+// this build's :moq-ffi at `moqffi.version`, so release-kt-lib.yml sets that to
+// the released bindings.
 //
 // Publishing uses com.vanniktech.maven.publish; CI runs
 // `:moq:publishAndReleaseToMavenCentral`. Credentials come from env vars set by
@@ -41,8 +44,8 @@ plugins {
 version = providers.gradleProperty("moq.version").get()
 
 // Compatible-patch range for the bindings: 0.4.3 (the WebSocket fallback
-// setters) or newer, never 0.5.0. Published into the wrapper's POM so consumers
-// float to the newest bindings patch.
+// setters) or newer, never 0.5.0. Published into the wrapper's Gradle module
+// metadata so Gradle consumers float to the newest bindings patch.
 val MOQ_FFI_RANGE = "[0.4.3,0.5)"
 
 val androidEnabled = providers.gradleProperty("android.enabled").orNull == "true"
