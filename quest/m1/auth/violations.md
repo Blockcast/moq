@@ -1,4 +1,4 @@
-# [S] AUTH protocol violations close the session everywhere
+# [M] AUTH protocol violations close the session everywhere
 
 ## Goal
 
@@ -25,6 +25,14 @@ on an explicit `ProtocolViolation` in Rust lite. These gaps remain:
 - Both IETF AUTH acceptors (Rust `Serve::run`, JS `IetfAuthWire.accept`)
   discard the decoded Request ID, so a reused ID is accepted. Validate it like
   every other request, where a duplicate is session-fatal.
+- An AUTH reply of an unknown type (neither AUTH_OK nor AUTH_ERROR) fails
+  the type dispatch before either decoder runs, and ends only the token.
+- A second AUTH on an open IETF AUTH stream is never read: after the first,
+  Rust `Serve::run` and JS `AuthSession.serve` wait only for the stream to
+  close. Treat it like a repeated PUBLISH_NAMESPACE, a duplicate request.
+
+This list comes from review, not a full audit. Walk every AUTH read path on
+both sides, both protocols, and both languages, and fold in anything missing.
 
 Close the session on each, in both languages and on both protocols, with one
 regression test per case, and check the lite and IETF draft text agrees. Run
