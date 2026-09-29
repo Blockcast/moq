@@ -1217,7 +1217,9 @@ export class Publisher {
 			return "dropped";
 		}
 
-		if (answer !== "held") await this.#withdraw(path, requests);
+		// The peer already closed out a refused request, and its STOP_SENDING can reject the
+		// wait on our FIN. That is the withdrawal finishing, not a reason to end the loop.
+		if (answer !== "held") await this.#withdraw(path, requests).catch(() => undefined);
 		return answer;
 	}
 

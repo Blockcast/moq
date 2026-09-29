@@ -1244,6 +1244,38 @@ test.each([
 });
 
 /**
+ * A peer that refuses an update and then closes its side can make our withdrawal's wait
+ * on the FIN reject. The request is gone either way, so the loop keeps the refusal and
+ * re-offers the namespace instead of ending.
+ */
+test("a refused update whose peer closes the request keeps the loop running", async () => {
+	const { pub, origin, streams, close } = clustered();
+	try {
+		const broadcast = origin.createBroadcast(Path.from("mine"));
+		broadcast.announce({ hops: [VIA], cost: 4n });
+		let failed: unknown;
+		void pub.runPublishNamespaces().catch((err: unknown) => {
+			failed = err;
+		});
+
+		const stream = await take(streams);
+		await acceptClustered(stream);
+
+		broadcast.announce({ hops: [VIA], cost: 8n });
+		await readUpdate(stream);
+		await declinePublishNamespace(stream, 1n);
+		stream.close();
+
+		await advanceUntil(() => streams.length > 0 || failed !== undefined, 10_000);
+		expect(failed).toBeUndefined();
+		const fresh = await take(streams);
+		expect(await acceptClustered(fresh)).toMatchObject({ cost: 8n });
+	} finally {
+		close();
+	}
+});
+
+/**
  * One update is outstanding per stream, which is what satisfies MAX_REQUEST_UPDATES
  * without reading it: a change landing while one waits for its answer goes out after.
  */
