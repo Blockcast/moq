@@ -38,6 +38,7 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [JS closed-track leak](/quest/m1/js-closed-track-leak.md) - on dev, a subscriber that joins a closed JS track with unlimited retention is released instead of cached forever
 - [Session death parity](/quest/m1/session-death.md) - a local close ends tracks cleanly in both languages, and JS group readers see the session's error on session death
 - [Watch and publish under CSP](/quest/m1/csp-assets.md) - blob workers stay the default; strict-CSP apps host the files and set a base URL
+- [Signed RPMs](/quest/m1/rpm-signing.md) - `dnf install` from rpm.moq.dev succeeds with `gpgcheck=1`, and the docs add the repo in a form dnf5 accepts
 - [More tests under load](/quest/m1/test-flakes-2.md) - the second round of load-only failures, fixed at the cause
 - [CI runner stalls](/quest/m1/ci-runner-stalls.md) - the 0.4 to 0.8 s freezes of both interop tracks on CI are attributed from a week of nightlies and fixed or told apart from playback bugs
 - [Catalog estimate rate](/quest/m1/catalog-estimate-rate.md) - a rising `jitter`/`delay` estimate republishes the catalog at most once a second, in js/publish and moq-mux
