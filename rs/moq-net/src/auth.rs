@@ -10,7 +10,9 @@
 //! The other direction, answering the peer's tokens, is automatic: the session
 //! grants what its own origin handles allow. An application that verifies tokens
 //! itself takes [`requests`](Handle::requests) before running the session's
-//! driver, and then answers every token the peer presents.
+//! driver, and then answers every token the peer presents. Either way,
+//! [`narrow`](Handle::narrow) takes access away from the peer on a live session,
+//! on every version, whether or not it speaks AUTH.
 //!
 //! moq-transport draft-17+ carries the same exchange when both sides negotiate the
 //! MoQ Auth extension. Older versions, and peers that do not negotiate it, carry no
@@ -62,22 +64,37 @@ impl Grant {
 		}
 	}
 
-	fn patterns(&self, direction: Direction) -> &Patterns {
-		match direction {
-			Direction::Publish => &self.publish,
-			Direction::Subscribe => &self.subscribe,
-		}
-	}
-
 	/// Fold `other` into this grant: the paths either allows, lapsing at the
 	/// earlier expiry, which is when the union next shrinks.
 	fn union(&mut self, other: &Self) {
 		self.publish.extend(other.publish.iter().cloned());
 		self.subscribe.extend(other.subscribe.iter().cloned());
-		self.expires = match (self.expires, other.expires) {
-			(Some(a), Some(b)) => Some(a.min(b)),
-			(a, b) => a.or(b),
+		self.expires = earliest(self.expires, other.expires);
+	}
+
+	/// The paths both grants allow, lapsing at the earlier expiry.
+	///
+	/// Fails closed: an intersection too large to hold grants nothing, never more.
+	fn intersect(&self, other: &Self) -> Self {
+		let both = |a: &Patterns, b: &Patterns| {
+			a.intersect(b).unwrap_or_else(|err| {
+				tracing::warn!(%err, "grant intersection too large; granting nothing");
+				Patterns::new()
+			})
 		};
+		Self {
+			publish: both(&self.publish, &other.publish),
+			subscribe: both(&self.subscribe, &other.subscribe),
+			expires: earliest(self.expires, other.expires),
+		}
+	}
+}
+
+/// The earlier of two optional deadlines, where `None` is never.
+fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
+	match (a, b) {
+		(Some(a), Some(b)) => Some(a.min(b)),
+		(a, b) => a.or(b),
 	}
 }
 
@@ -97,8 +114,11 @@ pub(crate) struct State {
 	union: Option<Grant>,
 	/// The peer replied to some token, so the union is known even when empty.
 	replied: bool,
-	/// Bumped whenever the union changes, so the session's per-stream gates can
-	/// skip re-matching paths on every wakeup.
+	/// The most this side lets the peer do, in the peer's terms: `None` until
+	/// [`Handle::narrow`], then only ever narrower.
+	ceiling: Option<Grant>,
+	/// Bumped whenever the union or the ceiling changes, so the session's per-stream
+	/// gates can skip re-matching paths on every wakeup.
 	epoch: u64,
 	acceptor: Acceptor,
 }
@@ -149,6 +169,71 @@ impl State {
 	/// The error handed to anything waiting on a session that has ended.
 	fn closed(&self) -> Option<Error> {
 		self.closed.clone()
+	}
+
+	/// The union's and the ceiling's patterns for `direction`, each `None` while
+	/// unrestricted.
+	fn parts(&self, direction: Direction) -> (Option<&Patterns>, Option<&Patterns>) {
+		// The peer's grant names what we may do; the ceiling names what the peer may,
+		// so what we send is what the peer may subscribe to, and the other way around.
+		match direction {
+			Direction::Publish => (
+				self.union.as_ref().map(|union| &union.publish),
+				self.ceiling.as_ref().map(|ceiling| &ceiling.subscribe),
+			),
+			Direction::Subscribe => (
+				self.union.as_ref().map(|union| &union.subscribe),
+				self.ceiling.as_ref().map(|ceiling| &ceiling.publish),
+			),
+		}
+	}
+
+	/// What `direction` allows right now.
+	fn permit(&self, direction: Direction) -> Permit {
+		let (granted, ceiling) = self.parts(direction);
+		Permit {
+			granted: granted.cloned(),
+			ceiling: ceiling.cloned(),
+		}
+	}
+
+	/// Whether `direction` allows `path` right now, without copying the patterns.
+	fn allows(&self, direction: Direction, path: &str) -> bool {
+		let (granted, ceiling) = self.parts(direction);
+		granted.is_none_or(|granted| granted.matches(path)) && ceiling.is_none_or(|ceiling| ceiling.matches(path))
+	}
+}
+
+/// What one direction of a session allows: the grant the peer gave this side (the
+/// union of its tokens) and the ceiling this side narrowed the peer to, each `None`
+/// while unrestricted.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Permit {
+	granted: Option<Patterns>,
+	ceiling: Option<Patterns>,
+}
+
+impl Permit {
+	/// Whether both allow `path`.
+	pub(crate) fn matches(&self, path: &str) -> bool {
+		self.granted.as_ref().is_none_or(|granted| granted.matches(path)) && self.within_ceiling(path)
+	}
+
+	/// Whether the ceiling alone allows `path`: for what the peer offers us, which our
+	/// own grant does not decide.
+	pub(crate) fn within_ceiling(&self, path: &str) -> bool {
+		self.ceiling.as_ref().is_none_or(|ceiling| ceiling.matches(path))
+	}
+
+	/// Whether this allows everything `other` does, judged part by part, so a `false`
+	/// may be spurious but a `true` never is.
+	pub(crate) fn covers(&self, other: &Self) -> bool {
+		let covers = |this: &Option<Patterns>, other: &Option<Patterns>| match (this, other) {
+			(None, _) => true,
+			(Some(_), None) => false,
+			(Some(this), Some(other)) => this.covers(other),
+		};
+		covers(&self.granted, &other.granted) && covers(&self.ceiling, &other.ceiling)
 	}
 }
 
@@ -354,26 +439,72 @@ impl Handle {
 		Poll::Ready(())
 	}
 
+	/// Narrow what the peer may do on this session to at most `grant`, in the
+	/// session's own paths.
+	///
+	/// A narrowing only ever takes away: the session keeps what both its current
+	/// ceiling and `grant` allow, so a wider grant changes nothing. What falls outside
+	/// ends at once, with [`Error::Unauthorized`] where it has a reader: announcements
+	/// to the peer retract, its new requests are refused, its subscriptions reset, and
+	/// the broadcasts it published abort. The rest of the session carries on. It works
+	/// on every version, since the session enforces it without the peer's help.
+	///
+	/// When the session answers the peer's connection credential itself, the peer is
+	/// told the narrowed grant, `expires` included. An application answering tokens
+	/// through [`requests`](Self::requests) updates its own [`Issued`] grants.
+	pub fn narrow(&self, grant: &Grant) {
+		let mut state = self.state.lock();
+		let ceiling = match &state.ceiling {
+			Some(ceiling) => ceiling.intersect(grant),
+			None => grant.clone(),
+		};
+		if state.ceiling.as_ref() != Some(&ceiling) {
+			state.ceiling = Some(ceiling);
+			state.epoch += 1;
+		}
+	}
+
 	/// The union once it changed since `epoch` last saw it, advancing `epoch`. It
 	/// only ever changes into `Some`: no answer yet is the initial state.
 	pub(crate) fn poll_union(&self, epoch: &mut u64, waiter: &kio::Waiter) -> Poll<Option<Grant>> {
-		let seen = *epoch;
-		let state = ready_or!(self.state.poll(waiter, |state| match state.epoch != seen {
-			true => Poll::Ready(()),
-			false => Poll::Pending,
-		}));
+		let state = ready_or!(self.poll_epoch(*epoch, waiter));
 		*epoch = state.epoch;
 		Poll::Ready(state.union.clone())
 	}
 
-	/// Whether the union allows `path` right now. A union that is still `None` (no
-	/// answer yet, or a version without AUTH) allows everything.
+	/// What `direction` allows once it may have changed since `epoch` last saw it,
+	/// advancing `epoch`.
+	pub(crate) fn poll_permit(&self, direction: Direction, epoch: &mut u64, waiter: &kio::Waiter) -> Poll<Permit> {
+		let state = ready_or!(self.poll_epoch(*epoch, waiter));
+		*epoch = state.epoch;
+		Poll::Ready(state.permit(direction))
+	}
+
+	/// The ceiling once it may have changed since `epoch` last saw it, advancing `epoch`.
+	pub(crate) fn poll_ceiling(&self, epoch: &mut u64, waiter: &kio::Waiter) -> Poll<Option<Grant>> {
+		let state = ready_or!(self.poll_epoch(*epoch, waiter));
+		*epoch = state.epoch;
+		Poll::Ready(state.ceiling.clone())
+	}
+
+	fn poll_epoch(&self, seen: u64, waiter: &kio::Waiter) -> Poll<kio::Mut<'_, State>> {
+		self.state.poll(waiter, |state| match state.epoch != seen {
+			true => Poll::Ready(()),
+			false => Poll::Pending,
+		})
+	}
+
+	/// Whether `direction` allows `path` right now: the union (allowing everything
+	/// while it is `None`, before an answer or on a version without AUTH) and the
+	/// ceiling both.
 	pub(crate) fn allows(&self, direction: Direction, path: &str) -> bool {
-		let state = self.state.read();
-		state
-			.union
-			.as_ref()
-			.is_none_or(|union| union.patterns(direction).matches(path))
+		self.state.read().allows(direction, path)
+	}
+
+	/// Whether the ceiling alone allows `direction` at `path`: for a route the peer
+	/// offers us, which our own grant does not decide.
+	pub(crate) fn within_ceiling(&self, direction: Direction, path: &str) -> bool {
+		self.state.read().parts(direction).1.is_none_or(|ceiling| ceiling.matches(path))
 	}
 
 	/// The peer turned out not to negotiate AUTH: fail every token as unsupported and
@@ -707,18 +838,21 @@ impl Drop for Issued {
 	}
 }
 
-/// Which half of a grant a [`Gate`] checks.
+/// Which way media flows, from this side's view.
 #[derive(Clone, Copy)]
 pub(crate) enum Direction {
+	/// This side sends to the peer: our grant's `publish`, and the ceiling's `subscribe`.
 	Publish,
+	/// The peer sends to this side: our grant's `subscribe`, and the ceiling's `publish`.
 	Subscribe,
 }
 
-/// Watches whether the union still allows one path, for a long-lived stream that
-/// must end once it does not.
+/// Watches whether the session still allows one path, for a request that must end
+/// once it does not.
 ///
-/// Cheap to poll on every wakeup: the path is only re-matched when the union
-/// changes.
+/// Create it at the request's first check and hold it to the end, so a change
+/// landing in between is never missed. Cheap to poll on every wakeup: the path is
+/// only re-matched when the union or the ceiling changes.
 pub(crate) struct Gate {
 	handle: Handle,
 	path: crate::PathOwned,
@@ -736,17 +870,56 @@ impl Gate {
 		}
 	}
 
-	/// Resolve once the union no longer allows the path. A union that is still
-	/// `None` (no answer yet, or a version without AUTH) allows everything.
+	/// Resolve once the session no longer allows the path. A union that is still
+	/// `None` (no answer yet, or a version without AUTH) and a session never narrowed
+	/// allow everything.
 	pub(crate) fn poll_denied(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		loop {
-			let Some(union) = ready_or!(self.handle.poll_union(&mut self.epoch, waiter)) else {
-				continue;
-			};
-			if !union.patterns(self.direction).matches(self.path.as_str()) {
+			let permit = ready_or!(self.handle.poll_permit(self.direction, &mut self.epoch, waiter));
+			if !permit.matches(self.path.as_str()) {
 				return Poll::Ready(());
 			}
 		}
+	}
+}
+
+/// The default acceptor's answer to the peer's connection credential: the grant
+/// the session's origin handles allow, narrowed by the ceiling as it changes.
+pub(crate) struct DefaultGrant {
+	handle: Handle,
+	base: Grant,
+	epoch: u64,
+	ceiling: Option<Grant>,
+	/// The grant last handed out, so an unrelated wakeup sends nothing.
+	sent: Option<Grant>,
+}
+
+impl DefaultGrant {
+	pub(crate) fn new(handle: Handle, base: Grant) -> Self {
+		let ceiling = handle.state.read().ceiling.clone();
+		Self {
+			handle,
+			base,
+			epoch: 0,
+			ceiling,
+			sent: None,
+		}
+	}
+
+	/// The grant to send next: the first, then each one a narrowing changes.
+	pub(crate) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Grant> {
+		while let Poll::Ready(ceiling) = self.handle.poll_ceiling(&mut self.epoch, waiter) {
+			self.ceiling = ceiling;
+		}
+		let grant = match &self.ceiling {
+			Some(ceiling) => self.base.intersect(ceiling),
+			None => self.base.clone(),
+		};
+		if self.sent.as_ref() == Some(&grant) {
+			return Poll::Pending;
+		}
+		self.sent = Some(grant.clone());
+		Poll::Ready(grant)
 	}
 }
 

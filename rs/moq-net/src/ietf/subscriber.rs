@@ -393,8 +393,9 @@ struct BroadcastState {
 	route: crate::origin::Route,
 
 	// The served route: dropping it (and the serve task's clone) retracts the
-	// route and rejects its queued requests.
-	dynamic: crate::origin::Dynamic,
+	// route and rejects its queued requests. `None` once a narrowing took it away
+	// while the peer still advertises it.
+	dynamic: Option<crate::origin::Dynamic>,
 
 	// active number of PUBLISH_NAMESPACE messages.
 	count: usize,
@@ -1371,16 +1372,22 @@ where
 				// tracks keep flowing.
 				let entry = entry.into_mut();
 				entry.route = route.clone();
-				entry.dynamic.update(route)?;
+				if let Some(dynamic) = &entry.dynamic {
+					dynamic.update(route)?;
+				}
 				Ok(())
 			}
 			Entry::Vacant(entry) => {
+				// Nothing the session no longer lets the peer publish is accepted.
+				if !self.auth.within_ceiling(crate::auth::Direction::Subscribe, path.as_str()) {
+					return Err(Error::Unauthorized);
+				}
 				// Propagates Error::Unauthorized if the namespace is out of scope.
 				let dynamic = self.origin.dynamic(&path, route.clone())?;
 
 				entry.insert(BroadcastState {
 					route,
-					dynamic,
+					dynamic: Some(dynamic),
 					count: 1,
 					sources: HashMap::new(),
 				});
@@ -1443,6 +1450,7 @@ where
 	async fn run_route(&self, path: PathOwned) {
 		let mut broadcasts = TaskSet::owned();
 		let mut closed_session = self.session.clone();
+		let mut epoch = 0;
 		loop {
 			let next = broadcasts
 				.drive(|waiter| {
@@ -1457,11 +1465,28 @@ where
 					if self.going_away.poll(waiter).is_ready() {
 						self.drain_route(&path);
 					}
+					// A narrowing that excludes the namespace takes the route away as a
+					// retraction would, closing its sources. Tracks in flight end on their
+					// own gates, with `Unauthorized`.
+					let mut narrowed = false;
+					while let Poll::Ready(permit) =
+						self.auth.poll_permit(crate::auth::Direction::Subscribe, &mut epoch, waiter)
+					{
+						narrowed |= !permit.within_ceiling(path.as_str());
+					}
 					// The route lives in the entry: stop_announce removing it retracts
 					// the route, and this loop ends with it.
 					let mut state = self.state.lock();
-					match state.broadcasts.get_mut(&path) {
-						Some(entry) => entry.dynamic.poll_requested_broadcast(waiter).map(Some),
+					let Some(entry) = state.broadcasts.get_mut(&path) else {
+						return Poll::Ready(None);
+					};
+					if narrowed && entry.dynamic.is_some() {
+						tracing::info!(route = %self.origin.absolute(&path), "namespace no longer authorized");
+						entry.dynamic = None;
+						entry.sources.clear();
+					}
+					match &mut entry.dynamic {
+						Some(dynamic) => dynamic.poll_requested_broadcast(waiter).map(Some),
 						None => Poll::Ready(None),
 					}
 				})
@@ -1524,7 +1549,9 @@ where
 			return;
 		}
 		entry.route.cost = crate::origin::Cost::DRAIN;
-		let _ = entry.dynamic.update(entry.route.clone());
+		if let Some(dynamic) = &entry.dynamic {
+			let _ = dynamic.update(entry.route.clone());
+		}
 	}
 
 	async fn run_broadcast(&self, path: Path<'_>, mut broadcast: broadcast::Dynamic) -> Result<(), Error> {

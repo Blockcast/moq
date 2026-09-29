@@ -201,9 +201,9 @@ struct Namespaces<S: crate::transport::poll::Session> {
 	/// The open PUBLISH_NAMESPACE request carrying each advertised namespace. Empty when
 	/// the entries ride a SUBSCRIBE_NAMESPACE stream inline.
 	requests: HashMap<crate::PathOwned, NamespaceRequest<S>>,
-	/// What our grant lets us publish (MoQ Auth), `None` while unknown.
-	permit: Option<crate::Patterns>,
-	/// The grant union's epoch last applied to `permit`.
+	/// What we may advertise: our grant (MoQ Auth) and the ceiling on the peer.
+	permit: crate::auth::Permit,
+	/// The auth epoch last applied to `permit`.
 	epoch: u64,
 }
 
@@ -214,14 +214,14 @@ impl<S: crate::transport::poll::Session> Namespaces<S> {
 			target,
 			watched: HashMap::new(),
 			requests: HashMap::new(),
-			permit: None,
+			permit: Default::default(),
 			epoch: 0,
 		}
 	}
 
-	/// Whether our grant lets us advertise `path`. An unknown grant allows everything.
+	/// Whether we may advertise `path`. An unknown grant allows everything.
 	fn permitted(&self, path: &crate::Path) -> bool {
-		self.permit.as_ref().is_none_or(|permit| permit.matches(path.as_str()))
+		self.permit.matches(path.as_str())
 	}
 }
 
@@ -233,8 +233,8 @@ enum NamespaceEvent {
 	Update(Option<crate::announce::Update>),
 	/// The retry sleep fired: re-offer whatever the peer should be holding and isn't.
 	Retry,
-	/// Our grant changed (MoQ Auth): re-check every namespace against it.
-	Regrant(Option<crate::auth::Grant>),
+	/// Our grant (MoQ Auth) or the ceiling changed: re-check every namespace against it.
+	Regrant(crate::auth::Permit),
 }
 
 #[derive(Clone)]
@@ -1930,8 +1930,10 @@ where
 					}
 					// A grant change applies before the next update, so a namespace it no
 					// longer covers is withdrawn rather than re-sent.
-					if let Poll::Ready(union) = self.auth.poll_union(epoch, waiter) {
-						return Poll::Ready(NamespaceEvent::Regrant(union));
+					if let Poll::Ready(permit) =
+						self.auth.poll_permit(crate::auth::Direction::Publish, epoch, waiter)
+					{
+						return Poll::Ready(NamespaceEvent::Regrant(permit));
 					}
 					if let Poll::Ready(update) = announced.poll_next(waiter) {
 						return Poll::Ready(NamespaceEvent::Update(update));
@@ -1965,8 +1967,8 @@ where
 						self.sync_namespace(&mut ns, &suffix, &path).await?;
 					}
 				}
-				NamespaceEvent::Regrant(union) => {
-					ns.permit = union.map(|grant| grant.publish);
+				NamespaceEvent::Regrant(permit) => {
+					ns.permit = permit;
 					let suffixes: Vec<crate::PathOwned> = ns.watched.keys().cloned().collect();
 					for suffix in suffixes {
 						let path = prefix.join(&suffix);

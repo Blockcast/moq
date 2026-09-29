@@ -113,6 +113,12 @@ fn position_cursor(track: &mut track::Subscriber, version: Version, start_group:
 }
 
 impl<S: crate::transport::poll::Session> Shared<S> {
+	/// Watches whether the session still lets us serve `broadcast` to the peer: our
+	/// grant, and the ceiling on what the peer may subscribe to.
+	fn gate(&self, broadcast: &crate::Path) -> crate::auth::Gate {
+		crate::auth::Gate::new(self.auth.clone(), broadcast.to_owned(), crate::auth::Direction::Publish)
+	}
+
 	/// The origin to resolve a peer-requested broadcast from: excludes routes
 	/// through the peer, so a subscription is never served data that flowed
 	/// through the subscriber. The identity is the one the peer declared in its
@@ -351,6 +357,9 @@ struct AuthServe<S: crate::transport::poll::Session> {
 	/// Shared with the app's [`crate::auth::Request`] / [`crate::auth::Issued`], or
 	/// filled in by the default acceptor.
 	issue: Option<kio::Shared<crate::auth::Issue>>,
+	/// The default acceptor's grant for the connection's credential, re-sent as a
+	/// narrowing changes it. `None` when the app answers.
+	default: Option<crate::auth::DefaultGrant>,
 	/// Our side is finished: FIN sent, waiting for the acknowledgement.
 	finished: bool,
 }
@@ -365,6 +374,7 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 			shared,
 			stream: Some(stream),
 			issue: None,
+			default: None,
 			finished: false,
 		})
 	}
@@ -412,8 +422,10 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 					// the presenter, the same as a peer that predates AUTH.
 					None if !msg.token.is_empty() => return Poll::Ready(Err(Error::Unsupported)),
 					None => {
-						let grant = self.shared.peer_grant.clone();
-						issue.lock().outbox.push_back(crate::auth::Reply::Grant(grant));
+						self.default = Some(crate::auth::DefaultGrant::new(
+							self.shared.auth.clone(),
+							self.shared.peer_grant.clone(),
+						));
 					}
 				}
 				self.issue = Some(issue.clone());
@@ -440,6 +452,12 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 				stream.writer.finish()?;
 				self.finished = true;
 				continue;
+			}
+
+			if let Some(default) = &mut self.default
+				&& let Poll::Ready(grant) = default.poll(waiter)
+			{
+				issue.lock().outbox.push_back(crate::auth::Reply::Grant(grant));
 			}
 
 			let mut state = match issue.poll(waiter, |issue| match issue.outbox.is_empty() && !issue.done {
@@ -776,9 +794,7 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 		};
 		let announced = origin.announced();
 		let mut run = AnnounceRun::new(prefix, self.shared.self_origin, self.shared.version);
-		if self.shared.version.has_auth() {
-			run.auth = Some(self.shared.auth.clone());
-		}
+		run.auth = Some(self.shared.auth.clone());
 		self.state = AnnounceState::Run { origin, announced, run };
 	}
 }
@@ -800,12 +816,12 @@ struct AnnounceRun {
 	// prefix. The value is the announce id on versions that assign them.
 	live: HashMap<crate::PathOwned, Option<u64>>,
 	phase: AnnouncePhase,
-	// Our grant, on versions with AUTH: only what it lets us publish is announced,
-	// and a shrink withdraws what it no longer covers.
+	// Our grant and the ceiling on the peer: only what both let us publish is
+	// announced, and a shrink withdraws what they no longer cover.
 	auth: Option<crate::auth::Handle>,
 	epoch: u64,
-	// What the union lets us publish, `None` until the peer first answers.
-	permit: Option<crate::Patterns>,
+	// What we may announce right now.
+	permit: crate::auth::Permit,
 }
 
 enum AnnouncePhase {
@@ -827,29 +843,26 @@ impl AnnounceRun {
 			phase: AnnouncePhase::Init,
 			auth: None,
 			epoch: 0,
-			permit: None,
+			permit: Default::default(),
 		}
 	}
 
-	/// Whether our grant lets us announce `suffix` (relative to the requested prefix).
+	/// Whether we may announce `suffix` (relative to the requested prefix).
 	fn permitted(&self, suffix: &crate::Path) -> bool {
-		self.permit
-			.as_ref()
-			.is_none_or(|permit| permit.matches(self.prefix.join(suffix).as_str()))
+		self.permit.matches(self.prefix.join(suffix).as_str())
 	}
 
-	/// Apply a change to our grant: withdraw what it no longer covers and, when it
-	/// grew, re-read the origin to announce what it now does.
+	/// Apply a change to what we may announce: withdraw what it no longer covers and,
+	/// when it grew, re-read the origin to announce what it now does.
 	fn regrant<S: crate::transport::poll::Session>(
 		&mut self,
 		stream: &mut Stream<S, Version>,
 		origin: &origin::Consumer,
 		announced: &mut announce::Consumer,
-		permit: crate::Patterns,
+		permit: crate::auth::Permit,
 	) -> Result<(), Error> {
-		// `None` allowed everything, so any grant only shrinks it.
-		let grew = self.permit.as_ref().is_some_and(|old| !old.covers(&permit));
-		self.permit = Some(permit);
+		let grew = !self.permit.covers(&permit);
+		self.permit = permit;
 
 		if !grew {
 			let revoked: Vec<_> = self
@@ -1009,7 +1022,7 @@ impl AnnounceRun {
 					let suffix = update.prefix;
 
 					if update.kind.is_active() {
-						if self.outgoing(&update.route, &absolute).is_none() {
+						if !self.permitted(&suffix) || self.outgoing(&update.route, &absolute).is_none() {
 							continue;
 						}
 						tracing::debug!(route = %absolute, "announce");
@@ -1023,6 +1036,10 @@ impl AnnounceRun {
 					}
 				}
 
+				// The peer holds these now, so a later retraction or narrowing ends them.
+				for suffix in &init {
+					self.live.insert(suffix.clone(), None);
+				}
 				let announce_init = lite::AnnounceInit { suffixes: init };
 				stream.writer.buffer(&announce_init)?;
 			}
@@ -1088,8 +1105,8 @@ impl AnnounceRun {
 			// advertises something it would withdraw, or abort over, a moment later.
 			if let Some(auth) = &self.auth {
 				ready!(auth.poll_setup_answered(waiter));
-				if let Poll::Ready(union) = auth.poll_union(&mut self.epoch, waiter) {
-					self.permit = union.map(|grant| grant.publish);
+				if let Poll::Ready(permit) = auth.poll_permit(crate::auth::Direction::Publish, &mut self.epoch, waiter) {
+					self.permit = permit;
 				}
 			}
 			self.init(stream, origin, announced)?;
@@ -1107,10 +1124,10 @@ impl AnnounceRun {
 			// A grant change applies before the next update, so a route it no longer
 			// covers is withdrawn rather than re-sent.
 			if let Some(auth) = &self.auth
-				&& let Poll::Ready(Some(grant)) = auth.poll_union(&mut self.epoch, waiter)
-				&& self.permit.as_ref() != Some(&grant.publish)
+				&& let Poll::Ready(permit) = auth.poll_permit(crate::auth::Direction::Publish, &mut self.epoch, waiter)
+				&& self.permit != permit
 			{
-				self.regrant(stream, origin, announced, grant.publish)?;
+				self.regrant(stream, origin, announced, permit)?;
 				continue;
 			}
 
@@ -1179,6 +1196,8 @@ struct TrackInfoServe<S: crate::transport::poll::Session> {
 	shared: Arc<Shared<S>>,
 	stream: Option<Stream<S, Version>>,
 	state: TrackInfoState,
+	/// Ends the request once the session stops allowing its broadcast.
+	gate: Option<crate::auth::Gate>,
 	// Log context, filled in after the decode.
 	absolute: crate::PathOwned,
 	track: String,
@@ -1215,6 +1234,7 @@ impl<S: crate::transport::poll::Session> TrackInfoServe<S> {
 			shared,
 			stream: Some(stream),
 			state: TrackInfoState::Decode,
+			gate: None,
 			absolute: Default::default(),
 			track: Default::default(),
 		})
@@ -1234,6 +1254,9 @@ impl<S: crate::transport::poll::Session> TrackInfoServe<S> {
 					| Error::Transport(_) => {
 						tracing::debug!(broadcast = %self.absolute, track = %self.track, "track info cancelled")
 					}
+					Error::Unauthorized => {
+						tracing::debug!(broadcast = %self.absolute, track = %self.track, "track info unauthorized")
+					}
 					err => {
 						tracing::warn!(broadcast = %self.absolute, track = %self.track, %err, "track info error")
 					}
@@ -1245,6 +1268,11 @@ impl<S: crate::transport::poll::Session> TrackInfoServe<S> {
 	}
 
 	fn poll_serve(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		if let Some(gate) = &mut self.gate
+			&& gate.poll_denied(waiter).is_ready()
+		{
+			return Poll::Ready(Err(Error::Unauthorized));
+		}
 		loop {
 			match &mut self.state {
 				TrackInfoState::Decode => {
@@ -1255,12 +1283,11 @@ impl<S: crate::transport::poll::Session> TrackInfoServe<S> {
 					self.track = msg.track.to_string();
 					tracing::debug!(broadcast = %self.absolute, track = %self.track, "track info requested");
 					// Checked before anything is resolved, like a subscription.
-					let allowed = self
-						.shared
-						.auth
-						.allows(crate::auth::Direction::Publish, msg.broadcast.as_str());
+					let mut gate = self.shared.gate(&msg.broadcast);
+					let denied = gate.poll_denied(waiter).is_ready();
+					self.gate = Some(gate);
 					self.state = TrackInfoState::Hop { msg };
-					if !allowed {
+					if denied {
 						return Poll::Ready(Err(Error::Unauthorized));
 					}
 				}
@@ -1413,22 +1440,15 @@ impl<S: crate::transport::poll::Session> SubscribeServe<S> {
 					self.track = msg.track.to_string();
 					tracing::info!(id = self.id, broadcast = %self.absolute, track = %self.track, "subscribed started");
 
-					if self.shared.version.has_auth() {
-						let mut gate = crate::auth::Gate::new(
-							self.shared.auth.clone(),
-							msg.broadcast.to_owned(),
-							crate::auth::Direction::Publish,
-						);
-						// Checked before anything is resolved, so a broadcast our grant
-						// does not cover is never served, not just cut off later.
-						if gate.poll_denied(waiter).is_ready() {
-							self.state = SubscribeState::Hop { msg };
-							return Poll::Ready(Err(Error::Unauthorized));
-						}
-						self.gate = Some(gate);
-					}
-
+					// Checked before anything is resolved, so a broadcast the session does
+					// not allow is never served, not just cut off later.
+					let mut gate = self.shared.gate(&msg.broadcast);
+					let denied = gate.poll_denied(waiter).is_ready();
+					self.gate = Some(gate);
 					self.state = SubscribeState::Hop { msg };
+					if denied {
+						return Poll::Ready(Err(Error::Unauthorized));
+					}
 				}
 				SubscribeState::Hop { .. } => {
 					// We just received a subscribe for this exact path, so by definition the
@@ -1565,6 +1585,8 @@ struct FetchServe<S: crate::transport::poll::Session> {
 	shared: Arc<Shared<S>>,
 	stream: Option<Stream<S, Version>>,
 	state: FetchState,
+	/// Ends the fetch, even mid-group, once the session stops allowing its broadcast.
+	gate: Option<crate::auth::Gate>,
 	// Log context, filled in after the decode.
 	absolute: crate::PathOwned,
 	track: String,
@@ -1618,6 +1640,7 @@ impl<S: crate::transport::poll::Session> FetchServe<S> {
 			shared,
 			stream: Some(stream),
 			state: FetchState::Decode,
+			gate: None,
 			absolute: Default::default(),
 			track: Default::default(),
 			group: 0,
@@ -1640,6 +1663,9 @@ impl<S: crate::transport::poll::Session> FetchServe<S> {
 					| Error::Transport(_) => {
 						tracing::info!(broadcast = %self.absolute, track = %self.track, group = %self.group, "fetch cancelled")
 					}
+					Error::Unauthorized => {
+						tracing::info!(broadcast = %self.absolute, track = %self.track, group = %self.group, "fetch unauthorized")
+					}
 					err => {
 						tracing::warn!(broadcast = %self.absolute, track = %self.track, group = %self.group, %err, "fetch error")
 					}
@@ -1651,6 +1677,11 @@ impl<S: crate::transport::poll::Session> FetchServe<S> {
 	}
 
 	fn poll_serve(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		if let Some(gate) = &mut self.gate
+			&& gate.poll_denied(waiter).is_ready()
+		{
+			return Poll::Ready(Err(Error::Unauthorized));
+		}
 		loop {
 			match &mut self.state {
 				FetchState::Decode => {
@@ -1663,13 +1694,13 @@ impl<S: crate::transport::poll::Session> FetchServe<S> {
 					self.group = msg.group;
 					tracing::info!(broadcast = %self.absolute, track = %self.track, group = %self.group, "fetch started");
 
-					// Checked before anything is resolved, like a subscription.
-					let allowed = self
-						.shared
-						.auth
-						.allows(crate::auth::Direction::Publish, msg.broadcast.as_str());
+					// Checked before anything is resolved, like a subscription, and held
+					// until the last frame.
+					let mut gate = self.shared.gate(&msg.broadcast);
+					let denied = gate.poll_denied(waiter).is_ready();
+					self.gate = Some(gate);
 					self.state = FetchState::Hop { msg };
-					if !allowed {
+					if denied {
 						return Poll::Ready(Err(Error::Unauthorized));
 					}
 				}

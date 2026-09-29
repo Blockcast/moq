@@ -154,6 +154,7 @@ where
 				let control = Control::new(request_id_max, client);
 				let adapter = ControlStreamAdapter::new(session.clone(), control.clone(), version);
 
+				// No AUTH on these drafts, but a narrowing still reaches both halves.
 				let publisher = Publisher::new(
 					runtime.clone(),
 					adapter.clone(),
@@ -162,7 +163,8 @@ where
 					peer_hop,
 					peer_setup.clone(),
 					version,
-				);
+				)
+				.with_auth(auth.clone());
 				let (tasks, mut task_set) = TaskSet::new();
 				let subscriber = Subscriber::new(
 					runtime.clone(),
@@ -176,7 +178,8 @@ where
 					version,
 					tasks.clone(),
 					goaway.going_away.clone(),
-				);
+				)
+				.with_auth(auth.clone());
 
 				// GOAWAY send task: draft-14-16 carry GOAWAY on the shared control
 				// stream. Parked on the drain trigger; races the transport close so

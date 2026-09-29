@@ -408,6 +408,8 @@ impl Client {
 				};
 
 				let stream = stream.with_version(v);
+				// Draft 14-16 carry no AUTH, but the session still narrows through this handle.
+				let auth = crate::auth::Handle::new(false);
 				// Draft 14-16: the path rode in the bidi SETUP above, not the uni one.
 				let (protocol, goaway) = ietf::start(ietf::Config {
 					runtime: runtime.clone(),
@@ -423,14 +425,9 @@ impl Client {
 					path: None,
 					peer_setup_stream: None,
 					peer_declared: Some(peer_declared),
-					auth: crate::auth::Handle::new(false),
+					auth: auth.clone(),
 				})?;
-				(
-					None,
-					crate::driver::Protocol::Ietf(protocol),
-					goaway,
-					crate::auth::Handle::new(false),
-				)
+				(None, crate::driver::Protocol::Ietf(protocol), goaway, auth)
 			}
 		};
 
