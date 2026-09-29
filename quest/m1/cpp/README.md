@@ -69,7 +69,6 @@ Confirmed in [#4100](https://github.com/moq-dev/moq/pull/4100):
 - [Client settings parity](/quest/m1/cpp/client-config.md) - moq-ffi offers libmoq's client knobs, and the OBS advanced settings get back the ones the migration dropped
 - [Session report parity](/quest/m1/cpp/session-report.md) - a session reports its negotiated draft and reconnect failures, so the OBS dock shows them again
 - [Cancel](/quest/m1/cpp/cancel.md) - a cancelled or consumed future reports `valid() == false`, like `std::future`, and a read of it aborts with a message naming the misuse
-- [C++ standard](/quest/m1/cpp/cxx-standard.md) - a consumer that sets C++23 only on its own target links the package
 
 ## Related
 

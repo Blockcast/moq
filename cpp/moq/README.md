@@ -33,6 +33,10 @@ Every generated type lives in `namespace moq`. Objects are `std::shared_ptr`; re
 - `moq::Error` is a value holding a `std::variant` of its cases, and `to_string()` gives Rust's `Display` message. Nothing throws. A Rust panic or a misused future aborts with a message on stderr.
 - Futures are polled and continuations run on one process-wide executor thread unless the application installs its own with `moq::set_executor` before the first async call. `moq::shutdown()` stops the moq-ffi runtime thread (`moq_ffi_shutdown`), then the executor, before unloading the code a continuation could call into.
 
+## C++ standard
+
+The installed package compiles `moq.cpp` inside the consumer's project, at its `CMAKE_CXX_STANDARD` (else the compiler's default, at least C++17). To use C++23, set `CMAKE_CXX_STANDARD 23` before `find_package(moq-cpp)`, or pass `-DCMAKE_CXX_STANDARD=23`. `target_compile_features(app PRIVATE cxx_std_23)` alone does not reach the separate `moq-cpp` library, so `<moq/moq.hpp>` and the bindings pick different `expected` types and the link fails on `moq_abi_std_expected` or `moq_abi_tl_expected`. `just cpp check` builds the probe at C++23 both ways.
+
 ## Cancellation
 
 Cancelling a future (`cancel()`, destroying it, destroying the `moq::Continuation` returned by `then`, or destroying a coroutine suspended on it) drops the Rust future. Native moq-ffi runs each async call as a spawned task that holds an `AbortOnDrop` on it (`rs/moq-ffi/src/ffi.rs`), so dropping the future aborts the work at its next await point instead of letting it finish unobserved. The continuation of a cancelled future never runs, and `get()` on it aborts.
