@@ -493,8 +493,9 @@ pub(crate) struct Track {
 	sweep: OnceLock<usize>,
 
 	// What the track's groups have produced, for the egress lag sampler. Kept on the
-	// account because it is already the one per-track handle every group holds.
-	production: crate::stats::Production,
+	// account because it is already the one per-track handle every group holds. Shared
+	// so a sampler can still read the last bytes after the track is gone.
+	production: Arc<crate::stats::Production>,
 }
 
 impl Track {
@@ -521,7 +522,7 @@ impl Track {
 	}
 
 	/// What this track's groups have produced.
-	pub(crate) fn production(&self) -> &crate::stats::Production {
+	pub(crate) fn production(&self) -> &Arc<crate::stats::Production> {
 		&self.production
 	}
 
