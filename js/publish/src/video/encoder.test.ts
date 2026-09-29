@@ -12,7 +12,17 @@ class FakeVideoEncoder {
 	// Every accepted probe, so a test can assert a published config was actually validated.
 	static accepted: string[] = [];
 
+	// The codec string the encoder reports in its output for a configured one. Echoes by default,
+	// like Chrome and Firefox.
+	static report: (codec: string) => string | undefined = (codec) => codec;
+
 	state: CodecState = "unconfigured";
+	#output: VideoEncoderInit["output"];
+	#codec?: string;
+
+	constructor(init: VideoEncoderInit) {
+		this.#output = init.output;
+	}
 
 	static async isConfigSupported(config: VideoEncoderConfig): Promise<{ supported: boolean }> {
 		FakeVideoEncoder.probes++;
@@ -24,32 +34,50 @@ class FakeVideoEncoder {
 		return { supported };
 	}
 
-	configure(): void {
+	configure(config: VideoEncoderConfig): void {
 		this.state = "configured";
+		this.#codec = config.codec;
 	}
 
 	encode(): void {}
+
+	// Only the probe flushes, so only it sees an output; the live encoder holds every frame.
+	async flush(): Promise<void> {
+		const codec = this.#codec && FakeVideoEncoder.report(this.#codec);
+		const chunk = { type: "key", timestamp: 0, byteLength: 1, copyTo: () => {} };
+		this.#output(chunk as never, (codec ? { decoderConfig: { codec } } : {}) as never);
+	}
 
 	close(): void {
 		this.state = "closed";
 	}
 }
 
+class FakeVideoFrame {
+	timestamp = 0;
+	close(): void {}
+}
+
 function installFakeVideoEncoder() {
 	const original = Object.getOwnPropertyDescriptor(globalThis, "VideoEncoder");
+	const frame = Object.getOwnPropertyDescriptor(globalThis, "VideoFrame");
 	Object.defineProperty(globalThis, "VideoEncoder", {
 		configurable: true,
 		value: FakeVideoEncoder,
 		writable: true,
 	});
+	Object.defineProperty(globalThis, "VideoFrame", { configurable: true, value: FakeVideoFrame, writable: true });
 
 	return {
 		[Symbol.dispose]() {
+			FakeVideoEncoder.report = (codec) => codec;
 			if (original) {
 				Object.defineProperty(globalThis, "VideoEncoder", original);
 			} else {
 				Reflect.deleteProperty(globalThis, "VideoEncoder");
 			}
+			if (frame) Object.defineProperty(globalThis, "VideoFrame", frame);
+			else Reflect.deleteProperty(globalThis, "VideoFrame");
 		},
 	};
 }
@@ -458,40 +486,8 @@ test("frame sources retain their dimensions and nominal frame rate", async () =>
 
 test.each(["encoder lag", "quiet startup"])("marks a rendition stalled for %s", async (reason) => {
 	const clock = spyOn(performance, "now").mockReturnValue(0);
-	class DelayedVideoEncoder {
-		static probes = 0;
-		state: CodecState = "unconfigured";
-		#output: VideoEncoderInit["output"];
-
-		constructor(init: VideoEncoderInit) {
-			this.#output = init.output;
-		}
-
-		static async isConfigSupported(config: VideoEncoderConfig): Promise<{ supported: boolean }> {
-			DelayedVideoEncoder.probes++;
-			return { supported: config.codec.startsWith("avc1") };
-		}
-
-		configure(): void {
-			this.state = "configured";
-		}
-
-		encode(): void {
-			// Hold the output: a throttled encoder never hands frames to the session.
-		}
-
-		close(): void {
-			this.state = "closed";
-			void this.#output;
-		}
-	}
-
-	const original = Object.getOwnPropertyDescriptor(globalThis, "VideoEncoder");
-	Object.defineProperty(globalThis, "VideoEncoder", {
-		configurable: true,
-		value: DelayedVideoEncoder,
-		writable: true,
-	});
+	// The fake holds every live output, like a throttled encoder that never hands frames to the session.
+	using _videoEncoder = installFakeVideoEncoder();
 
 	class Frame {
 		codedWidth = 640;
@@ -565,8 +561,6 @@ test.each(["encoder lag", "quiet startup"])("marks a rendition stalled for %s", 
 		encoder.close();
 		fanout.close();
 		clock.mockRestore();
-		if (original) Object.defineProperty(globalThis, "VideoEncoder", original);
-		else Reflect.deleteProperty(globalThis, "VideoEncoder");
 	}
 });
 
@@ -594,116 +588,66 @@ test("the probe only offers full codec strings", async () => {
 	}
 });
 
-test("the catalog advertises the codec string the encoder reports", async () => {
-	// Refine the configured string like Safari does, reporting the profile the encoder chose.
+// The catalog is written before any subscriber starts the real encoder, so it has to carry what the
+// bitstream will say from the first announce, not a probe input a native player may refuse.
+test("the catalog advertises the codec string a probe encode reports", async () => {
+	using _videoEncoder = installFakeVideoEncoder();
+	// Refine the configured string, as an encoder that picks its own level would.
 	const REPORTED: Record<string, string> = {
-		"avc1.640028": "avc1.64001F",
 		"vp09.00.10.08": "vp09.00.31.08",
+		"avc1.640028": "avc1.64001F",
 	};
+	const probe = spyOn(FakeVideoEncoder, "isConfigSupported").mockImplementation(async (config) => ({
+		supported: config.codec in REPORTED,
+	}));
+	FakeVideoEncoder.report = (codec) => REPORTED[codec];
 
-	class ReportingVideoEncoder {
-		state: CodecState = "unconfigured";
-		#output: VideoEncoderInit["output"];
-		#codec?: string;
-		#fresh = false;
-
-		constructor(init: VideoEncoderInit) {
-			this.#output = init.output;
-		}
-
-		static async isConfigSupported(config: VideoEncoderConfig): Promise<{ supported: boolean }> {
-			return { supported: config.codec in REPORTED };
-		}
-
-		configure(config: VideoEncoderConfig): void {
-			this.state = "configured";
-			this.#codec = config.codec;
-			this.#fresh = true;
-		}
-
-		encode(frame: VideoFrame): void {
-			const chunk = { type: "key", timestamp: frame.timestamp, byteLength: 1, copyTo: () => {} };
-			const metadata = this.#fresh && this.#codec ? { decoderConfig: { codec: REPORTED[this.#codec] } } : {};
-			this.#fresh = false;
-			this.#output(chunk as never, metadata as never);
-		}
-
-		close(): void {
-			this.state = "closed";
-		}
-	}
-
-	const original = Object.getOwnPropertyDescriptor(globalThis, "VideoEncoder");
-	Object.defineProperty(globalThis, "VideoEncoder", {
-		configurable: true,
-		value: ReportingVideoEncoder,
-		writable: true,
-	});
-
-	const { Fanout } = await import("../fanout");
-	let controller!: ReadableStreamDefaultController<VideoFrame>;
-	const stream = new ReadableStream<VideoFrame>({
-		start: (c) => {
-			controller = c;
-		},
-	});
-	const fanout = new Fanout(stream, { clone: (frame) => ({ timestamp: frame.timestamp, close: () => {} }) as never });
-	let timestamp = 0;
-	const push = async () => {
-		controller.enqueue({ timestamp, close: () => {} } as never);
-		timestamp += 33_333;
-		await new Promise((resolve) => setTimeout(resolve, 10));
-	};
-
-	const track = new Moq.Track.Producer("video").accept({ priority: 60 });
-	const sub = track.subscribe();
-	const rendition = {
-		config: new Signal(undefined),
-		track: new Signal<Moq.Track.Producer | undefined>(track),
-		close: () => track.close(),
-	};
 	const capture = {
 		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },
-		out: { display: new Signal({ width: 1280, height: 720 }), frames: new Signal(fanout) },
+		out: { display: new Signal({ width: 1280, height: 720 }) },
 	};
-	const estimate = new Signal<number | undefined>(10_000_000);
-	const bandwidth = new Moq.Bandwidth.Allocator(estimate);
-	const encoder = new Encoder("video", {
-		enabled: true,
-		broadcast: { video: () => rendition, baseline: new Baseline() } as never,
-		capture: capture as never,
-		bandwidth,
+	const encoder = new Encoder("video", { enabled: true, capture: capture as never });
+	const advertised: string[] = [];
+	const unsubscribe = encoder.out.catalog.subscribe((catalog) => {
+		if (catalog) advertised.push(catalog.codec);
 	});
 
 	try {
-		// The probed string is advertised before any frame, so the rendition announces without demand.
 		await settle();
-		expect(encoder.out.catalog.peek()?.codec).toBe("vp09.00.10.08");
-
-		await push();
-		await settle();
+		expect(encoder.out.resolved.peek()?.codec).toBe("vp09.00.10.08");
 		expect(encoder.out.catalog.peek()?.codec).toBe("vp09.00.31.08");
 
-		// A bitrate change rebuilds the catalog without reverting to the probed string.
-		estimate.set(500_000);
-		await settle();
-		expect(encoder.out.resolved.peek()?.bitrate).toBe(500_000);
-		expect(encoder.out.catalog.peek()?.codec).toBe("vp09.00.31.08");
-
-		// A codec switch drops the stale report, then follows the new encoder's output.
+		// A codec change re-probes and advertises the new encoder's string.
 		encoder.config.set({ codec: "avc1" });
 		await settle();
-		expect(encoder.out.catalog.peek()?.codec).toBe("avc1.640028");
-
-		await push();
-		await settle();
+		expect(encoder.out.resolved.peek()?.codec).toBe("avc1.640028");
 		expect(encoder.out.catalog.peek()?.codec).toBe("avc1.64001F");
+
+		// The configured strings were never advertised, not even briefly.
+		expect([...new Set(advertised)]).toEqual(["vp09.00.31.08", "avc1.64001F"]);
+	} finally {
+		unsubscribe();
+		encoder.close();
+		probe.mockRestore();
+	}
+});
+
+test("a probe encode that reports no codec string fails loud", async () => {
+	using _videoEncoder = installFakeVideoEncoder();
+	FakeVideoEncoder.report = () => undefined;
+	const error = spyOn(console, "error").mockImplementation(() => {});
+	const capture = {
+		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },
+		out: { display: new Signal({ width: 1280, height: 720 }) },
+	};
+	const encoder = new Encoder("video", { enabled: true, capture: capture as never });
+	try {
+		await settle();
+		expect(encoder.out.catalog.peek()).toBeUndefined();
+		expect(encoder.settled.peek()).toBe(true);
+		expect(error).toHaveBeenCalled();
 	} finally {
 		encoder.close();
-		bandwidth.close();
-		sub.close();
-		fanout.close();
-		if (original) Object.defineProperty(globalThis, "VideoEncoder", original);
-		else Reflect.deleteProperty(globalThis, "VideoEncoder");
+		error.mockRestore();
 	}
 });

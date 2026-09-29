@@ -137,10 +137,6 @@ export class Encoder {
 	// The codec the browser will actually encode with, tagged with the inputs it was probed against.
 	#codec = new Signal<Detected | undefined>(undefined);
 
-	// The codec string the encoder's output reported, tagged with the codec it was configured with.
-	// It can be more specific than the probed string: Safari reports the encoder's active profile.
-	#reported = new Signal<{ configured: string; codec: string } | undefined>(undefined);
-
 	// Uncapped target bitrate (pixels, maxBitrate), the reservation's ceiling.
 	#ceiling = new Signal<number | undefined>(undefined);
 
@@ -278,15 +274,10 @@ export class Encoder {
 
 		let lastKeyframe: Time.Micro | undefined;
 		let lastEncoded: Time.Micro | undefined;
-		let configured: string | undefined;
 
 		effect.spawn(async () => {
 			const encoder = new VideoEncoder({
-				output: (frame: EncodedVideoChunk, metadata?: EncodedVideoChunkMetadata) => {
-					// Only present on the first output after a configure, or when the encoder's config changes.
-					const reported = metadata?.decoderConfig?.codec;
-					if (reported && configured) this.#reported.set({ configured, codec: reported });
-
+				output: (frame: EncodedVideoChunk) => {
 					const key = frame.type === "key";
 					if (key) {
 						lastKeyframe = frame.timestamp as Time.Micro;
@@ -318,7 +309,6 @@ export class Encoder {
 				if (!config) return;
 
 				encoder.configure(config);
-				configured = config.codec;
 			});
 
 			effect.run((effect) => {
@@ -418,18 +408,21 @@ export class Encoder {
 	#runCatalog(effect: Effect): void {
 		const enabled = effect.get(this.in.enabled);
 		const config = effect.get(this.out.resolved);
-		if (!enabled || !config) {
+		// Advertise the codec string the probe's encoder reported rather than the one we configured,
+		// so it names the profile and level the bitstream actually carries. The resolved config is
+		// derived from the probe, but can briefly trail a new one within a batch.
+		const detected = effect.get(this.#codec);
+		const matches =
+			detected?.codec === config?.codec &&
+			detected?.width === config?.width &&
+			detected?.height === config?.height;
+		if (!enabled || !config || !detected || !matches) {
 			effect.set(this.#out.catalog, undefined);
 			return;
 		}
 
-		// Advertise what the encoder reported, falling back to the probed string until its first output,
-		// so the rendition announces without waiting on demand. Keyed by the configured codec so a codec
-		// switch never keeps a stale string.
-		const reported = effect.get(this.#reported);
-
 		const catalog: Catalog.VideoConfig = {
-			codec: reported?.configured === config.codec ? reported.codec : config.codec,
+			codec: detected.reported,
 			bitrate: config.bitrate ? Catalog.u53(config.bitrate) : undefined,
 			framerate: config.framerate,
 			codedWidth: Catalog.u53(config.width),
@@ -457,8 +450,6 @@ export class Encoder {
 		effect.spawn(async () => {
 			try {
 				const detected = await this.#bestCodec(required, dimensions);
-				if (!detected) return;
-
 				effect.set(this.#codec, { ...detected, required, ...dimensions });
 			} catch (err) {
 				this.#fail(effect);
@@ -600,13 +591,7 @@ export class Encoder {
 	async #bestCodec(
 		required: string,
 		dimensions: { width: number; height: number },
-	): Promise<
-		| {
-				codec: string;
-				hardwareAcceleration: HardwareAcceleration;
-		  }
-		| undefined
-	> {
+	): Promise<Pick<Detected, "codec" | "hardwareAcceleration" | "reported">> {
 		// A list of codecs to try, in order of preference. Only full RFC 6381 strings: Chrome, Firefox,
 		// and Safari all refuse a bare `avc1` or `vp09`, and native players can't decode without the profile.
 		const HARDWARE_CODECS = [
@@ -658,35 +643,17 @@ export class Encoder {
 		// VideoToolbox only hardware-encodes H.264 and HEVC. Skip the hardware pass and let it fall
 		// through to the software pass, which is H.264 first, since Safari routes that through
 		// VideoToolbox anyway regardless of the hint.
-		if (hardwareReliable()) {
-			for (const codec of HARDWARE_CODECS) {
-				if (!codec.startsWith(required)) continue;
+		const candidates: [string, HardwareAcceleration][] = [
+			...(hardwareReliable()
+				? HARDWARE_CODECS.map((codec) => [codec, "prefer-hardware"] as [string, HardwareAcceleration])
+				: []),
+			...SOFTWARE_CODECS.map((codec) => [codec, "prefer-software"] as [string, HardwareAcceleration]),
+		];
 
-				const hardwareAcceleration: HardwareAcceleration = "prefer-hardware";
-
-				const hardware: VideoEncoderConfig = {
-					codec,
-					width: dimensions.width,
-					height: dimensions.height,
-					latencyMode: "realtime",
-					hardwareAcceleration,
-					avc: codec.startsWith("avc1") ? { format: "annexb" } : undefined,
-					// @ts-expect-error Typescript needs to be updated.
-					hevc: codec.startsWith("hev1") ? { format: "annexb" } : undefined,
-				};
-
-				const { supported } = await VideoEncoder.isConfigSupported(hardware);
-				if (supported) return { codec, hardwareAcceleration };
-			}
-		}
-
-		// Try software encoding.
-		for (const codec of SOFTWARE_CODECS) {
+		for (const [codec, hardwareAcceleration] of candidates) {
 			if (!codec.startsWith(required)) continue;
 
-			const hardwareAcceleration: HardwareAcceleration = "prefer-software";
-
-			const software: VideoEncoderConfig = {
+			const config: VideoEncoderConfig = {
 				codec,
 				width: dimensions.width,
 				height: dimensions.height,
@@ -697,8 +664,8 @@ export class Encoder {
 				hevc: codec.startsWith("hev1") ? { format: "annexb" } : undefined,
 			};
 
-			const { supported } = await VideoEncoder.isConfigSupported(software);
-			if (supported) return { codec, hardwareAcceleration };
+			const { supported } = await VideoEncoder.isConfigSupported(config);
+			if (supported) return { codec, hardwareAcceleration, reported: await reportedCodec(config) };
 		}
 
 		throw new Error("no supported codec");
@@ -718,13 +685,57 @@ function sourceFrameRate(source: Source): number | undefined {
 // A hardware probe result, carrying the inputs it ran against so a consumer can tell whether it
 // still applies.
 type Detected = {
+	// The codec string we configure the encoder with.
 	codec: string;
+	// The codec string the encoder reported for it, which the catalog advertises.
+	reported: string;
 	hardwareAcceleration: HardwareAcceleration;
 	// The codec prefix the user required at probe time.
 	required: string;
 	width: number;
 	height: number;
 };
+
+// Encode one frame with a throwaway encoder and return the codec string it reports, like
+// moq-video's `Config::probe`. The encoder picks the profile and level it actually writes, so reading
+// them back lets the rendition be advertised before a subscriber starts the real encoder, without a
+// claim the first keyframe would contradict. It closes before the config resolves, so it never
+// overlaps the first real encoder; only a re-probe while serving briefly holds two sessions.
+async function reportedCodec(config: VideoEncoderConfig): Promise<string> {
+	let reported: string | undefined;
+	const encoder = new VideoEncoder({
+		output: (_chunk, metadata) => {
+			reported ??= metadata?.decoderConfig?.codec;
+		},
+		// flush() rejects with the same error.
+		error: () => {},
+	});
+
+	try {
+		encoder.configure(config);
+
+		// Mid-gray, since the picture only has to make the encoder emit its config.
+		const { width, height } = config;
+		const frame = new VideoFrame(new Uint8Array((width * height * 3) / 2).fill(0x80), {
+			format: "I420",
+			codedWidth: width,
+			codedHeight: height,
+			timestamp: 0,
+		});
+		try {
+			encoder.encode(frame, { keyFrame: true });
+		} finally {
+			frame.close();
+		}
+
+		await encoder.flush();
+	} finally {
+		if (encoder.state !== "closed") encoder.close();
+	}
+
+	if (!reported) throw new Error(`${config.codec} encoder reported no codec string`);
+	return reported;
+}
 
 // Scale the bitrate for more efficient codecs, relative to H.264.
 // TODO This shouldn't be linear, as the efficiency is very similar at low bitrates.
