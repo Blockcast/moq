@@ -26,6 +26,10 @@ let mut producer = moq_flate::snapshot::Producer::new(track, config);
 producer.update(payload)?;
 ```
 
+A payload is stamped when written, unless it carries its capture time:
+`moq_net::Timed::from(bytes).at(captured)`. Writes return the encoded frame
+size.
+
 The group-scoped codec underneath is exported as `Encoder`/`Decoder`, which
 [`moq-json`](/lib/rs/moq-json) reuses for its merge-patch deltas. Create one
 pair per group and feed frames in order.

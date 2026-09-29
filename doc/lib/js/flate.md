@@ -24,6 +24,9 @@ const producer = new Snapshot.Producer({ track, compression: "deflate" });
 producer.update(payload);
 ```
 
+A payload is stamped when written, unless you pass its capture time:
+`producer.update(payload, at)`.
+
 The codec underneath is exported as `Encoder`/`Decoder`. Create one pair per
 group and feed frames in order.
 
