@@ -73,9 +73,10 @@ withdraw fallback and no negotiation.
   namespace. Emit an in-place update instead. In-flight subscriptions drain
   the old copy, and new requests neither reuse the old publisher's cached
   track info nor splice onto a live subscription, matching Rust.
-- JS sender `js/net/src/ietf/publisher.ts` (`runPublishNamespaces`): once
-  JS IETF reprice gives it in-place updates, a first-hop change uses them too
-  instead of withdrawing.
+- JS sender `js/net/src/ietf/publisher.ts` (`change`): a first-hop change
+  returns an update instead of `"restart"`, so both the PUBLISH_NAMESPACE
+  path (REQUEST_UPDATE) and the inline path (a re-sent NAMESPACE) update in
+  place instead of withdrawing.
 - Docs: `doc/bin/relay/cluster.md`, and any `doc/concept` page that
   describes the cluster extension, say a publisher change updates in place,
   in-flight subscriptions drain the old publisher, and new requests take the
@@ -92,10 +93,6 @@ withdraw fallback and no negotiation.
 Public API: none. Wire: the cluster extension's update semantics change (no
 message or parameter changes), breaking first-hop updates toward released
 relays as decided above.
-
-## Required
-
-- [JS IETF reprice](/quest/m1/js-ietf-reprice.md) - the JS IETF publisher updates a held namespace in place, which a first-hop change then reuses
 
 ## Related
 
