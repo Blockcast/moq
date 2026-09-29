@@ -569,10 +569,46 @@ export class Publisher {
 	 * @internal
 	 */
 	async runSubscribe(msg: Subscribe, stream: Stream) {
-		// Serve only what our grant lets us publish, and stop once it no longer does.
+		// Serve only what our grant lets us publish, and stop once it no longer does. The
+		// watch is armed before the first check and held to the end, so a shrink while the
+		// broadcast resolves is never missed.
+		const revoked = unauthorized(msg.broadcast);
+		let serving: track.Subscriber | undefined;
+		const watch = this.#watch(msg.broadcast, () => {
+			console.debug(`publish revoked: broadcast=${msg.broadcast} track=${msg.track}`);
+			serving?.close(revoked);
+			stream.abort(revoked);
+		});
+		try {
+			await this.#serveSubscribe(msg, stream, watch, (track) => {
+				serving = track;
+			});
+		} finally {
+			watch.dispose();
+		}
+	}
+
+	// Watch whether our grant still lets us publish `broadcast`, calling `onRevoke` once
+	// it does not. Arm it before the request's first check.
+	#watch(broadcast: Path.Valid, onRevoke: () => void): { revoked: () => boolean; dispose: () => void } {
+		let revoked = false;
+		const dispose =
+			this.#grant?.subscribe(() => {
+				if (revoked || !this.#denied(broadcast)) return;
+				revoked = true;
+				onRevoke();
+			}) ?? (() => {});
+		return { revoked: () => revoked || this.#denied(broadcast), dispose };
+	}
+
+	async #serveSubscribe(
+		msg: Subscribe,
+		stream: Stream,
+		watch: { revoked: () => boolean },
+		serving: (track: track.Subscriber) => void,
+	) {
 		// Checked before resolving, so a denied request never reaches the origin.
-		const denied = () => this.#denied(msg.broadcast);
-		if (denied()) {
+		if (watch.revoked()) {
 			stream.writer.reset(unauthorized(msg.broadcast));
 			return;
 		}
@@ -586,6 +622,8 @@ export class Publisher {
 			stream.writer.reset(error(err));
 			return;
 		}
+		// Revoked while the broadcast resolved: the watch already reset the stream.
+		if (watch.revoked()) return;
 		if (!front) {
 			console.debug(`publish unknown: broadcast=${msg.broadcast}`);
 			stream.writer.reset(new NotFound(`broadcast ${msg.broadcast}`));
@@ -601,6 +639,7 @@ export class Publisher {
 				end: endGroup === undefined ? undefined : { excluded: endGroup },
 			},
 		});
+		serving(track);
 		positionCursor(track, this.version, msg.startGroup);
 		hooks.replaceGroups(track, { end: endGroup === undefined ? undefined : { excluded: endGroup } });
 
@@ -609,14 +648,6 @@ export class Publisher {
 		// subscription; awaited during teardown so it doesn't outlive the subscription.
 		let datagrams = Promise.resolve();
 		let controls: SubscriptionControls | undefined;
-
-		const revoked = unauthorized(msg.broadcast);
-		const disposeGrant = this.#grant?.subscribe(() => {
-			if (!denied()) return;
-			console.debug(`publish revoked: broadcast=${msg.broadcast} track=${track.name}`);
-			track.close(revoked);
-			stream.abort(revoked);
-		});
 
 		try {
 			let timescale: Timescale = Timescale.MILLI;
@@ -691,8 +722,6 @@ export class Publisher {
 			track.close(e);
 			stream.abort(e);
 			await Promise.all([datagrams, controls?.decoding]);
-		} finally {
-			disposeGrant?.();
 		}
 	}
 
@@ -706,7 +735,31 @@ export class Publisher {
 			stream.writer.reset(new Error("fetch requires moq-lite-05 or newer"));
 			return;
 		}
-		if (this.#denied(msg.broadcast)) {
+		// Like a subscription, the fetch holds its watch until the last frame: a group can stay
+		// open as long as its track, so a check at accept alone would keep serving after a shrink.
+		const revoked = unauthorized(msg.broadcast);
+		let fetched: group.Consumer | undefined;
+		const watch = this.#watch(msg.broadcast, () => {
+			console.debug(`fetch revoked: broadcast=${msg.broadcast} track=${msg.track} group=${msg.group}`);
+			fetched?.close(revoked);
+			stream.abort(revoked);
+		});
+		try {
+			await this.#serveFetch(msg, stream, watch, (group) => {
+				fetched = group;
+			});
+		} finally {
+			watch.dispose();
+		}
+	}
+
+	async #serveFetch(
+		msg: Fetch,
+		stream: Stream,
+		watch: { revoked: () => boolean },
+		serving: (group: group.Consumer) => void,
+	) {
+		if (watch.revoked()) {
 			stream.writer.reset(unauthorized(msg.broadcast));
 			return;
 		}
@@ -725,6 +778,8 @@ export class Publisher {
 			stream.writer.reset(new NotFound(`broadcast ${msg.broadcast}`));
 			return;
 		}
+		// Revoked while the broadcast resolved: the watch already reset the stream.
+		if (watch.revoked()) return;
 
 		// The subscriber opened this stream, so its send order only ranked the request. Rank the
 		// response here, on the same scale as the group streams it competes with.
@@ -736,6 +791,12 @@ export class Publisher {
 			// come off the same front, so the metadata and the frames are one generation.
 			const info = await this.#resolveTrackInfo(front, msg.track);
 			group = await wireOf(front).fetchGroup(msg.track, msg.group, { priority: msg.priority });
+			serving(group);
+			// Revoked while the group resolved: the watch already reset the stream.
+			if (watch.revoked()) {
+				group.close(unauthorized(msg.broadcast));
+				return;
+			}
 			await this.#runFetchGroup(group, stream.writer, {
 				timescale: Timescale(info.timescale),
 				start: msg.startFrame,
