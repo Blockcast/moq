@@ -2490,7 +2490,9 @@ async fn run_front(task: FrontTask) {
 							tracks.remove(&name);
 							continue;
 						}
-						io.head = io.warm.take().and_then(|mut warm| warm.edge.take());
+						if let Some(head) = io.warm.take().and_then(|mut warm| warm.edge.take()) {
+							io.head = Some(head);
+						}
 						// The new segment has produced nothing yet: this is the
 						// edge the copy is asked to advance.
 						io.edge = io.resume.resume_position();
@@ -5723,6 +5725,91 @@ mod tests {
 				group: 0,
 				frame: expect.len() as u64,
 			});
+		}
+	}
+
+	#[tokio::test]
+	async fn warm_head_survives_another_takeover_before_park() {
+		tokio::time::pause();
+		let producer = origin(1).produce();
+		let _server = producer
+			.dynamic("room/alice", Route::default().with_hops(hops(&[10])).with_cost(5))
+			.unwrap();
+		let pending = producer.consume().request_broadcast("room/alice");
+		let upstream = broadcast::Info::new().produce();
+		let mut dynamic = upstream.dynamic();
+		queued(&_server).await.accept(&upstream);
+		let resolved = pending.await.unwrap();
+
+		let track = resolved.track("log").unwrap();
+		let subscribing = tokio::spawn(async move { track.subscribe(None).await });
+		let source = dynamic.requested_track().await.unwrap().accept(None);
+		let mut group = source.create_group(0u64.into()).unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"a".as_ref()).unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"b".as_ref()).unwrap();
+		let mut subscription = subscribing.await.unwrap().unwrap();
+		let mut reading = subscription.recv_group().await.unwrap().unwrap();
+		assert_eq!(&reading.read_frame().await.unwrap().unwrap().payload[..], b"a");
+		drop(reading);
+		drop(subscription);
+		source.unused().await.unwrap();
+		drop(group);
+		drop(source);
+
+		let track = resolved.track("log").unwrap();
+		let subscribing = tokio::spawn(async move { track.subscribe(None).await });
+		let mut resumed = dynamic.requested_track().await.unwrap().resolving_start().accept(None);
+		resumed.start_at(0).unwrap();
+		let mut subscription = subscribing.await.unwrap().unwrap();
+		let mut reading = subscription.recv_group().await.unwrap().unwrap();
+		assert_eq!(&reading.read_frame().await.unwrap().unwrap().payload[..], b"a");
+
+		let replacement_server = producer
+			.dynamic("room/alice", Route::default().with_hops(hops(&[10])))
+			.unwrap();
+		let replacement = broadcast::Info::new().produce();
+		let mut replacement_dynamic = replacement.dynamic();
+		queued(&replacement_server).await.accept(&replacement);
+		let mut source = replacement_dynamic
+			.requested_track()
+			.await
+			.unwrap()
+			.resolving_start()
+			.accept(None);
+		source.start_at(0).unwrap();
+		let mut group = source.create_group(0u64.into()).unwrap();
+		group.start_at(2).unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"c".as_ref()).unwrap();
+		let mut continuation = reading.clone();
+		continuation.start_at(2);
+		let frame = tokio::time::timeout(Duration::from_secs(1), continuation.read_frame())
+			.await
+			.expect("replacement frame")
+			.unwrap()
+			.unwrap();
+		assert_eq!(&frame.payload[..], b"c");
+		drop(continuation);
+		assert_eq!(&reading.read_frame().await.unwrap().unwrap().payload[..], b"b");
+		assert_eq!(&reading.read_frame().await.unwrap().unwrap().payload[..], b"c");
+		drop(reading);
+		drop(subscription);
+		source.unused().await.unwrap();
+		drop(group);
+		drop(source);
+
+		let track = resolved.track("log").unwrap();
+		let subscribing = tokio::spawn(async move { track.subscribe(None).await });
+		let mut next = replacement_dynamic
+			.requested_track()
+			.await
+			.unwrap()
+			.resolving_start()
+			.accept(None);
+		next.start_at(0).unwrap();
+		let mut subscription = subscribing.await.unwrap().unwrap();
+		let mut reading = subscription.recv_group().await.unwrap().unwrap();
+		for expected in [b"a", b"b", b"c"] {
+			assert_eq!(&reading.read_frame().await.unwrap().unwrap().payload[..], expected);
 		}
 	}
 
