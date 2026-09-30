@@ -343,11 +343,10 @@ test("a lite-05 duplicate announce follows the same restart rule", async () => {
 });
 
 // A responder that withholds its Hop ID sends the reserved 0, and an empty chain means it
-// originated the path itself, so the advertisement names nobody. Two such advertisements can
-// be unrelated publishers, so a restart is a new source: an end before the start, and the next
-// consume starts fresh. Mirrors the Rust origin, where any update to an anonymous route ends
-// the front serving it.
-test("a restart from an unidentified publisher is a new source", async () => {
+// originated the path itself, so the advertisement names nobody. A restart of it is still the
+// one advertisement, whose stream is the continuity, so it updates in place like Rust's and
+// keeps the shared broadcast. Only a first hop that changes names a new publisher.
+test("a restart from an unidentified publisher updates in place", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
 	const announced = subscriber.announced();
 	await settle();
@@ -365,17 +364,13 @@ test("a restart from an unidentified publisher is a new source", async () => {
 			Version.DRAFT_06,
 		),
 	);
-	expect(await announced.next()).toMatchObject({ prefix: room, kind: "retracted" });
-	expect(await announced.next()).toMatchObject({ prefix: room, kind: "announced" });
-	const restarted = subscriber.consume(room);
-	expect(restarted.closed).not.toBe(held.closed);
-	expect(held.closed.peek()).toBeUndefined();
+	expect(await announced.next()).toMatchObject({ prefix: room, kind: "updated" });
+	expect(subscriber.consume(room).closed).toBe(held.closed);
 
-	// Naming a publisher is a change of publisher, which updates in place and still
-	// starts the next consume fresh.
+	// Naming a publisher is a change of publisher: the next consume starts fresh.
 	await send((w) => encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [PUBLISHER_A] }, Version.DRAFT_06));
 	expect(await announced.next()).toMatchObject({ prefix: room, kind: "updated" });
-	expect(subscriber.consume(room).closed).not.toBe(restarted.closed);
+	expect(subscriber.consume(room).closed).not.toBe(held.closed);
 
 	announced.close();
 	subscriber.close();

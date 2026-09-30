@@ -245,26 +245,17 @@ export class Subscriber {
 	 *
 	 * A new first hop is a new publisher: holders keep their broadcast to drain, but the
 	 * next consume starts fresh rather than reusing the old publisher's cached track info.
-	 * An update whose first hop is 0 on both sides cannot be proven the same publisher, so
-	 * it is a restart: consumers hear an end before the start, as on moq-lite.
 	 */
 	#updateAnnounce(path: Path.Valid, route: Route) {
 		const existing = this.#announced.get(path);
 		if (existing === undefined || routesEqual(existing.route, route)) return;
-		const previous = existing.route;
-		const restart = previous.hops[0] === UNKNOWN_HOP && route.hops[0] === UNKNOWN_HOP;
-		if (restart || previous.hops[0] !== route.hops[0]) this.#consumes.evict(path);
+		if (existing.route.hops[0] !== route.hops[0]) this.#consumes.evict(path);
 		existing.route = route;
-		console.debug(`announced: broadcast=${path} ${restart ? "restarted" : "rerouted"}`);
+		console.debug(`announced: broadcast=${path} rerouted`);
 		for (const [consumer, filter] of this.#announcedConsumers) {
 			if (!sees(filter, path)) continue;
-			const captures = scopeCaptures(filter.scope, path);
-			if (restart) {
-				consumer.append({ prefix: path, captures, kind: "retracted", route: previous });
-				consumer.append({ prefix: path, captures, kind: "announced", route });
-			} else {
-				consumer.append({ prefix: path, captures, kind: "updated", route });
-			}
+			const scope = filter.scope;
+			consumer.append({ prefix: path, captures: scopeCaptures(scope, path), kind: "updated", route });
 		}
 	}
 

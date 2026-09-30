@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import type * as announce from "../announced.ts";
 import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.ts";
-import { type Hop, HopSchema, UNKNOWN_HOP } from "../hop.ts";
+import { type Hop, HopSchema } from "../hop.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
@@ -665,52 +665,6 @@ test("a PUBLISH_NAMESPACE update that changes the publisher applies in place", a
 	peer.close();
 	await handler;
 	expect(await announced.next()).toMatchObject({ prefix: Path.from("theirs"), kind: "retracted" });
-});
-
-/**
- * An update whose first Hop ID is 0 before and after cannot be proven the same publisher,
- * so it is a restart: consumers hear an end before the start, and the next consume starts
- * fresh while a held broadcast drains. The stream stays open.
- */
-test("a PUBLISH_NAMESPACE update from an unknown publisher restarts it", async () => {
-	const pair = createMockTransportPair(ALPN.DRAFT_19);
-	const session = new NativeSession(pair.server, VERSION, true);
-	const subscriber = new Subscriber({ session, cluster: { self: SELF, peer: PEER } });
-	const theirs = Path.from("theirs");
-
-	const announced = subscriber.announced();
-	await acceptSubscribeNamespace(pair.client);
-
-	const request = await Stream.open(pair.server, { version: VERSION });
-	const handler = subscriber.runPublishNamespace(
-		new PublishNamespace({
-			requestId: 0n,
-			trackNamespace: theirs,
-			cluster: { hops: [UNKNOWN_HOP, PEER], cost: 4n },
-		}),
-		request,
-	);
-	expect(await announced.next()).toMatchObject({ prefix: theirs, kind: "announced" });
-
-	const peer = await nextStream(pair.client);
-	if (!peer) throw new Error("no PUBLISH_NAMESPACE stream");
-	expect(await peer.reader.u53()).toBe(RequestOk.id);
-	await RequestOk.decode(peer.reader, VERSION);
-	const held = subscriber.consume(theirs);
-
-	await peer.writer.u53(PublishNamespaceUpdate.id);
-	await new PublishNamespaceUpdate({ requestId: 3n, update: { cost: 0n } }).encode(peer.writer, VERSION);
-	expect(await peer.reader.u53()).toBe(RequestOk.id);
-	await RequestOk.decode(peer.reader, VERSION);
-	expect(await announced.next()).toMatchObject({ prefix: theirs, kind: "retracted" });
-	expect(await announced.next()).toMatchObject({ prefix: theirs, kind: "announced" });
-
-	expect(subscriber.consume(theirs).closed).not.toBe(held.closed);
-	expect(held.closed.peek()).toBeUndefined();
-
-	peer.close();
-	await handler;
-	expect(await announced.next()).toMatchObject({ prefix: theirs, kind: "retracted" });
 });
 
 /**

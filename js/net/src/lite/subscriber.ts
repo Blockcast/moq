@@ -109,11 +109,6 @@ const MAX_CLOSE_REASON = 1024;
 
 // The longest prefix of `text` that fits a close reason. `encodeInto` stops on a whole
 // code point, so `read` never lands mid-character the way slicing bytes would.
-/** Whether a publisher names nobody: absent, or the reserved hop 0. */
-function unidentified(publisher: Hop | undefined): boolean {
-	return publisher === undefined || publisher === UNKNOWN_HOP;
-}
-
 function closeReason(text: string): string {
 	const encoder = new TextEncoder();
 	const buf = new Uint8Array(MAX_CLOSE_REASON);
@@ -246,9 +241,9 @@ export class Subscriber {
 			// the map instead would let a later announce take the path, and the skipped one's
 			// `endedId` would then retract that one's state.
 			//
-			// `publisher` is what lets a restart tell a route change (the same named
-			// publisher) from a new source (another publisher, or one naming nobody), whose
-			// content the next consume must not share with the old one's.
+			// `publisher` is what lets a restart tell a route change (same publisher) from a
+			// new publisher on the route, whose content the next consume must not share
+			// with the old one's.
 			type Advertisement = {
 				publisher: Hop | undefined;
 				live: boolean;
@@ -431,15 +426,10 @@ export class Subscriber {
 				}
 
 				// A second advertisement for a path we already carry is a restart: either an
-				// explicit ANNOUNCE_UPDATE, or (lite-05) a duplicate ANNOUNCE. A named
-				// publisher's restart updates the route in place, so a forwarder re-prices
-				// without retracting. Mirrors the Rust origin's route generation.
+				// explicit ANNOUNCE_UPDATE, or (lite-05) a duplicate ANNOUNCE. It updates the
+				// route in place, so a forwarder re-prices without retracting.
 				const previous = advertised.get(path);
-				if (previous?.live && unidentified(previous.publisher) && unidentified(publisher)) {
-					// Nobody is named on either side, so this cannot be proven the same
-					// content: a new source. Surface a real end before the start.
-					retract();
-				} else if (previous?.live) {
+				if (previous?.live) {
 					// A different publisher took the path. Subscriptions already open drain
 					// the old copy, but the next consume starts fresh rather than reusing the
 					// old publisher's cached track info.
