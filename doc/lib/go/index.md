@@ -169,4 +169,4 @@ available, which is not the same as zero.
 
 Raw track publisher metadata has an optional maximum age. Omitting it imposes no publisher age limit; zero keeps the live edge. Local cache limits still apply, and media imports explicitly retain 30 seconds. See [publisher retention](/concept/moq-lite).
 
-`session.Shutdown(ctx)` drains finished tracks and returns a delivery error if the one-second deadline expires. Cancelling the context aborts immediately. `client.Close()` waits for shutdown and returns the same error; `session.Cancel(code)` remains immediate. Finish or abort live tracks before shutdown.
+`session.Shutdown(ctx)` drains finished tracks and returns a delivery error if the one-second deadline expires. Cancelling the context aborts immediately. `client.Close()` waits for shutdown and returns the same error; `session.Cancel(code)` remains immediate. Finish or abort live tracks before shutdown. IETF media streams are not drained yet.

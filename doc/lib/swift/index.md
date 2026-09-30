@@ -138,4 +138,4 @@ not the same as zero.
 
 Raw track publisher metadata has an optional maximum age. Omitting it imposes no publisher age limit; zero keeps the live edge. Local cache limits still apply, and media imports explicitly retain 30 seconds. See [publisher retention](/concept/moq-lite).
 
-Use `try await session.shutdown()` to drain finished tracks before disconnecting. It throws if delivery has not completed within one second. `session.cancel(code: 0)` remains immediate. Finish or abort live tracks before shutdown.
+Use `try await session.shutdown()` to drain finished tracks before disconnecting. It throws if delivery has not completed within one second. `session.cancel(code: 0)` remains immediate. Finish or abort live tracks before shutdown. IETF media streams are not drained yet.

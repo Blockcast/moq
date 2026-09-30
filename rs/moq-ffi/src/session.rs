@@ -877,6 +877,7 @@ impl MoqSession {
 	///
 	/// Finish or abort live tracks first. `cancel` stays immediate. The name
 	/// avoids Kotlin's generated `AutoCloseable.close()`, which releases the handle.
+	/// IETF media streams are not drained yet.
 	pub async fn shutdown(&self) -> Result<(), MoqError> {
 		let inner = self.inner.clone();
 		crate::ffi::detached(async move {
