@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import type * as announce from "../announced.ts";
 import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.ts";
-import { type Hop, HopSchema } from "../hop.ts";
+import { type Hop, HopSchema, UNKNOWN_HOP } from "../hop.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
@@ -99,6 +99,31 @@ test("an unsolicited announcement lands", async () => {
 		prefix: Path.from("surprise"),
 		kind: "retracted",
 	});
+});
+
+/**
+ * A session without the Cluster extension names no publisher, so each connection stamps its
+ * own random Hop ID as the first hop: a publisher that reconnects reads as a new one.
+ */
+test("an advertisement with no path is stamped per connection", async () => {
+	const stamp = async () => {
+		const pair = createMockTransportPair(ALPN.DRAFT_19);
+		const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true) });
+		const announced = subscriber.announced();
+		expect(await nextStream(pair.client)).toBeDefined();
+
+		const stream = await Stream.open(pair.server, { version: VERSION });
+		void subscriber.runPublishNamespace(
+			new PublishNamespace({ requestId: 0n, trackNamespace: Path.from("legacy") }),
+			stream,
+		);
+		const hops = (await announced.next())?.route.hops ?? [];
+		expect(hops).toHaveLength(1);
+		expect(hops[0]).not.toBe(UNKNOWN_HOP);
+		return hops[0];
+	};
+
+	expect(await stamp()).not.toBe(await stamp());
 });
 
 /**

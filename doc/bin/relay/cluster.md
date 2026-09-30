@@ -35,6 +35,12 @@ Subscriptions already in flight keep draining the old publisher until it ends
 and are never spliced onto the new one. New requests resolve through the updated
 route as a fresh broadcast, without the old publisher's track properties.
 
+A publisher whose protocol names no hop (moq-transport without the cluster
+extension, moq-lite 01 through 03, or a peer that sends 0) gets a random first
+hop from the relay it connects to, fresh for each connection. Its reconnect is
+therefore a new publisher downstream, while a reprice on the same connection
+stays in place.
+
 ## Topology
 
 List the peers each relay dials. That's the whole topology.

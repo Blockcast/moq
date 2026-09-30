@@ -265,6 +265,26 @@ impl Hops {
 		Ok(())
 	}
 
+	/// Name an unknown original publisher: fill an empty chain, or replace a first
+	/// entry of 0, with `stamp`, the receiving session's own per-connection id.
+	///
+	/// A publisher that reconnects then reads downstream as a new first hop, which is
+	/// all anyone can say about it. Fails with [`InvalidHop::Duplicate`] if `stamp`
+	/// already appears later in the chain.
+	pub(crate) fn stamp(&mut self, stamp: Hop) -> Result<(), InvalidHop> {
+		match self.0.first() {
+			None => self.push(stamp),
+			Some(first) if *first == Hop::UNKNOWN => {
+				if self.0[1..].contains(&stamp) {
+					return Err(InvalidHop::Duplicate);
+				}
+				self.0[0] = stamp;
+				Ok(())
+			}
+			Some(_) => Ok(()),
+		}
+	}
+
 	/// Returns true if any entry matches `hop`.
 	pub fn contains(&self, hop: &Hop) -> bool {
 		self.0.contains(hop)
@@ -456,7 +476,8 @@ pub struct Route {
 	/// The chain of origins the route has traversed, oldest first. Each relay
 	/// appends its own [`crate::Hop`] when forwarding; used for loop detection
 	/// and as the selection tie-break. A 0 entry is the anonymous mark and
-	/// travels unchanged; see [`Self::is_anonymous`].
+	/// travels unchanged, except as the first entry, which a session receiving
+	/// it replaces with its own per-connection stamp; see [`Self::is_anonymous`].
 	pub hops: Hops,
 
 	/// What pulling content via this route costs, accumulated per link: lower wins

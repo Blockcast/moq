@@ -4,7 +4,7 @@ import * as broadcast from "../broadcast.ts";
 import { BroadcastCache } from "../consume.ts";
 import { closeError, controlTimeout, error, ProtocolViolation, reason, sessionCause } from "../error.ts";
 import * as netGroup from "../group.ts";
-import { Cost, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
+import { Cost, type Route, randomHop, routesEqual, stampHops } from "../hop.ts";
 import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
 import type { Cursor, Reader, Stream } from "../stream.ts";
@@ -117,6 +117,10 @@ export class Subscriber {
 	// Dedup consumed broadcasts per path: repeat consume() calls share one subscription.
 	#consumes = new BroadcastCache();
 
+	// A random Hop ID of this connection's own, written as the first hop of any path that
+	// names no publisher, so a publisher that reconnects reads as a new one.
+	#stamp = randomHop();
+
 	// Paths with a legacy PUBLISH_NAMESPACE request in flight, reserved synchronously.
 	// The count below is only taken once the OK is written, and two requests that both
 	// got past the duplicate check before either attached would both take one.
@@ -175,10 +179,15 @@ export class Subscriber {
 		return advert !== undefined && this.#cluster !== undefined && Cluster.loops(advert, this.#cluster.self);
 	}
 
-	/** The route an advertisement carries; one without a path is anonymous and free. */
+	/**
+	 * The route an advertisement carries; one without a path is free. A path that names no
+	 * publisher, or none at all, is named by this connection's stamp.
+	 */
 	#route(advert: Cluster.Advert | undefined): Route {
-		if (advert === undefined) return { hops: [UNKNOWN_HOP], cost: Cost.zero };
-		return { hops: advert.hops, cost: { warm: advert.cost, cold: advert.cost } };
+		if (advert === undefined) return { hops: [this.#stamp], cost: Cost.zero };
+		// A stamp colliding with a later entry is a 1-in-2^53 draw: keep the path as sent.
+		const hops = stampHops(advert.hops, this.#stamp) ?? [...advert.hops];
+		return { hops, cost: { warm: advert.cost, cold: advert.cost } };
 	}
 
 	/**

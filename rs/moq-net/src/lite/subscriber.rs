@@ -69,6 +69,11 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	// another session's, while a client only assigns one it knows out of band. The
 	// assigned id stays local and is never written into a hop chain.
 	session_origin: crate::Hop,
+	// A random Hop ID of this connection's own, written as the first hop of any chain
+	// that names no publisher (Lite01/02, a Lite03 placeholder, or a peer reporting 0),
+	// so a publisher that reconnects reads downstream as a new one. Fresh per
+	// connection, unlike `session_origin`.
+	stamp: crate::Hop,
 	subscribes: Lock<HashMap<u64, TrackEntry>>,
 	/// Why this session ended, once it has. A track still waiting on TRACK_INFO is
 	/// not in [`Self::subscribes`], so dropping its request reads this instead of
@@ -110,6 +115,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			recv_bandwidth: config.recv_bandwidth,
 			self_origin,
 			session_origin: config.peer_hop.unwrap_or(crate::Hop::UNKNOWN),
+			stamp: crate::Hop::random(),
 			subscribes: Default::default(),
 			ended: Default::default(),
 			next_id: Default::default(),
@@ -306,13 +312,12 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			return Ok(false);
 		}
 
-		// Lite03 carries its hop count as UNKNOWN placeholders rather than real
-		// ids; they stay 0 and count as anonymous. Lite01/02 send no list at all.
-		// Either way the chain must have at least the anonymous mark so a
-		// downstream hop can see that this path passed through an unidentified hop.
-		if hops.is_empty() {
-			hops.push(crate::Hop::UNKNOWN)
-				.expect("an empty hop chain always has room for one entry, and repeats nothing");
+		// Lite01/02 send no list at all, and Lite03 carries only UNKNOWN placeholders,
+		// so the publisher may be unnamed: this connection's stamp names it. Later
+		// placeholders stay 0 and count as anonymous.
+		if hops.stamp(self.stamp).is_err() {
+			tracing::debug!(route = %self.log_path(&path), "dropping announce; stamp already in the chain");
+			return Ok(false);
 		}
 
 		tracing::debug!(route = %self.log_path(&path), hops = hops.len(), "announce");
@@ -405,9 +410,11 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			return Ok(false);
 		}
 
-		if hops.is_empty() {
-			hops.push(crate::Hop::UNKNOWN)
-				.expect("an empty hop chain always has room for one entry, and repeats nothing");
+		// Named by this connection's stamp when the chain names no publisher, exactly as
+		// the announce was, so a restart of the same unnamed publisher stays in place.
+		if hops.stamp(self.stamp).is_err() {
+			announced.declined(path);
+			return Ok(false);
 		}
 
 		tracing::debug!(route = %self.log_path(&path), hops = hops.len(), "restart");
@@ -2477,8 +2484,9 @@ mod tests {
 		);
 	}
 
-	/// A peer that declares no identity is marked anonymous (hop 0). The assigned
-	/// identity stays on `via` for split-horizon and is never written into the chain.
+	/// A peer that declares no identity has its publisher named by the connection's
+	/// stamp. The assigned identity stays on `via` for split-horizon and is never
+	/// written into the chain.
 	#[tokio::test]
 	async fn assigned_peer_hop_attributes_announces() {
 		let session = SinkSession::new(Default::default());
@@ -2513,19 +2521,20 @@ mod tests {
 			.unwrap();
 		assert!(accepted);
 
-		// The route is announced synchronously: hop 0 on the wire, assigned id local.
+		// The route is announced synchronously: the stamp in the chain, assigned id local.
 		let mut cursor = consumer.announced();
 		let route = cursor.assert_next_active("room/host");
 		let hops: Vec<_> = route.hops.iter().copied().collect();
-		assert_eq!(hops, vec![crate::Hop::UNKNOWN]);
-		assert!(route.is_anonymous());
+		assert_eq!(hops, vec![subscriber.stamp]);
+		assert_ne!(subscriber.stamp, assigned);
 
 		let mut hidden = consumer.excluding(assigned).announced();
 		hidden.assert_next_wait();
 	}
 
-	/// Lite03 hop-count placeholders stay 0 and count as anonymous; they are not
-	/// rewritten with the assigned identity.
+	/// Lite03 hop-count placeholders name nobody, so the first is replaced by the
+	/// connection's stamp; the rest stay 0 and count as anonymous. None is rewritten with
+	/// the assigned identity.
 	#[tokio::test]
 	async fn lite03_placeholders_stay_anonymous() {
 		let assigned = crate::Hop::new(777).unwrap();
@@ -2561,26 +2570,28 @@ mod tests {
 		let mut cursor = consumer.announced();
 		let route = cursor.assert_next_active("room/host");
 		let hops: Vec<_> = route.hops.iter().copied().collect();
-		assert_eq!(hops, vec![crate::Hop::UNKNOWN, crate::Hop::UNKNOWN]);
+		assert_eq!(hops, vec![subscriber.stamp, crate::Hop::UNKNOWN]);
 		assert!(route.is_anonymous());
 	}
 
-	/// A peer with no assigned identity is attributed the reserved origin 0
-	/// (UNKNOWN). This layer never mints one of its own: whether an anonymous peer
-	/// gets an identity, and whether two of its sessions share it, is the caller's
-	/// policy, and a minted id here would be indistinguishable from a declared one.
+	/// A publisher that names nobody is stamped with a random id fresh per connection,
+	/// never 0: a restart on the same connection keeps the stamp and updates in place,
+	/// while the same publisher reconnecting reads as a new first hop.
 	#[tokio::test]
-	async fn absent_peer_hop_stamps_unknown() {
-		let (mut subscriber, consumer) = restart_subscriber(SinkSession::new(Default::default()));
+	async fn an_unnamed_publisher_is_stamped_per_connection() {
+		let (mut first, consumer) = restart_subscriber(SinkSession::new(Default::default()));
+		let (second, _) = restart_subscriber(SinkSession::new(Default::default()));
+		assert_ne!(first.stamp, crate::Hop::UNKNOWN);
+		assert_ne!(first.stamp, second.stamp, "each connection stamps its own id");
 
 		let mut announced = Announced::default();
-		subscriber
+		first
 			.start_announce(
 				Path::new("room/host").to_owned(),
 				crate::Hops::new(),
 				crate::origin::Cost::UNKNOWN,
 				0,
-				None,
+				Some(crate::Hop::UNKNOWN),
 				&mut announced,
 			)
 			.unwrap();
@@ -2588,7 +2599,22 @@ mod tests {
 		let mut cursor = consumer.announced();
 		let route = cursor.assert_next_active("room/host");
 		let hops: Vec<_> = route.hops.iter().copied().collect();
-		assert_eq!(hops, vec![crate::Hop::UNKNOWN]);
+		assert_eq!(hops, vec![first.stamp]);
+
+		// A reprice from the same unnamed publisher keeps the stamp, so it stays in place.
+		first
+			.restart_announce(
+				Path::new("room/host").to_owned(),
+				crate::Hops::new(),
+				crate::origin::Cost::UNKNOWN,
+				4,
+				Some(crate::Hop::UNKNOWN),
+				&mut announced,
+			)
+			.unwrap();
+		let route = cursor.assert_next_active("room/host");
+		let hops: Vec<_> = route.hops.iter().copied().collect();
+		assert_eq!(hops, vec![first.stamp]);
 	}
 
 	fn restart_subscriber(session: SinkSession) -> (Subscriber<SinkSession>, crate::origin::Consumer) {

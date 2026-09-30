@@ -67,6 +67,19 @@ export function randomHop(): Hop {
 }
 
 /**
+ * Name an unknown original publisher: fill an empty chain, or replace a first entry of 0,
+ * with `stamp`, the receiving connection's own random id. A publisher that reconnects then
+ * reads downstream as a new first hop. `undefined` if `stamp` already appears later in the
+ * chain. Mirrors `Hops::stamp` in rs/moq-net.
+ */
+export function stampHops(hops: readonly Hop[], stamp: Hop): Hop[] | undefined {
+	if (hops.length === 0) return [stamp];
+	if (hops[0] !== UNKNOWN_HOP) return [...hops];
+	if (hops.includes(stamp)) return undefined;
+	return [stamp, ...hops.slice(1)];
+}
+
+/**
  * What pulling content via a route costs, in two magnitudes accumulated together
  * and compared in that order: lower {@link Cost.warm} wins, and {@link Cost.cold}
  * breaks the tie.
