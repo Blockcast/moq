@@ -56,7 +56,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Full codec string](/quest/m1/publish-codec-string.md) - browser-published video carries the encoder's full RFC 6381 codec string, so native players decode it
 - [TS program selection](/quest/m1/ts-programs.md) - `import ts` refuses a multi-program stream unless `--program <n|all>` picks one or publishes each
 - [TS export jitter](/quest/m1/ts-export-jitter.md) - the video reorder bound follows later catalogs and the declared reorder depth, so a late B-frame never reorders TS output; an undeclared stream can reorder once per new maximum depth
-- [TS import shared shift](/quest/m1/ts-import-shared-shift.md) - unflagged loop wraps move audio and video by one shift, so A/V sync holds across wraps
 - [ffmpeg muxdelay](/quest/m1/ts-publish-muxdelay.md) - the documented MPEG-TS publish line adds `-muxdelay 0`, so quiet audio is not clumped
 - [Same-hop importers](/quest/m1/hop-aligned-import.md) - importers sharing a `--hop` and fed one stream publish identical groups and timestamps, so failover survives
 - [PipeWire duplicate cameras](/quest/m1/pipewire-dup-cameras.md) - a webcam lists once with PipeWire enabled
@@ -64,7 +63,6 @@ transport, benchmark tooling); worktrees isolate commits, not semantics.
 - [Auth client CA](/quest/m1/relay-auth-client-ca.md) - on dev, `auth::Config::validate` and `init` take the client-CA flag, so no caller can skip the check
 - [RTMP TLS only](/quest/m1/rtmp-tls-only.md) - an RTMP listener configured for TLS can refuse plaintext instead of sniffing and serving it
 - [HLS linger](/quest/m1/hls-linger.md) - `moq_hls::Server` serves an ended broadcast for its playlist window plus grace, so the moq.pro edge drops its own pool
-- [Remove live()](/quest/m1/remove-live.md) - on dev, importers publish stream timestamps verbatim, the catalog clock maps them to wall time, and an encoder restart becomes a new epoch
 - [iroh versions](/quest/m1/iroh-lite-wip.md) - `iroh://` negotiates the configured versions, so `moq-lite-07-wip` can be opted into
 - [Go and Dart doc samples](/quest/m1/doc-samples-go-dart.md) - Go and Dart doc samples compile against their wrappers
 - [Data capture in bindings](/quest/m1/data-capture-bindings.md) - moq-ffi and every wrapper pass a data frame's capture time, and the JSON window producer takes one
