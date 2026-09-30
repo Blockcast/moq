@@ -16,9 +16,8 @@ This questline adds an AUTH exchange to both wires: one stream per token, a
 grant per token, the union of every accepted token as the session's scope,
 and a loud failure when a publish can never be honored. It ends with the
 credential able to travel in band, while the URL keeps working for every peer
-that predates the stream. Direct peer sessions need a second credential: a
-relay-signed, hop-bound grant that a browser can verify without a signing
-key, which HMAC relay keys cannot provide.
+that predates the stream. Hop-bound peer grants for direct sessions belong to
+[P2P](/quest/m2/p2p/peer-grant.md), their only consumer.
 
 ## Plan
 
@@ -44,11 +43,13 @@ Decisions settled while planning, recorded so review does not relitigate them:
 - **A public grant contains publish patterns, subscribe patterns, and an
   expiry**, in the presenter's own root; the presenter never sees the relay-side
   root, and every token in a union shares the connection's root. Unscoped
-  permission is `**`; an empty union grants nothing. AUTH_OK carries those
-  patterns, wildcards and literals alike, from the first release. There is no prefix-only AUTH_OK and no
-  covering-prefix workaround. Announce stays a prefix: ANNOUNCE_REQUEST and
-  SUBSCRIBE_NAMESPACE do not gain patterns in that change. The public grant
-  type stays pattern-valued.
+  permission is `**`; an empty union grants nothing. Lite AUTH_OK carries
+  those patterns, wildcards and literals alike, from the first release, with
+  no covering-prefix workaround. IETF AUTH_OK carries Track Namespace
+  prefixes, so an acceptor whose grant is not a union of subtrees answers
+  AUTH_ERROR NOT_SUPPORTED rather than widening it. Announce stays a prefix:
+  ANNOUNCE_REQUEST and SUBSCRIBE_NAMESPACE do not gain patterns. The public
+  grant type stays pattern-valued.
 - **Fail loud by aborting the session.** A publisher whose origin announces a
   broadcast outside the union aborts the session with `Unauthorized`, naming
   the path. The check runs against the grants in hand once the tokens the
@@ -72,7 +73,9 @@ Decisions settled while planning, recorded so review does not relitigate them:
   must explicitly grant `**` for unrestricted access; AUTH does not widen a
   scoped grant because the caller is another relay.
 - **Client API.** Tokens live on `moq_tokio::connect::Config`, the
-  dial-side config, and `Connection` exposes the live session's auth handle.
+  dial-side config. `Connection::auth()` is a handle the connection owns: it
+  keeps every added token, presents them on each session as it reconnects,
+  and reports the live session's grant.
 - **Spec home.** The AUTH stream is lite-06 core in
   `drafts/draft-lcurley-moq-lite.md`, the way routing is. moq-transport gets
   `drafts/draft-lcurley-moq-auth.md`, a setup-option-negotiated extension with
@@ -103,11 +106,10 @@ existing lite-06 ALPN.
 - [Token in band](/quest/m1/auth/token-in-band.md) - the credential can leave
   the URL: a session starts on what the URL carried and its AUTH streams add
   the rest, with the URL kept for peers below lite-06
-- [Peer grants](/quest/m1/auth/peer-grant.md) - the relay issues a hop-bound,
-  asymmetrically signed grant a browser can verify; HS256 keys issue none
 
 ## Related
 
 - [Expiring media grants](/quest/m2/processor/grant-lease.md) - a worker's
   lease renewal is a new in-band token
-- [P2P](/quest/m2/p2p/README.md) - the first consumer of hop-bound peer grants
+- [Peer grants](/quest/m2/p2p/peer-grant.md) - P2P's hop-bound credential,
+  built on this line's relay tokens
