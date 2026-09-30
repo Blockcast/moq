@@ -136,15 +136,22 @@ async fn granted(session: &Session) -> Grant {
 async fn wait_announced(origin: &origin::Consumer, path: &str, active: bool) {
 	let mut announced = origin.announced();
 	let mut live = std::collections::HashSet::new();
-	loop {
-		if live.contains(path) == active {
-			return;
-		}
-		let update = announced.next().await.expect("origin closed");
+	let apply = |live: &mut std::collections::HashSet<String>, update: moq_net::announce::Update| {
 		match update.kind.is_active() {
 			true => live.insert(update.prefix.to_string()),
 			false => live.remove(update.prefix.as_str()),
 		};
+	};
+	// Take in the replay first, so a retraction is judged against what is announced now
+	// rather than against an empty start.
+	while let Some(update) = futures::FutureExt::now_or_never(announced.next()).flatten() {
+		apply(&mut live, update);
+	}
+	loop {
+		if live.contains(path) == active {
+			return;
+		}
+		apply(&mut live, announced.next().await.expect("origin closed"));
 	}
 }
 
@@ -163,6 +170,7 @@ struct Pair {
 	client: Session,
 	server: Session,
 	client_transport: MockSession,
+	server_transport: MockSession,
 	requests: Option<auth::Requests>,
 }
 
@@ -187,6 +195,7 @@ async fn connect(opts: Options) -> Pair {
 	}
 
 	let observe = client_transport.clone();
+	let observe_server = server_transport.clone();
 	let client_fut = async {
 		let (session, driver) = client.connect(now(), client_transport).await.expect("client handshake");
 		tokio::spawn(run(driver));
@@ -211,6 +220,7 @@ async fn connect(opts: Options) -> Pair {
 		client,
 		server,
 		client_transport: observe,
+		server_transport: observe_server,
 		requests,
 	}
 }
@@ -965,6 +975,344 @@ async fn nothing_outside_the_grant_reaches_the_peer(version: &'static str) {
 			pair.server.closed().await,
 			Error::Session(SessionError::Unauthorized)
 		));
+	})
+	.await
+	.expect("timed out");
+}
+
+/// Run each limit case on every version family: the session enforces its limit itself,
+/// so a peer without AUTH (or one that ignores it) cannot keep what it lost.
+macro_rules! limit_cases {
+	($($case:ident),* $(,)?) => {
+		mod limit_lite_05 {
+			$(#[tokio::test] async fn $case() { super::$case("moq-lite-05").await })*
+		}
+		mod limit_lite_06 {
+			$(#[tokio::test] async fn $case() { super::$case(super::LITE_06).await })*
+		}
+		mod limit_moqt_16 {
+			$(#[tokio::test] async fn $case() { super::$case("moq-transport-16").await })*
+		}
+		mod limit_moqt_17 {
+			$(#[tokio::test] async fn $case() { super::$case(super::MOQT_17).await })*
+		}
+	};
+}
+
+limit_cases!(
+	a_narrowing_deafens_one_path,
+	a_narrowing_aborts_what_the_peer_published,
+	a_widening_brings_back_a_deafened_path,
+	a_widening_brings_back_what_the_peer_published,
+);
+
+#[tokio::test]
+async fn lite_05_narrowing_resets_a_fetch_in_flight() {
+	a_narrowing_resets_a_fetch_in_flight("moq-lite-05").await
+}
+
+#[tokio::test]
+async fn lite_06_narrowing_resets_a_fetch_in_flight() {
+	a_narrowing_resets_a_fetch_in_flight(LITE_06).await
+}
+
+/// Whether `version` exchanges AUTH, so the peer also hears of a narrowing.
+fn speaks_auth(version: &str) -> bool {
+	matches!(version, LITE_06 | MOQT_17 | MOQT_22)
+}
+
+/// A revocation as the reader sees it: the local gate's own error, or the peer's
+/// UNAUTHORIZED reset relayed across the splice.
+fn unauthorized(err: &Error) -> bool {
+	matches!(err, Error::Unauthorized | Error::Stream(StreamError::Unauthorized))
+}
+
+/// Read groups until the subscription ends, returning how it ended.
+async fn ended(sub: &mut moq_net::track::Subscriber) -> Error {
+	loop {
+		match sub.recv_group().await {
+			Ok(Some(_)) => continue,
+			Ok(None) => panic!("subscription finished instead of ending"),
+			Err(err) => return err,
+		}
+	}
+}
+
+/// The deafen case: narrowing a live session away from one audio path resets that
+/// subscription and retracts its announcement, while a sibling under the same prefix
+/// keeps flowing and the session stays up.
+async fn a_narrowing_deafens_one_path(version: &'static str) {
+	within(async {
+		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
+		let prefs = || moq_net::track::Subscription::default().with_max_age(Duration::from_secs(10));
+
+		let relay = produce_origin(1);
+		let audio = relay.create_broadcast("room/alice/audio").unwrap();
+		let audio_track = audio.create_track("opus", None).unwrap();
+		audio.announce(Default::default()).unwrap();
+		let video = relay.create_broadcast("room/alice/video").unwrap();
+		let video_track = video.create_track("h264", None).unwrap();
+		video.announce(Default::default()).unwrap();
+
+		let received = produce_origin(3);
+		let pair = connect(Options {
+			version: Some(version),
+			client_subscribe: Some(received.clone()),
+			server_publish: Some(relay.scope("", &patterns(&["room"])).unwrap()),
+			..Default::default()
+		})
+		.await;
+
+		let mut group = audio_track.append_group().unwrap();
+		group.write_frame(ts(0), b"a".as_ref()).unwrap();
+		let mut group = video_track.append_group().unwrap();
+		group.write_frame(ts(0), b"v".as_ref()).unwrap();
+
+		let remote = received.consume().routed_broadcast("room/alice/audio").await.unwrap();
+		let mut audio_sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();
+		audio_sub.recv_group().await.unwrap().unwrap();
+		let remote = received.consume().routed_broadcast("room/alice/video").await.unwrap();
+		let mut video_sub = remote.track("h264").unwrap().subscribe(prefs()).await.unwrap();
+		video_sub.recv_group().await.unwrap().unwrap();
+
+		pair.server.auth().authorize(&grant(&[], &["room/alice/video"]));
+
+		let err = ended(&mut audio_sub).await;
+		assert!(unauthorized(&err), "{err:?}");
+		wait_announced(&received.consume(), "room/alice/audio", false).await;
+
+		// The sibling keeps flowing.
+		let mut group = video_track.append_group().unwrap();
+		group.write_frame(ts(1), b"v".as_ref()).unwrap();
+		let group = video_sub.recv_group().await.unwrap().expect("video still flows");
+		assert_eq!(group.sequence, 1);
+
+		// The relay enforced it, not the client: moq-lite resets the subscription with
+		// UNAUTHORIZED, and neither side closed the session.
+		if version.starts_with("moq-lite") {
+			let resets = pair.server_transport.resets();
+			assert!(resets.contains(&StreamError::Unauthorized.to_code()), "{resets:x?}");
+		}
+		assert_eq!(pair.client_transport.close_reason(), None);
+
+		// A peer that speaks AUTH is told what it may still subscribe to.
+		if speaks_auth(version) {
+			let narrowed = wait_for(pair.client.auth().grant(), |grant| {
+				grant
+					.as_ref()
+					.is_some_and(|grant| grant.subscribe == patterns(&["room/alice/video"]))
+			})
+			.await;
+			assert_eq!(narrowed, Some(grant(&[], &["room/alice/video"])));
+		}
+	})
+	.await
+	.expect("timed out");
+}
+
+/// Narrowing what the peer may publish aborts the broadcasts it published outside,
+/// so the relay's own readers see `Unauthorized`, and retracts their routes, while
+/// what it may still publish keeps flowing.
+async fn a_narrowing_aborts_what_the_peer_published(version: &'static str) {
+	within(async {
+		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
+		let prefs = || moq_net::track::Subscription::default().with_max_age(Duration::from_secs(10));
+
+		let client_origin = produce_origin(2);
+		let mic = client_origin.create_broadcast("room/bob/mic").unwrap();
+		let mic_track = mic.create_track("opus", None).unwrap();
+		mic.announce(Default::default()).unwrap();
+		let cam = client_origin.create_broadcast("room/bob/cam").unwrap();
+		let cam_track = cam.create_track("h264", None).unwrap();
+		cam.announce(Default::default()).unwrap();
+
+		let relay = produce_origin(1);
+		let pair = connect(Options {
+			version: Some(version),
+			client_publish: Some(client_origin.clone()),
+			server_subscribe: Some(relay.clone()),
+			..Default::default()
+		})
+		.await;
+
+		let mut group = mic_track.append_group().unwrap();
+		group.write_frame(ts(0), b"m".as_ref()).unwrap();
+		let mut group = cam_track.append_group().unwrap();
+		group.write_frame(ts(0), b"c".as_ref()).unwrap();
+
+		let remote = relay.consume().routed_broadcast("room/bob/mic").await.unwrap();
+		let mut mic_sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();
+		mic_sub.recv_group().await.unwrap().unwrap();
+		let remote = relay.consume().routed_broadcast("room/bob/cam").await.unwrap();
+		let mut cam_sub = remote.track("h264").unwrap().subscribe(prefs()).await.unwrap();
+		cam_sub.recv_group().await.unwrap().unwrap();
+
+		pair.server.auth().authorize(&grant(&["room/bob/cam"], &[]));
+
+		let err = ended(&mut mic_sub).await;
+		assert!(unauthorized(&err), "{err:?}");
+		wait_announced(&relay.consume(), "room/bob/mic", false).await;
+
+		let mut group = cam_track.append_group().unwrap();
+		group.write_frame(ts(1), b"c".as_ref()).unwrap();
+		let group = cam_sub.recv_group().await.unwrap().expect("cam still flows");
+		assert_eq!(group.sequence, 1);
+
+		// A narrowing is not a publication outside the grant: the client stays up.
+		assert_eq!(pair.client_transport.close_reason(), None);
+	})
+	.await
+	.expect("timed out");
+}
+
+/// A fetch still streaming its group when the grant narrows away from it is reset with
+/// UNAUTHORIZED by the publisher, not left to finish.
+async fn a_narrowing_resets_a_fetch_in_flight(version: &'static str) {
+	within(async {
+		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
+
+		let relay = produce_origin(1);
+		let broadcast = relay.create_broadcast("room/x").unwrap();
+		let track = broadcast.create_track("video", None).unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		// The group stays open, so the fetch is still in flight when the grant narrows.
+		let mut group = track.append_group().unwrap();
+		group.write_frame(ts(0), b"first".as_ref()).unwrap();
+
+		let received = produce_origin(3);
+		let pair = connect(Options {
+			version: Some(version),
+			client_subscribe: Some(received.clone()),
+			server_publish: Some(relay.clone()),
+			..Default::default()
+		})
+		.await;
+
+		let remote = received.consume().routed_broadcast("room/x").await.unwrap();
+		let mut fetched = remote.track("video").unwrap().fetch_group(0, None).await.unwrap();
+		let frame = fetched.read_frame().await.unwrap().expect("first frame");
+		assert_eq!(frame.payload.as_ref(), b"first");
+
+		pair.server.auth().authorize(&grant(&[], &["room/y"]));
+
+		let err = loop {
+			match fetched.read_frame().await {
+				Ok(Some(_)) => continue,
+				Ok(None) => panic!("fetch finished instead of ending"),
+				Err(err) => break err,
+			}
+		};
+		assert!(unauthorized(&err), "{err:?}");
+		let resets = pair.server_transport.resets();
+		assert!(resets.contains(&StreamError::Unauthorized.to_code()), "{resets:x?}");
+		drop(group);
+	})
+	.await
+	.expect("timed out");
+}
+
+/// Read groups until one at `sequence` or later arrives.
+async fn recv_through(sub: &mut moq_net::track::Subscriber, sequence: u64) {
+	loop {
+		let group = sub.recv_group().await.unwrap().expect("track ended");
+		if group.sequence >= sequence {
+			return;
+		}
+	}
+}
+
+/// Widening the limit after a narrowing brings the deafened path back: it is announced
+/// again and a new subscription to it flows.
+async fn a_widening_brings_back_a_deafened_path(version: &'static str) {
+	within(async {
+		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
+		let prefs = || moq_net::track::Subscription::default().with_max_age(Duration::from_secs(10));
+
+		let relay = produce_origin(1);
+		let audio = relay.create_broadcast("room/alice/audio").unwrap();
+		let audio_track = audio.create_track("opus", None).unwrap();
+		audio.announce(Default::default()).unwrap();
+
+		let received = produce_origin(3);
+		let pair = connect(Options {
+			version: Some(version),
+			client_subscribe: Some(received.clone()),
+			server_publish: Some(relay.scope("", &patterns(&["room"])).unwrap()),
+			..Default::default()
+		})
+		.await;
+
+		let mut group = audio_track.append_group().unwrap();
+		group.write_frame(ts(0), b"a".as_ref()).unwrap();
+		let remote = received.consume().routed_broadcast("room/alice/audio").await.unwrap();
+		let mut sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();
+		sub.recv_group().await.unwrap().unwrap();
+
+		pair.server.auth().authorize(&grant(&[], &["room/alice/video"]));
+		let err = ended(&mut sub).await;
+		assert!(unauthorized(&err), "{err:?}");
+		wait_announced(&received.consume(), "room/alice/audio", false).await;
+		drop((sub, remote));
+
+		pair.server.auth().authorize(&grant(&[], &["room"]));
+		wait_announced(&received.consume(), "room/alice/audio", true).await;
+		let remote = received.consume().routed_broadcast("room/alice/audio").await.unwrap();
+		let mut sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();
+		let mut group = audio_track.append_group().unwrap();
+		group.write_frame(ts(1), b"a".as_ref()).unwrap();
+		recv_through(&mut sub, 1).await;
+
+		// A peer that speaks AUTH is told it may subscribe again.
+		if speaks_auth(version) {
+			let widened = wait_for(pair.client.auth().grant(), |grant| {
+				grant
+					.as_ref()
+					.is_some_and(|grant| grant.subscribe == patterns(&["room"]))
+			})
+			.await;
+			assert_eq!(widened, Some(grant(&[], &["room"])));
+		}
+		assert_eq!(pair.client_transport.close_reason(), None);
+	})
+	.await
+	.expect("timed out");
+}
+
+/// Widening the limit after a narrowing brings back what the peer published: its route
+/// is in the origin again and the relay's own readers can subscribe to it.
+async fn a_widening_brings_back_what_the_peer_published(version: &'static str) {
+	within(async {
+		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
+		let prefs = || moq_net::track::Subscription::default().with_max_age(Duration::from_secs(10));
+
+		let client_origin = produce_origin(2);
+		let mic = client_origin.create_broadcast("room/bob/mic").unwrap();
+		let mic_track = mic.create_track("opus", None).unwrap();
+		mic.announce(Default::default()).unwrap();
+
+		let relay = produce_origin(1);
+		let pair = connect(Options {
+			version: Some(version),
+			client_publish: Some(client_origin.clone()),
+			server_subscribe: Some(relay.clone()),
+			..Default::default()
+		})
+		.await;
+		wait_announced(&relay.consume(), "room/bob/mic", true).await;
+
+		pair.server.auth().authorize(&grant(&["room/bob/cam"], &[]));
+		wait_announced(&relay.consume(), "room/bob/mic", false).await;
+
+		pair.server.auth().authorize(&grant(&["room"], &[]));
+		wait_announced(&relay.consume(), "room/bob/mic", true).await;
+		let remote = relay.consume().routed_broadcast("room/bob/mic").await.unwrap();
+		let mut sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();
+		let mut group = mic_track.append_group().unwrap();
+		group.write_frame(ts(0), b"m".as_ref()).unwrap();
+		recv_through(&mut sub, 0).await;
+
+		// Neither the narrowing nor the widening is a publication outside the grant.
+		assert_eq!(pair.client_transport.close_reason(), None);
 	})
 	.await
 	.expect("timed out");

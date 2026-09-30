@@ -115,6 +115,29 @@ shrinks withdraws the announcements and cancels the subscriptions it no longer
 covers, and leaves the session up. On moq-lite each cancelled stream resets with
 `StreamError::Unauthorized`.
 
+`session.auth().authorize(&grant)` authorizes the peer for `grant` on a live
+session; calling it again re-authorizes, narrower or wider. It works on every
+version, whether or not the peer speaks AUTH: the session enforces it itself, and
+never past its origin handles. A narrower grant ends what falls outside at once: announcements to the peer
+retract, its new requests are refused, its subscriptions and fetches reset with
+`Unauthorized`, and the broadcasts it published abort, so local readers see
+`Unauthorized` too. A wider one brings back what the old grant held back:
+announcements are made again, the peer's own announcements return to the origin,
+and new requests are accepted. The rest of the session carries on. When the
+session answers the peer's connection credential itself, the peer is sent the
+grant.
+
+```rust
+// Deafen alice's audio: the peer may still subscribe to her video.
+let video: Pattern = "room/alice/video/**".parse()?;
+session.auth().authorize(&auth::Grant {
+    subscribe: video.into(),
+    ..auth::Grant::all()
+});
+// Undeafen.
+session.auth().authorize(&auth::Grant::all());
+```
+
 ## Patterns
 
 `Pattern` describes a set of paths; `Patterns` is a union reduced by

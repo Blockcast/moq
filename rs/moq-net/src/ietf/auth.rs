@@ -395,6 +395,7 @@ impl Serve {
 		version: Version,
 	) {
 		let issue = Issue::shared();
+		let mut default = None;
 		match self.handle.acceptor() {
 			Some(requests) => {
 				// A closed queue hands the request back, and dropping it refuses the token.
@@ -412,10 +413,11 @@ impl Serve {
 				}
 				return;
 			}
-			None => issue.lock().outbox.push_back(Reply::Grant(self.peer_grant)),
+			// Re-sent whenever a new limit changes it.
+			None => default = Some(crate::auth::DefaultGrant::new(self.handle.clone(), self.peer_grant)),
 		}
 
-		let err = match serve_issue(&self.runtime, &issue, &mut stream, version).await {
+		let err = match serve_issue(&self.runtime, &issue, default.as_mut(), &mut stream, version).await {
 			Ok(()) => Error::Cancel,
 			Err(err) => {
 				match &err {
@@ -431,10 +433,12 @@ impl Serve {
 	}
 }
 
-/// Write the acceptor's replies until either side ends the token.
+/// Write the acceptor's replies until either side ends the token. `default` feeds
+/// the default acceptor's grant into the outbox as it changes.
 async fn serve_issue<S: crate::transport::poll::Session>(
 	runtime: &crate::time::Clock,
 	issue: &kio::Shared<Issue>,
+	mut default: Option<&mut crate::auth::DefaultGrant>,
 	stream: &mut Stream<S, Version>,
 	version: Version,
 ) -> Result<(), Error> {
@@ -448,6 +452,11 @@ async fn serve_issue<S: crate::transport::poll::Session>(
 			let mut cx = std::task::Context::from_waker(waiter.waker());
 			if let Poll::Ready(res) = stream.reader.poll_closed(&mut cx) {
 				return Poll::Ready(Next::Withdrawn(res));
+			}
+			if let Some(default) = default.as_deref_mut()
+				&& let Poll::Ready(grant) = default.poll(waiter)
+			{
+				issue.lock().outbox.push_back(Reply::Grant(grant));
 			}
 			match issue.poll(waiter, |issue| match issue.outbox.is_empty() && !issue.done {
 				true => Poll::Pending,

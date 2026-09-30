@@ -30,8 +30,4 @@ are closed, so every way an AUTH stream ends reports what actually happened:
   it.
 - One regression test per item, each failing without its fix.
 
-The fifth deferred item, a grant recheck after async origin resolution,
-belongs to [Origin narrowing](/quest/m1/auth/narrowing.md) with the other
-watcher races.
-
 Public API: none. Wire: none.
