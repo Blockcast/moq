@@ -52,6 +52,9 @@ let video = try broadcast.encodeVideo(
 )
 try video.write(VideoFrame(timestampUs: pts, data: rgba))
 try broadcast.announce()
+try audio.finish()
+try video.finish()
+try broadcast.close()
 
 try await session.shutdown()
 ```
