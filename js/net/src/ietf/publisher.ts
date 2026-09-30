@@ -4,7 +4,7 @@ import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
 import { controlTimeout, error, reason, StreamCode, StreamError } from "../error.ts";
 import type * as group from "../group.ts";
-import { type Route, routesEqual } from "../hop.ts";
+import type { Route } from "../hop.ts";
 import { hiddenBelow, hooks, presented } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -50,8 +50,17 @@ function clusterFor(base: Cluster.Advert | undefined, route: Route): Cluster.Adv
 	return { hops, cost: route.cost.warm };
 }
 
-function sameAdvert(a: Advertised | undefined, b: Advertised | undefined): boolean {
-	return a !== undefined && b !== undefined && a.identity === b.identity && routesEqual(a.route, b.route);
+/**
+ * Whether the peer would decode the same advertisement: the same broadcast and, with MoQ
+ * Cluster, the same hop chain and warm cost. The cold cost, and the whole route without
+ * Cluster, never reach the wire, so a change there must not restart the namespace.
+ */
+function sameAdvert(base: Cluster.Advert | undefined, a: Advertised | undefined, b: Advertised | undefined): boolean {
+	if (a === undefined || b === undefined || a.identity !== b.identity) return false;
+	const x = clusterFor(base, a.route);
+	const y = clusterFor(base, b.route);
+	if (x === undefined || y === undefined) return x === y;
+	return x.cost === y.cost && x.hops.length === y.hops.length && x.hops.every((hop, i) => hop === y.hops[i]);
 }
 
 /**
@@ -158,6 +167,7 @@ export class Publisher {
 	#quic: WebTransport;
 	#session: Session;
 	#requiresSolicitation: boolean;
+	#hidden: boolean;
 
 	// The origin this session serves, borrowed: it outlives the session, and closing the
 	// session leaves its broadcasts alone. The namespaces are advertised with an unsolicited
@@ -190,6 +200,7 @@ export class Publisher {
 		session,
 		publish,
 		requiresSolicitation,
+		hidden = false,
 		cluster,
 		grant = new Signal<Grant | undefined>(undefined),
 		ready = Promise.resolve(),
@@ -202,6 +213,8 @@ export class Publisher {
 		publish?: OriginConsumer;
 		/** Whether the peer's SETUP asked to be told on request (MoQ Solicit). */
 		requiresSolicitation: boolean;
+		/** Whether the peer declared MoQ Hidden. */
+		hidden?: boolean;
 		/** The Hop IDs the SETUP exchange settled (MoQ Cluster). */
 		cluster?: Cluster.Hops;
 		/** The union of our tokens' grants (MoQ Auth), which bounds what we publish. */
@@ -217,6 +230,7 @@ export class Publisher {
 		this.#advertised = origin?.advertised ?? new Signal(new Map());
 		this.#publish = publish;
 		this.#requiresSolicitation = requiresSolicitation;
+		this.#hidden = hidden;
 		this.#advert = Cluster.advertise(cluster);
 	}
 
@@ -812,8 +826,8 @@ export class Publisher {
 			// peer asked to be told only on request, it has already heard everything visible
 			// from the empty prefix unasked, so this stream carries only what that hid.
 			const carries = (covered: Path.Valid) =>
-				(msg.hidden || !hiddenBelow(prefix, covered)) &&
-				(this.#requiresSolicitation || hiddenBelow(Path.empty(), covered)) &&
+				(!this.#hidden || msg.hidden || !hiddenBelow(prefix, covered)) &&
+				(this.#requiresSolicitation || (this.#hidden && hiddenBelow(Path.empty(), covered))) &&
 				!this.#denied(covered);
 
 			// Nothing is advertised before the grant it would be checked against.
@@ -895,12 +909,12 @@ export class Publisher {
 				// (a restart). Identity change is a new broadcast; a route change is the
 				// same one at a new cost or hop chain.
 				for (const [removed, snap] of active) {
-					if (sameAdvert(updated.get(removed), snap)) continue;
+					if (sameAdvert(this.#advert, updated.get(removed), snap)) continue;
 					await withdraw(removed);
 					held.delete(removed);
 				}
 				for (const [added, snap] of updated) {
-					if (sameAdvert(held.get(added), snap)) continue;
+					if (sameAdvert(this.#advert, held.get(added), snap)) continue;
 					if (!this.#offerable(Path.join(prefix, added), refused)) continue;
 					offered.set(Path.join(prefix, added), snap.identity);
 					if (await advertise(added, snap)) held.set(added, snap);
@@ -913,7 +927,8 @@ export class Publisher {
 				// starting to answer raises a signal this loop is watching.
 				const outstanding = [...updated].some(
 					([suffix, snap]) =>
-						!sameAdvert(active.get(suffix), snap) && this.#pending(Path.join(prefix, suffix), refused),
+						!sameAdvert(this.#advert, active.get(suffix), snap) &&
+						this.#pending(Path.join(prefix, suffix), refused),
 				);
 				retry = outstanding ? Math.min(retry ? retry * 2 : RETRY_BASE, RETRY_MAX) : 0;
 
@@ -1009,9 +1024,13 @@ export class Publisher {
 
 				const updated = new Map<Path.Valid, Advertised>();
 				for (const [covered, candidates] of advertised) {
-					// Unasked, a hidden namespace stays off the wire (MoQ Hidden), and nothing
-					// our grant does not cover reaches it at all (MoQ Auth).
-					if (hiddenBelow(Path.empty(), covered) || this.#denied(covered) || candidates.length === 0)
+					// Only peers that declared MoQ Hidden filter unsolicited discovery, and
+					// nothing our grant does not cover reaches the peer at all (MoQ Auth).
+					if (
+						(this.#hidden && hiddenBelow(Path.empty(), covered)) ||
+						this.#denied(covered) ||
+						candidates.length === 0
+					)
 						continue;
 					updated.set(covered, candidates[0]);
 				}
@@ -1030,11 +1049,11 @@ export class Publisher {
 				// Withdraw first so a republish or re-price reads as withdraw-then-advertise
 				// (a restart) rather than nothing.
 				for (const [removed, snap] of active) {
-					if (sameAdvert(updated.get(removed), snap)) continue;
+					if (sameAdvert(this.#advert, updated.get(removed), snap)) continue;
 					await this.#withdraw(removed, requests);
 				}
 				for (const [added, snap] of updated) {
-					if (sameAdvert(active.get(added), snap)) continue;
+					if (sameAdvert(this.#advert, active.get(added), snap)) continue;
 					if (!this.#offerable(added, refused)) continue;
 					offered.set(added, snap.identity);
 					await this.#advertise(added, requests, refused, clusterFor(this.#advert, snap.route));
@@ -1053,7 +1072,7 @@ export class Publisher {
 				// transient failure clearing, or the peer starting to answer raises no
 				// signal of its own, so the only way back is to ask again on a timer.
 				const outstanding = [...updated].some(
-					([path, snap]) => !sameAdvert(active.get(path), snap) && this.#pending(path, refused),
+					([path, snap]) => !sameAdvert(this.#advert, active.get(path), snap) && this.#pending(path, refused),
 				);
 				retry = outstanding ? Math.min(retry ? retry * 2 : RETRY_BASE, RETRY_MAX) : 0;
 
