@@ -174,6 +174,7 @@ export class Connection implements Established {
 			session: this.#session,
 			publish,
 			requiresSolicitation: solicit ?? false,
+			hidden,
 			cluster,
 			grant: this.#auth.grant,
 			ready: this.#auth.setupAnswered(),

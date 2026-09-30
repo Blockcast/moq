@@ -92,7 +92,7 @@ test("AUTH_OK matches the Rust encoding", async () => {
 test("a reply larger than the peer reads writes nothing", async () => {
 	const body = new Uint8Array(Message.MAX_MESSAGE_SIZE + 1);
 	const r = await roundTrip(async (w) => {
-		await expect(Message.encode(w, (w) => w.write(body), AuthOk.id)).rejects.toThrow("message too large");
+		await expect(Message.encode(w, (w) => w.write(body), { id: AuthOk.id })).rejects.toThrow("message too large");
 	});
 	expect((await r.readAll()).byteLength).toBe(0);
 });
