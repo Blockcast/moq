@@ -95,7 +95,7 @@ export class AuthOk {
 
 	async encode(w: Writer, version: Version): Promise<void> {
 		guardAuth(version);
-		return Message.encode(w, this.#encode.bind(this), AuthOk.id);
+		return Message.encode(w, this.#encode.bind(this), { id: AuthOk.id });
 	}
 
 	static async decode(r: Reader, version: Version): Promise<AuthOk> {
@@ -136,7 +136,7 @@ export class AuthError {
 
 	async encode(w: Writer, version: Version): Promise<void> {
 		guardAuth(version);
-		return Message.encode(w, this.#encode.bind(this), AuthError.id);
+		return Message.encode(w, this.#encode.bind(this), { id: AuthError.id });
 	}
 
 	static async decode(r: Reader, version: Version): Promise<AuthError> {
