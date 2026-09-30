@@ -52,5 +52,5 @@ excluded.
 
 ## Related
 
-- [Client stats](/quest/m1/qos/stats/schema.md) - the publisher's own view
-  of the same uplink, in the transport section of its stats broadcast
+- [Media stats](/quest/m1/stats/schema.md) - the publisher's own view
+  of the same uplink, in the transport section of its stats track
