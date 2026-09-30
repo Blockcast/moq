@@ -638,8 +638,8 @@ mod tests {
 		mp4a.esds.es_desc.dec_config.avg_bitrate
 	}
 
-	// A publisher's estimator republishes the catalog every time its measured bitrate or jitter
-	// moves, writing those two fields and nothing else. That must not churn the rendition:
+	// A publisher's estimator republishes the catalog every time its measured bitrate, jitter, or
+	// framerate moves, writing those fields and nothing else. That must not churn the rendition:
 	// rebuilding resets the playlist window, the cached init segment and EXT-X-MEDIA-SEQUENCE,
 	// and makes every recording cursor see a Removed followed by an Added.
 	#[tokio::test]
@@ -651,6 +651,8 @@ mod tests {
 		let upstream = empty_upstream(&origin, "live").await;
 
 		let mut catalog = catalog_with_both();
+		// Declared by nobody: the estimator measures it once media flows.
+		catalog.video.renditions.get_mut("video0").unwrap().framerate = None;
 		let renditions = renditions::Producer::new(Config::default().window);
 		let mut cursor = renditions.subscribe();
 		renditions.sync(&upstream, &catalog);
@@ -678,6 +680,7 @@ mod tests {
 		let video_config = catalog.video.renditions.get_mut("video0").unwrap();
 		video_config.bitrate = Some(1_800_000);
 		video_config.jitter = Some(Duration::from_millis(33));
+		video_config.framerate = Some(25.0);
 		catalog.audio.renditions.get_mut("audio0").unwrap().bitrate = Some(110_000);
 		renditions.sync(&upstream, &catalog);
 

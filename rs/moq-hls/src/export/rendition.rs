@@ -192,9 +192,10 @@ fn normalize_video(config: &VideoConfig) -> VideoConfig {
 	config.delay = None;
 	config.label = None;
 	config.stalled = None;
-	// The muxer ignores a non-finite framerate, and NaN never equals itself, so a catalog
-	// carrying one would otherwise look different from itself on every republish.
-	config.framerate = config.framerate.filter(|fps| fps.is_finite());
+	// The publisher's estimator fills in the framerate after its first second of media. The
+	// muxer only sizes its timescale from it, and the rendition keeps muxing at the one its
+	// init already declared, so a measured framerate is no reason to rebuild.
+	config.framerate = None;
 	config
 }
 
