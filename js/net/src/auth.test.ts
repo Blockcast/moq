@@ -10,6 +10,7 @@ import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Writer } from "./stream.ts";
 import { Timestamp } from "./time.ts";
+import { withTimeout } from "./util/timeout.ts";
 import { wireOf } from "./wire.ts";
 
 const url = new URL("https://localhost:4443/test");
@@ -172,15 +173,16 @@ describe.each([Lite.ALPN_06, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", (pro
 
 	test("an acceptor that ends a grant sees its stream close", async () => {
 		const { client, server } = await connect({ publish: new OriginProducer(), protocol });
-		const requests = server.auth.requests();
-		const request = await requests.next();
-		const issued = request?.accept(grant(["a"], []));
-		await waitFor(client.auth.grant, (g) => g !== undefined && g.publish.size > 0);
-
 		try {
-			issued?.close();
-			// A regression leaves `closed` pending, so the test runner's timeout fails it.
-			expect(await issued?.closed).toBeNull();
+			const requests = server.auth.requests();
+			const request = await requests.next();
+			if (!request) throw new Error("the setup token never arrived");
+			const issued = request.accept(grant(["a"], []));
+			await waitFor(client.auth.grant, (g) => g !== undefined && g.publish.size > 0);
+
+			issued.close();
+			// A regression leaves `closed` pending, so bound the wait rather than hang the runner.
+			expect(await withTimeout(Promise.resolve(issued.closed), 1000, "the grant stream never closed")).toBeNull();
 		} finally {
 			client.close();
 			server.close();
