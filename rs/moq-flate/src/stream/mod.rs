@@ -230,11 +230,11 @@ mod test {
 		let mut subscriber = track.subscribe(None);
 		let mut producer = Producer::new(track, cfg(true));
 
-		assert!(producer.is_used());
+		assert!(producer.demand().is_used());
 		let oversized = Bytes::from(vec![0u8; crate::DEFAULT_MAX_FRAME_SIZE as usize + 1]);
 		assert!(matches!(producer.append(oversized), Err(crate::Error::TooLarge(_))));
 
-		assert!(!producer.is_used());
+		assert!(!producer.demand().is_used());
 
 		// Nothing was published, and the track is terminal rather than merely skipping the record.
 		let waiter = kio::Waiter::noop();

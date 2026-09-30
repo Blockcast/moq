@@ -3577,6 +3577,8 @@ struct ServeLoop<S: crate::transport::poll::Session> {
 	/// through the producer's aggregate, sliced to this segment's bounds
 	/// (including the resume floor after a source change).
 	serving: track::Producer,
+	/// Watches `serving`'s subscribers, to release the copy once nobody reads it.
+	demand: track::Demand,
 	/// Serve on-demand fetches of uncached groups from this session.
 	dynamic: track::Dynamic,
 	sub: Sub<S>,
@@ -3625,6 +3627,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 		};
 		let serving = request.accept(info);
 		Self {
+			demand: serving.demand(),
 			serving,
 			dynamic,
 			sub: Sub::None,
@@ -3665,7 +3668,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 					{
 						return Poll::Ready(ServeEnd::Finished);
 					}
-					if self.fetches.is_empty() && self.serving.poll_unused(waiter).is_ready() {
+					if self.fetches.is_empty() && self.demand.poll_unused(waiter).is_ready() {
 						return Poll::Ready(ServeEnd::Idle);
 					}
 					let mut cx = std::task::Context::from_waker(waiter.waker());
@@ -3742,7 +3745,7 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 					// state (and its TRACK_INFO) for a reader that may never return.
 					// In-flight fetches keep it alive: work already accepted still
 					// gets finished.
-					if self.fetches.is_empty() && self.serving.poll_unused(waiter).is_ready() {
+					if self.fetches.is_empty() && self.demand.poll_unused(waiter).is_ready() {
 						return Poll::Ready(ServeEnd::Idle);
 					}
 

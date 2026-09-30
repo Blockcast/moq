@@ -77,13 +77,17 @@ pub struct Consumer<F: Container> {
 	max_age: std::time::Duration,
 
 	// The live edge of playback: the largest timestamp delivered so far and the group that
-	// carried it. `None` until the first frame is delivered. A later group below this is
-	// malformed.
+	// carried it. `None` until the first frame is delivered.
 	live_edge: Option<(u64, Timestamp)>,
 
-	// Max timestamp of groups the cursor has left. Open-GOP pictures may sit below this
-	// group's running max, but not below an earlier group's edge.
-	group_edge: Option<Timestamp>,
+	// The first frame delivered from the latest group, and that group. Group starts never go
+	// backwards, so a later group with a frame below this is malformed.
+	start: Option<(u64, Timestamp)>,
+
+	// The start of the group the cursor most recently left. B-frames, open-GOP pictures, and a
+	// keyframe overlapping the previous group's last frame may dip below that group's content,
+	// but a frame below its start is a rewind.
+	floor: Option<Timestamp>,
 
 	// Presentation end of the group we most recently advanced past, for the 1 ms
 	// contiguity check on a delivered hole.
@@ -133,7 +137,8 @@ impl<F: Container> Consumer<F> {
 			startup: start.is_none(),
 			max_age,
 			live_edge: None,
-			group_edge: None,
+			start: None,
+			floor: None,
 			presented_end: None,
 			discontinuity: 0,
 			end: None,
@@ -230,8 +235,11 @@ impl<F: Container> Consumer<F> {
 					Poll::Ready(Ok(Some(Event::Frame(frame)))) => {
 						let seq = group.group.sequence;
 						let ts = frame.timestamp;
-						if self.group_edge.is_some_and(|edge| ts.as_micros() < edge.as_micros()) {
+						if self.floor.is_some_and(|floor| ts.as_micros() < floor.as_micros()) {
 							return Poll::Ready(Err(TimestampRewind.into()));
+						}
+						if self.start.is_none_or(|(start, _)| start != seq) {
+							self.start = Some((seq, ts));
 						}
 						if self.live_edge.is_none_or(|(_, high)| ts.as_micros() > high.as_micros()) {
 							self.live_edge = Some((seq, ts));
@@ -431,8 +439,8 @@ impl<F: Container> Consumer<F> {
 	}
 
 	fn note_group_edge(&mut self) {
-		if let Some((_, ts)) = self.live_edge {
-			self.group_edge = Some(ts);
+		if let Some((_, ts)) = self.start {
+			self.floor = Some(ts);
 		}
 	}
 
@@ -471,10 +479,10 @@ impl<F: Container> Consumer<F> {
 		}
 	}
 
-	// A group whose media timestamps sit below the live edge earlier groups reached is
-	// malformed. Markers have no media timestamp, so they are not this check.
+	// A later group with a media timestamp below the latest delivered group's start is malformed:
+	// group starts never go backwards. Markers have no media timestamp, so they are not this check.
 	fn poll_malformed(&mut self, waiter: &kio::Waiter) -> Result<(), F::Error> {
-		let Some((prev_group, edge)) = self.live_edge else {
+		let Some((prev_group, edge)) = self.start else {
 			return Ok(());
 		};
 
@@ -1110,7 +1118,7 @@ mod tests {
 	// ---- Malformed rewind ----
 
 	#[tokio::test]
-	async fn a_group_below_the_live_edge_aborts() {
+	async fn a_group_starting_below_the_previous_start_aborts() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let mut consumer = Consumer::new(track.subscribe(None), Container::Legacy(crate::container::Kind::Data));
 		write_group(&mut track, 0, &[ts(100_000)]);
@@ -1133,6 +1141,38 @@ mod tests {
 			vec![ts(0), ts(66_000), ts(33_000)]
 		);
 		assert_eq!(consumer.discontinuity(), 0);
+	}
+
+	#[tokio::test]
+	async fn a_group_starting_at_the_previous_start_is_accepted() {
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let mut consumer = Consumer::new(track.subscribe(None), Container::Legacy(crate::container::Kind::Data));
+		write_group(&mut track, 0, &[ts(100_000)]);
+		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(100_000));
+		write_group(&mut track, 1, &[ts(100_000)]);
+		track.finish().unwrap();
+		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(100_000));
+	}
+
+	/// A keyframe one frame below the previous group's last frame, but above its start, is an
+	/// overlap rather than a rewind.
+	#[tokio::test]
+	async fn a_keyframe_overlapping_the_previous_group_is_accepted() {
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
+		let mut consumer = Consumer::new(track.subscribe(None), Container::Legacy(crate::container::Kind::Data));
+		write_group(&mut track, 0, &[ts(0), ts(33_000), ts(66_000)]);
+		// Read the first group before the second arrives: a blocked group that the next one
+		// already covers is skipped for latency, which is not what this checks.
+		for expected in [0, 33_000, 66_000] {
+			assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(expected));
+		}
+		write_group(&mut track, 1, &[ts(50_000), ts(83_000)]);
+		track.finish().unwrap();
+		let frames = read_all(&mut consumer).await.unwrap();
+		assert_eq!(
+			frames.iter().map(|f| f.timestamp.as_micros()).collect::<Vec<_>>(),
+			vec![50_000, 83_000]
+		);
 	}
 
 	#[tokio::test]
@@ -1218,7 +1258,7 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn a_later_frame_below_the_previous_group_edge_aborts() {
+	async fn a_later_frame_below_the_previous_group_start_aborts() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let mut consumer = Consumer::new(track.subscribe(None), Container::Legacy(crate::container::Kind::Data));
 		write_group(&mut track, 0, &[ts(100_000)]);

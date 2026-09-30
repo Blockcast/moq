@@ -1560,7 +1560,7 @@ impl Producer {
 	/// Abort an unused track, returning the producer unchanged if consumers remain.
 	///
 	/// Consumer creation and the unused check share a lock, so demand returning
-	/// after [`poll_unused`](Self::poll_unused) prevents the abort. `Ok(())` means
+	/// after [`Demand::poll_unused`] prevents the abort. `Ok(())` means
 	/// the track is closed, including when it was already closed; existing handles
 	/// may still observe its final state. `Err(producer)` leaves the track unchanged
 	/// so the caller can continue serving and wait for the next unused wake.
@@ -1578,26 +1578,6 @@ impl Producer {
 			kio::Unused::Used => {}
 		}
 		Err(self)
-	}
-
-	/// Whether the track is open and anyone is consuming it right now.
-	///
-	/// A point-in-time snapshot for gating work on demand (on-demand capture,
-	/// dropping cached state nobody is watching). Acting on it to *end* the track
-	/// is the race [`abort_unused`](Self::abort_unused) exists for; use
-	/// [`unused`](Self::unused) to wait for the edge.
-	pub fn is_used(&self) -> bool {
-		!self.is_closed() && self.state.is_used()
-	}
-
-	/// Block until there are no active consumers.
-	pub async fn unused(&self) -> Result<()> {
-		self.state.unused().await.map_err(|_| self.abort_reason())
-	}
-
-	/// Block until there is at least one active consumer.
-	pub async fn used(&self) -> Result<()> {
-		self.state.used().await.map_err(|_| self.abort_reason())
 	}
 
 	/// Block until the track is closed or aborted, returning the cause.
@@ -1764,11 +1744,6 @@ impl Producer {
 		drop(guard);
 		self.prev_subscription = combined.clone();
 		Poll::Ready(Ok(combined))
-	}
-
-	/// Poll for the producer becoming unused (every consumer dropped).
-	pub fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		self.state.poll_unused(waiter).map_err(|_| self.abort_reason())
 	}
 
 	/// Create a [`Dynamic`] handle that serves on-demand fetches of uncached
@@ -2232,9 +2207,12 @@ impl Demand {
 		self.state.read().info.as_ref().map_or(0, |info| info.priority)
 	}
 
-	/// Whether anyone is subscribed right now, without waiting.
+	/// Whether the track is open and anyone is subscribed right now, without waiting.
+	///
+	/// A point-in-time snapshot for gating work on demand. Acting on it to *end* the
+	/// track is the race [`Producer::abort_unused`] exists for.
 	pub fn is_used(&self) -> bool {
-		self.state.is_used()
+		!self.state.is_closed() && self.state.is_used()
 	}
 
 	/// Poll-based variant of [`Self::used`].

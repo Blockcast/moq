@@ -1349,7 +1349,7 @@ mod test {
 
 		// The producer should NOT be unused yet because there's a consumer.
 		assert!(
-			producer1.unused().now_or_never().is_none(),
+			producer1.demand().unused().now_or_never().is_none(),
 			"track producer should be used"
 		);
 
@@ -1359,13 +1359,13 @@ mod test {
 
 		drop(consumer1);
 		assert!(
-			producer1.unused().now_or_never().is_none(),
+			producer1.demand().unused().now_or_never().is_none(),
 			"track producer should be used"
 		);
 
 		drop(consumer2);
 		assert!(
-			producer1.unused().now_or_never().is_some(),
+			producer1.demand().unused().now_or_never().is_some(),
 			"track producer should be unused after all consumers are dropped"
 		);
 
@@ -1386,7 +1386,7 @@ mod test {
 		let consumer4 = c4_fut.await.unwrap();
 		drop(consumer4);
 		assert!(
-			producer2.unused().now_or_never().is_some(),
+			producer2.demand().unused().now_or_never().is_some(),
 			"new track producer should be unused after its consumer is dropped"
 		);
 	}
@@ -1635,7 +1635,7 @@ mod test {
 		let track = producer.create_track("video", None).unwrap();
 
 		// The unused wake a teardown acts on.
-		assert!(track.poll_unused(&kio::Waiter::noop()).is_ready());
+		assert!(track.demand().poll_unused(&kio::Waiter::noop()).is_ready());
 
 		// Demand returns in the gap before it commits.
 		let viewer = consumer.track("video").unwrap();
@@ -1666,9 +1666,9 @@ mod test {
 		let consumer = producer.consume();
 		let track = producer.create_track("video", None).unwrap();
 		let _viewer = consumer.track("video").unwrap();
-		assert!(track.is_used());
+		assert!(track.demand().is_used());
 		track.clone().abort(Error::Cancel).unwrap();
-		assert!(!track.is_used());
+		assert!(!track.demand().is_used());
 		assert!(track.abort_unused(Error::Cancel).is_ok());
 		producer.close();
 	}
