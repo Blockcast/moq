@@ -746,6 +746,12 @@ export class Publisher {
 
 		// Draft-14/15: the open PUBLISH_NAMESPACE request per advertised suffix.
 		const requests = new Map<Path.Valid, { path: Path.Valid; requestId: bigint; stream: Stream }>();
+		// Drains the requests map, so calling it twice is safe and the second is a no-op.
+		const withdrawAll = async () => {
+			for (const path of [...requests.keys()]) {
+				await this.#withdraw(path, requests);
+			}
+		};
 
 		try {
 			// Send OK response
@@ -873,6 +879,9 @@ export class Publisher {
 				if (!next || next === true) break;
 			}
 
+			// Withdraw before the ask stream FINs, as Rust does: a peer that reads that
+			// FIN as the subscription ending can drop the DONEs still in flight.
+			await withdrawAll();
 			stream.close();
 			await stream.writer.closed;
 		} catch (err: unknown) {
@@ -882,9 +891,7 @@ export class Publisher {
 			if (this.#withdrawal.closing.peek()) throw e;
 		} finally {
 			// This subscription's advertisements die with it.
-			for (const path of [...requests.keys()]) {
-				await this.#withdraw(path, requests);
-			}
+			await withdrawAll();
 		}
 	}
 

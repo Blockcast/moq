@@ -179,7 +179,7 @@ async fn close_withdraws_announcements_before_closing_the_transport() {
 
 #[tokio::test(start_paused = true)]
 async fn close_times_out_waiting_for_announcement_acknowledgements() {
-	for version in ["moq-lite-07-wip", "moq-transport-17", "moq-transport-22"] {
+	for version in ["moq-lite-01", "moq-lite-07-wip", "moq-transport-17", "moq-transport-22"] {
 		let publisher = produce_origin(1);
 		let broadcast = publisher.create_broadcast("bcast").unwrap();
 		broadcast.announce(Default::default()).unwrap();

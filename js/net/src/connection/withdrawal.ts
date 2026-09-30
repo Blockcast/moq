@@ -13,6 +13,11 @@ export class Withdrawal {
 
 	async close(): Promise<void> {
 		if (!this.closing.peek()) this.closing.set(true);
-		await Promise.all(this.#tasks);
+		// Settle every loop, not just the first to fail: one rejected withdrawal must not
+		// strand its siblings mid-write, which is the same lost-DONE this class prevents.
+		// The first failure still rejects, so the caller learns the drain was incomplete.
+		const settled = await Promise.allSettled(this.#tasks);
+		const failed = settled.find((result) => result.status === "rejected");
+		if (failed?.status === "rejected") throw failed.reason;
 	}
 }
