@@ -469,6 +469,12 @@ where
 					Poll::Pending
 				})
 				.await;
+				// Before this arm's Auth serve tasks drop, so each settles with the
+				// session's error rather than a bare cancel.
+				auth.close(match &res {
+					Ok(()) => Error::Cancel,
+					Err(err) => err.clone(),
+				});
 				if let Err(err) = &res {
 					// Every track this session was receiving ends with its error.
 					subscriber.abort(err);
@@ -850,74 +856,98 @@ where
 	let declared = subscriber.solicit().await;
 
 	let mut tasks = TaskSet::owned();
-	let mut accept = session.clone();
-	loop {
-		let mut stream = tasks
-			.drive(|waiter| {
-				let mut cx = std::task::Context::from_waker(waiter.waker());
-				Stream::poll_accept(&mut accept, version, &mut cx)
-			})
-			.await?;
+	// Each AUTH serve task settles `Issued::closed` from whatever the auth handle
+	// holds when it drops, and the first reason wins. So the error that ends the
+	// session has to reach the handle while `tasks` is still alive, or every grant
+	// reports a bare cancel instead. `None` when the peer never negotiated AUTH,
+	// which leaves no serve task to settle.
+	let handle = serve.as_ref().map(|serve| serve.handle.clone());
 
-		// The intermediate results live outside the poll closure, so a Pending
-		// mid-header resumes where it left off.
-		let mut hdr_id: Option<u64> = None;
-		let mut hdr_size: Option<u16> = None;
-		let header = tasks
-			.drive(|waiter| {
-				let mut cx = std::task::Context::from_waker(waiter.waker());
-				let id = match hdr_id {
-					Some(id) => id,
-					None => *hdr_id.insert(std::task::ready!(stream.reader.poll_decode(&mut cx))?),
-				};
-				let size = match hdr_size {
-					Some(size) => size,
-					None => *hdr_size.insert(std::task::ready!(stream.reader.poll_decode(&mut cx))?),
-				};
-				let data = std::task::ready!(stream.reader.poll_read_exact(&mut cx, size as usize))?;
-				std::task::Poll::Ready(Ok::<_, Error>((id, data)))
-			})
-			.await;
-		// Same tolerance as `run_unis`: a request stream that dies before its header
-		// is the peer abandoning that request, not the session. Anything else, a
-		// header that does not parse included, still fails the session.
-		let (id, data) = match header {
-			Ok(header) => header,
-			Err(err @ (Error::Cancel | Error::Stream(_) | Error::Remote(_) | Error::Decode(DecodeError::Short))) => {
-				tracing::debug!(%err, "dropping bidi stream that died before its header");
-				continue;
-			}
-			Err(err) => return Err(err),
-		};
+	// Scoped so `tasks` outlives the close below: the loop borrows it, so it only
+	// drops once this block's future is done.
+	let res: Result<(), Error> = async {
+		let mut accept = session.clone();
+		loop {
+			let mut stream = tasks
+				.drive(|waiter| {
+					let mut cx = std::task::Context::from_waker(waiter.waker());
+					Stream::poll_accept(&mut accept, version, &mut cx)
+				})
+				.await?;
 
-		match id {
-			// Publisher handles: Subscribe, Fetch, SubscribeNamespace (0x50 modern /
-			// 0x11 legacy), TrackStatus
-			ietf::Subscribe::ID
-			| ietf::Fetch::ID
-			| ietf::SubscribeNamespace::ID
-			| ietf::SubscribeNamespaceLegacy::ID
-			| ietf::TrackStatus::ID => {
-				tasks.push(publisher.handle_stream(id, data, stream)?);
-			}
-			// Subscriber handles: Publish, PublishNamespace
-			ietf::Publish::ID | ietf::PublishNamespace::ID => {
-				tasks.push(subscriber.handle_stream(id, data, stream, peer, declared)?);
-			}
-			auth::Auth::ID if let Some(serve) = &serve => {
-				let mut data = data;
-				let msg = auth::Auth::decode_msg(&mut data, version)?;
-				if !data.is_empty() {
-					return Err(Error::WrongSize);
+			// The intermediate results live outside the poll closure, so a Pending
+			// mid-header resumes where it left off.
+			let mut hdr_id: Option<u64> = None;
+			let mut hdr_size: Option<u16> = None;
+			let header = tasks
+				.drive(|waiter| {
+					let mut cx = std::task::Context::from_waker(waiter.waker());
+					let id = match hdr_id {
+						Some(id) => id,
+						None => *hdr_id.insert(std::task::ready!(stream.reader.poll_decode(&mut cx))?),
+					};
+					let size = match hdr_size {
+						Some(size) => size,
+						None => *hdr_size.insert(std::task::ready!(stream.reader.poll_decode(&mut cx))?),
+					};
+					let data = std::task::ready!(stream.reader.poll_read_exact(&mut cx, size as usize))?;
+					std::task::Poll::Ready(Ok::<_, Error>((id, data)))
+				})
+				.await;
+			// Same tolerance as `run_unis`: a request stream that dies before its header
+			// is the peer abandoning that request, not the session. Anything else, a
+			// header that does not parse included, still fails the session.
+			let (id, data) = match header {
+				Ok(header) => header,
+				Err(
+					err @ (Error::Cancel | Error::Stream(_) | Error::Remote(_) | Error::Decode(DecodeError::Short)),
+				) => {
+					tracing::debug!(%err, "dropping bidi stream that died before its header");
+					continue;
 				}
-				tasks.push(serve.clone().run(stream, msg, version));
-			}
-			_ => {
-				tracing::warn!(id, "unexpected bidi stream type");
-				return Err(Error::UnexpectedStream);
+				Err(err) => return Err(err),
+			};
+
+			match id {
+				// Publisher handles: Subscribe, Fetch, SubscribeNamespace (0x50 modern /
+				// 0x11 legacy), TrackStatus
+				ietf::Subscribe::ID
+				| ietf::Fetch::ID
+				| ietf::SubscribeNamespace::ID
+				| ietf::SubscribeNamespaceLegacy::ID
+				| ietf::TrackStatus::ID => {
+					tasks.push(publisher.handle_stream(id, data, stream)?);
+				}
+				// Subscriber handles: Publish, PublishNamespace
+				ietf::Publish::ID | ietf::PublishNamespace::ID => {
+					tasks.push(subscriber.handle_stream(id, data, stream, peer, declared)?);
+				}
+				auth::Auth::ID if let Some(serve) = &serve => {
+					let mut data = data;
+					let msg = auth::Auth::decode_msg(&mut data, version)?;
+					if !data.is_empty() {
+						return Err(Error::WrongSize);
+					}
+					tasks.push(serve.clone().run(stream, msg, version));
+				}
+				_ => {
+					tracing::warn!(id, "unexpected bidi stream type");
+					return Err(Error::UnexpectedStream);
+				}
 			}
 		}
 	}
+	.await;
+
+	// Every error exit above drops the AUTH serve tasks in `tasks`, so the session's
+	// error has to land on the handle first. The driver closes it again with the same
+	// error, which then does nothing.
+	if let Some(handle) = &handle
+		&& let Err(err) = &res
+	{
+		handle.close(err.clone());
+	}
+	res
 }
 
 /// Monitor the peer's SETUP stream for a GOAWAY, surfacing it through

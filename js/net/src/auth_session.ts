@@ -324,6 +324,7 @@ export class AuthSession implements AuthApi {
 		this.#closed = true;
 		for (const token of this.#tokens) token.end(new Error("session closed"));
 		this.#tokens.clear();
+		this.#recompute();
 		if (this.#acceptor instanceof RequestQueue) this.#acceptor.close();
 	}
 
@@ -346,8 +347,9 @@ export class AuthSession implements AuthApi {
 				const reply = await wire.read(stream);
 				if (!reply) {
 					// The peer ended the grant without revoking it, or closed without ever
-					// answering.
+					// answering. Close our side too, which is what settles its Issued.closed.
 					result = token.isAnswered ? null : new Unsupported();
+					stream.close();
 					break;
 				}
 				if ("grant" in reply) {

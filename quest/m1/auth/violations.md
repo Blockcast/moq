@@ -10,7 +10,7 @@ decode, such as a bad pattern or length.
 
 ## Plan
 
-[AUTH endings](/quest/m1/auth/error-codes.md) (#4550) closes the session only
+AUTH endings (#4550) closes the session only
 on an explicit `ProtocolViolation` in Rust lite. These gaps remain:
 
 - JS reports the exact oversized code but doesn't close the session. Let the
@@ -39,7 +39,3 @@ regression test per case, and check the lite and IETF draft text agrees. Run
 `just test interop --all`.
 
 Public API: none. Wire: none beyond draft wording.
-
-## Related
-
-- [AUTH endings](/quest/m1/auth/error-codes.md) - the Rust lite case this generalizes

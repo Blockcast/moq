@@ -50,6 +50,7 @@ cases!(
 	a_refused_setup_token_grants_nothing,
 	dropping_the_requests_refuses_queued_tokens,
 	a_closed_session_holds_no_grant,
+	an_issued_grant_ends_with_its_session,
 	a_reset_auth_stream_reports_unsupported,
 	a_revoked_grant_cancels_its_subscriptions,
 	nothing_outside_the_grant_reaches_the_peer,
@@ -172,6 +173,8 @@ struct Pair {
 	client_transport: MockSession,
 	server_transport: MockSession,
 	requests: Option<auth::Requests>,
+	/// Aborting it drops the server's driver without letting it finish.
+	server_driver: tokio::task::AbortHandle,
 }
 
 async fn connect(opts: Options) -> Pair {
@@ -211,10 +214,10 @@ async fn connect(opts: Options) -> Pair {
 			.server_requests
 			.then(|| handshake.auth().requests().expect("requests available before ok()"));
 		let (session, driver) = handshake.ok().await.expect("server accept");
-		tokio::spawn(run(driver));
-		(session, requests)
+		let driver = tokio::spawn(run(driver)).abort_handle();
+		(session, requests, driver)
 	};
-	let (client, (server, requests)) = tokio::join!(client_fut, server_fut);
+	let (client, (server, requests, server_driver)) = tokio::join!(client_fut, server_fut);
 
 	Pair {
 		client,
@@ -222,6 +225,7 @@ async fn connect(opts: Options) -> Pair {
 		client_transport: observe,
 		server_transport: observe_server,
 		requests,
+		server_driver,
 	}
 }
 
@@ -600,6 +604,29 @@ async fn a_closed_session_holds_no_grant(version: &'static str) {
 
 		pair.server.abort(Error::Cancel);
 		wait_for(token, |g| g == &Some(Grant::default())).await;
+	})
+	.await
+	.expect("timed out");
+}
+
+/// A grant this side issued settles once its session ends, even when the task serving
+/// its stream is dropped rather than run to completion.
+async fn an_issued_grant_ends_with_its_session(version: &'static str) {
+	within(async {
+		let mut pair = connect(Options {
+			version: Some(version),
+			client_publish: Some(produce_origin(2)),
+			server_requests: true,
+			..Default::default()
+		})
+		.await;
+		let mut requests = pair.requests.take().unwrap();
+		let issued = requests.next().await.expect("setup token").accept(Grant::default());
+		granted(&pair.client).await;
+
+		pair.server_driver.abort();
+		let err = issued.closed().await;
+		assert!(matches!(err, Error::Cancel), "{err:?}");
 	})
 	.await
 	.expect("timed out");

@@ -10,6 +10,7 @@ import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Writer } from "./stream.ts";
 import { Timestamp } from "./time.ts";
+import { withTimeout } from "./util/timeout.ts";
 import { wireOf } from "./wire.ts";
 
 const url = new URL("https://localhost:4443/test");
@@ -156,6 +157,36 @@ describe.each([Lite.ALPN_06, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", (pro
 		expect((err as SessionError).code).toBe(SessionCode.Unauthorized);
 		client.close();
 		server.close();
+	});
+
+	test("closing the session drops the grant", async () => {
+		const { client, server } = await connect({ publish: new OriginProducer(), protocol });
+		await waitFor(client.auth.grant, (g) => g !== undefined && g.publish.size > 0);
+
+		// Checked before any stream notices the transport closing.
+		client.close();
+		const closed = client.auth.grant.peek();
+		expect(closed?.publish.size).toBe(0);
+		expect(closed?.subscribe.size).toBe(0);
+		server.close();
+	});
+
+	test("an acceptor that ends a grant sees its stream close", async () => {
+		const { client, server } = await connect({ publish: new OriginProducer(), protocol });
+		try {
+			const requests = server.auth.requests();
+			const request = await requests.next();
+			if (!request) throw new Error("the setup token never arrived");
+			const issued = request.accept(grant(["a"], []));
+			await waitFor(client.auth.grant, (g) => g !== undefined && g.publish.size > 0);
+
+			issued.close();
+			// A regression leaves `closed` pending, so bound the wait rather than hang the runner.
+			expect(await withTimeout(Promise.resolve(issued.closed), 1000, "the grant stream never closed")).toBeNull();
+		} finally {
+			client.close();
+			server.close();
+		}
 	});
 
 	test("a refused setup token grants nothing rather than everything", async () => {

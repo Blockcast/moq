@@ -59,4 +59,4 @@ code, and a lower lite message ceiling.
 
 ## Related
 
-- [AUTH endings](/quest/m1/auth/error-codes.md) - a malformed or out-of-range AUTH_ERROR code is refused on the same path
+- [AUTH violations](/quest/m1/auth/violations.md) - AUTH protocol violations close the session on the same path (AUTH endings landed in #4550)

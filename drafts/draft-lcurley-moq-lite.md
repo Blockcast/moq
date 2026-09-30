@@ -1374,6 +1374,7 @@ AUTH_ERROR Message {
 
 **Error Code**:
 A code from the [session error registry](#session-error-codes), such as UNAUTHORIZED.
+A code that does not fit in 32 bits is a PROTOCOL_VIOLATION that closes the session.
 
 **Reason Phrase**:
 A human-readable reason, at most 8,192 bytes.
@@ -1443,6 +1444,7 @@ The `Message Length` describes the payload size on the wire.
 - The Subscribe Stream FIN now follows once every counted Group Stream has finished or been reset.
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live advertisement's suffix, and ANNOUNCE_START and ANNOUNCE_UPDATE gain `Hop Base` and `Hop Keep` to copy the tail of a live advertisement's Hop ID list.
 - Capped the SETUP Message Length at 65,536 bytes.
+- An AUTH_ERROR code that does not fit in 32 bits is a PROTOCOL_VIOLATION.
 
 ## moq-lite-06
 
