@@ -141,7 +141,7 @@ client = moq.Client(
   - `await .accept() → Session`. Complete the handshake (hold the result to keep the connection alive).
   - `await .reject(code)`. Reject with an application error code; 401 and 403 map to unauthorized.
   - `.cancel()`. Cancel an in-flight `accept()`/`reject()` call.
-- **`Session`**. An established connection. Holding it keeps the connection alive; it is also an `async with` context manager that shuts down on exit.
+- **`Session`**. An established connection. Holding it keeps the connection alive; it is also an `async with` context manager that drains on a clean exit and cancels on an error.
   - `await .closed()`. Wait until the session closes.
   - `.cancel(code)`, `await session.shutdown()`. Cancel immediately, or drain finished tracks within one second, raising on failure.
   - `.publish() → OriginProducer`, `.consume() → OriginConsumer`. The wired origin sides.

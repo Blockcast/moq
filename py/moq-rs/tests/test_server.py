@@ -376,3 +376,54 @@ async def test_route_update_observes_restart():
                 await serve_task
             except asyncio.CancelledError:
                 pass
+
+
+async def test_client_context_keeps_the_body_error():
+    """An error in the body survives the context manager. A live subscribed track
+    never drains, so draining on the way out would wait out the deadline and
+    replace the body's error with a delivery timeout."""
+    async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
+        sessions: list = []
+        reading: list = []
+        accepted = asyncio.Event()
+
+        async def accept_loop() -> None:
+            async for request in server:
+                sessions.append(await request.accept())
+                accepted.set()
+
+        async def drain(reader: moq.TrackConsumer) -> None:
+            async for _ in reader:
+                pass
+
+        accept_task = asyncio.create_task(accept_loop())
+        broadcast = None
+        try:
+            with pytest.raises(ZeroDivisionError):
+                async with moq.Client(
+                    f"https://{server.local_addr}",
+                    tls_verify=False,
+                    bind="127.0.0.1:0",
+                ) as client:
+                    broadcast = client.create_broadcast("live")
+                    broadcast.announce()
+                    track = broadcast.publish_track("data")
+                    await asyncio.wait_for(accepted.wait(), timeout=5.0)
+                    consume = sessions[0].consume()
+                    async for announcement in routes(consume.announced()):
+                        assert announcement.prefix == "live"
+                        break
+                    consumer = await asyncio.wait_for(consume.request_broadcast("live"), timeout=5.0)
+                    reader = await asyncio.wait_for(consumer.subscribe_track("data"), timeout=5.0)
+                    reading.append(asyncio.create_task(drain(reader)))
+                    await asyncio.wait_for(track.used(), timeout=5.0)
+                    raise ZeroDivisionError("boom")
+        finally:
+            accept_task.cancel()
+            try:
+                await accept_task
+            except asyncio.CancelledError:
+                pass
+            await asyncio.gather(*reading, return_exceptions=True)
+            if broadcast is not None:
+                broadcast.close()

@@ -4716,7 +4716,14 @@ async fn shutdown_times_out_on_an_unfinished_track() {
 		let reader = remote.subscribe_track("data".into(), None).await.unwrap();
 		let receiving = tokio::spawn(async move { reader.read_frame().await });
 		tokio::time::timeout(TIMEOUT, track.used()).await.unwrap().unwrap();
+		let start = std::time::Instant::now();
 		let err = publisher.shutdown().await.expect_err("unfinished track must time out");
+		// The documented one second of draining, so an immediate bail still fails here.
+		assert!(
+			start.elapsed() >= Duration::from_secs(1),
+			"gave up draining after {:?}",
+			start.elapsed()
+		);
 		assert!(
 			matches!(err, MoqError::Protocol { details } if details.kind == crate::error::MoqProtocolKind::DeliveryTimeout)
 		);

@@ -135,7 +135,9 @@ class Client:
         self._publisher = None
         self._consumer = None
         try:
-            if self._session is not None:
+            # A body error is the failure worth reporting. Draining behind it would
+            # wait out the deadline and replace it with a delivery timeout.
+            if self._session is not None and exc[0] is None:
                 await self._session.shutdown()
         finally:
             self._session = None
