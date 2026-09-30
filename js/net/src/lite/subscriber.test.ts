@@ -197,8 +197,11 @@ test("a received hop list naming no publisher is stamped per connection", async 
 		const update = await announced.next();
 		expect(update).toMatchObject({ prefix: Path.from("room"), kind: "announced" });
 		const hops = update?.route.hops ?? [];
-		expect(hops).toHaveLength(1);
+		expect(hops).toHaveLength(2);
 		expect(hops[0]).not.toBe(UNKNOWN_HOP);
+		// The 0 after the stamp keeps the unnamed publisher ranked as anonymous.
+		expect(hops[1]).toBe(UNKNOWN_HOP);
+		expect(update && isAnonymous(update.route)).toBe(true);
 
 		announced.close();
 		subscriber.close();
@@ -209,7 +212,7 @@ test("a received hop list naming no publisher is stamped per connection", async 
 	expect(await first()).not.toBe(await first());
 });
 
-test("a received chain starting with hop 0 has only its first entry stamped", async () => {
+test("a received chain starting with hop 0 keeps it behind the stamp", async () => {
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
 	const announced = subscriber.announced();
 	await settle();
@@ -226,7 +229,7 @@ test("a received chain starting with hop 0 has only its first entry stamped", as
 	expect(update).toMatchObject({ prefix: Path.from("room"), kind: "announced" });
 	const [stamp, ...rest] = update?.route.hops ?? [];
 	expect(stamp).not.toBe(UNKNOWN_HOP);
-	expect(rest).toEqual([PUBLISHER_A, PEER]);
+	expect(rest).toEqual([UNKNOWN_HOP, PUBLISHER_A, PEER]);
 
 	announced.close();
 	subscriber.close();

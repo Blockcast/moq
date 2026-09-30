@@ -65,8 +65,8 @@ that serves only some of the paths beneath its prefix refuses the rest as they
 are requested. Each route carries the chain of relay identities it passed
 through, which is how forwarding loops are caught, and a cost, which is how a
 subscriber picks among several routes to the same broadcast. A hop of 0 is the
-anonymous mark and travels the chain unchanged, except as the first hop: a relay
-names an unknown publisher with a random ID fresh per connection. A route that passed through an
+anonymous mark and travels the chain unchanged; when it is the first hop, a relay
+puts a random ID, fresh per connection, in front of it to name the publisher. A route that passed through an
 anonymous hop at any depth ranks below every fully identified route, whatever
 the costs say; among anonymous routes, cost keeps ordering.
 

@@ -313,10 +313,10 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		}
 
 		// Lite01/02 send no list at all, and Lite03 carries only UNKNOWN placeholders,
-		// so the publisher may be unnamed: this connection's stamp names it. Later
-		// placeholders stay 0 and count as anonymous.
+		// so the publisher may be unnamed: this connection's stamp goes in front to name
+		// it, and the 0s stay so the route still ranks as anonymous.
 		if hops.stamp(self.stamp).is_err() {
-			tracing::debug!(route = %self.log_path(&path), "dropping announce; stamp already in the chain");
+			tracing::debug!(route = %self.log_path(&path), "dropping announce; no room to stamp the chain");
 			return Ok(false);
 		}
 
@@ -2525,16 +2525,17 @@ mod tests {
 		let mut cursor = consumer.announced();
 		let route = cursor.assert_next_active("room/host");
 		let hops: Vec<_> = route.hops.iter().copied().collect();
-		assert_eq!(hops, vec![subscriber.stamp]);
+		assert_eq!(hops, vec![subscriber.stamp, crate::Hop::UNKNOWN]);
 		assert_ne!(subscriber.stamp, assigned);
+		assert!(route.is_anonymous());
 
 		let mut hidden = consumer.excluding(assigned).announced();
 		hidden.assert_next_wait();
 	}
 
-	/// Lite03 hop-count placeholders name nobody, so the first is replaced by the
-	/// connection's stamp; the rest stay 0 and count as anonymous. None is rewritten with
-	/// the assigned identity.
+	/// Lite03 hop-count placeholders name nobody, so the connection's stamp goes in front;
+	/// the placeholders stay 0 and count as anonymous. None is rewritten with the
+	/// assigned identity.
 	#[tokio::test]
 	async fn lite03_placeholders_stay_anonymous() {
 		let assigned = crate::Hop::new(777).unwrap();
@@ -2570,12 +2571,12 @@ mod tests {
 		let mut cursor = consumer.announced();
 		let route = cursor.assert_next_active("room/host");
 		let hops: Vec<_> = route.hops.iter().copied().collect();
-		assert_eq!(hops, vec![subscriber.stamp, crate::Hop::UNKNOWN]);
+		assert_eq!(hops, vec![subscriber.stamp, crate::Hop::UNKNOWN, crate::Hop::UNKNOWN]);
 		assert!(route.is_anonymous());
 	}
 
 	/// A publisher that names nobody is stamped with a random id fresh per connection,
-	/// never 0: a restart on the same connection keeps the stamp and updates in place,
+	/// never 0, ahead of the 0 that keeps it ranked as unknown: a restart on the same connection keeps the stamp and updates in place,
 	/// while the same publisher reconnecting reads as a new first hop.
 	#[tokio::test]
 	async fn an_unnamed_publisher_is_stamped_per_connection() {
@@ -2599,7 +2600,7 @@ mod tests {
 		let mut cursor = consumer.announced();
 		let route = cursor.assert_next_active("room/host");
 		let hops: Vec<_> = route.hops.iter().copied().collect();
-		assert_eq!(hops, vec![first.stamp]);
+		assert_eq!(hops, vec![first.stamp, crate::Hop::UNKNOWN]);
 
 		// A reprice from the same unnamed publisher keeps the stamp, so it stays in place.
 		first
@@ -2614,7 +2615,7 @@ mod tests {
 			.unwrap();
 		let route = cursor.assert_next_active("room/host");
 		let hops: Vec<_> = route.hops.iter().copied().collect();
-		assert_eq!(hops, vec![first.stamp]);
+		assert_eq!(hops, vec![first.stamp, crate::Hop::UNKNOWN]);
 	}
 
 	fn restart_subscriber(session: SinkSession) -> (Subscriber<SinkSession>, crate::origin::Consumer) {

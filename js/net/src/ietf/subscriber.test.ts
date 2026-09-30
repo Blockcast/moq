@@ -103,7 +103,8 @@ test("an unsolicited announcement lands", async () => {
 
 /**
  * A session without the Cluster extension names no publisher, so each connection stamps its
- * own random Hop ID as the first hop: a publisher that reconnects reads as a new one.
+ * own random Hop ID in front of a 0: a publisher that reconnects reads as a new one, and the 0
+ * keeps it ranked below identified routes.
  */
 test("an advertisement with no path is stamped per connection", async () => {
 	const stamp = async () => {
@@ -118,8 +119,9 @@ test("an advertisement with no path is stamped per connection", async () => {
 			stream,
 		);
 		const hops = (await announced.next())?.route.hops ?? [];
-		expect(hops).toHaveLength(1);
+		expect(hops).toHaveLength(2);
 		expect(hops[0]).not.toBe(UNKNOWN_HOP);
+		expect(hops[1]).toBe(UNKNOWN_HOP);
 		return hops[0];
 	};
 

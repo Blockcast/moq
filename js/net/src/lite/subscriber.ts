@@ -5,7 +5,7 @@ import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
 import { controlTimeout, error, ProtocolViolation, reason, StreamCode, StreamError, sessionCause } from "../error.ts";
 import * as netGroup from "../group.ts";
-import { Cost, type Hop, MAX_HOPS, type Route, randomHop, routesEqual, stampHops } from "../hop.ts";
+import { Cost, type Hop, MAX_HOPS, type Route, randomHop, routesEqual, stampHops, UNKNOWN_HOP } from "../hop.ts";
 import { groupBounds, hiddenBelow, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
 import { type OpenOptions, type Reader, Stream } from "../stream.ts";
@@ -273,7 +273,7 @@ export class Subscriber {
 						if (advertised.has(path)) {
 							throw new ProtocolViolation(`duplicate announce for ${path}`);
 						}
-						const route = { hops: [this.#stamp], cost: Cost.zero };
+						const route = { hops: [this.#stamp, UNKNOWN_HOP], cost: Cost.zero };
 						const live = visible(path);
 						const captures = scopeCaptures(scope, path);
 						advertised.set(path, { publisher: this.#stamp, live, route, captures });
@@ -404,7 +404,7 @@ export class Subscriber {
 
 				// The first hop identifies the original publisher; an empty chain means the
 				// peer itself originated it. One that names nobody (lite-01..03, or a peer
-				// reporting 0) is named by this connection's stamp.
+				// reporting 0) gets this connection's stamp in front of its 0.
 				const fullHops = stampHops(
 					hops !== undefined && responderOrigin !== undefined
 						? [...hops, responderOrigin]

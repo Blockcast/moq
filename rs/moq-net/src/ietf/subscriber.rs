@@ -559,7 +559,8 @@ where
 	/// The route for an advertisement that carries no path of its own.
 	///
 	/// Base moq-transport has no hops on the wire, so the chain is this connection's
-	/// stamp alone, naming the unknown publisher for as long as the connection lasts.
+	/// stamp, naming the unknown publisher for as long as the connection lasts, then
+	/// the anonymous 0 that keeps it ranked below identified routes.
 	/// The session's assigned identity stays on `via` for split-horizon; putting it in
 	/// the chain would publish a name for a peer that declined to give one.
 	///
@@ -573,8 +574,8 @@ where
 	/// its true length. Price such a link with [`crate::Client::with_cost`].
 	fn session_route(&self, peer: &cluster::Peer) -> crate::origin::Route {
 		let mut hops = crate::Hops::new();
-		hops.push(self.stamp)
-			.expect("an empty hop chain has room for one entry");
+		hops.stamp(self.stamp)
+			.expect("an empty hop chain has room for the stamp and its 0");
 		crate::origin::Route::default()
 			.with_hops(hops)
 			.with_via(self.via(peer))
@@ -587,8 +588,7 @@ where
 	///
 	/// A negotiated peer supplies the path and cost, so the route is what the mesh
 	/// actually knows: the full chain, and the accumulated cost plus this link's price.
-	/// A first entry of 0 is replaced by this connection's stamp; a 0 anywhere else
-	/// stays. An advertisement whose path already contains our own Hop ID looped back,
+	/// A path starting with 0 gets this connection's stamp in front of it; the 0s stay. An advertisement whose path already contains our own Hop ID looped back,
 	/// and neither forwarding it nor subscribing through it is safe.
 	fn route(&self, advert: Option<&cluster::Advert>, peer: &cluster::Peer) -> Option<Advertised> {
 		let Some(advert) = advert else {
@@ -4141,8 +4141,9 @@ mod tests {
 		let mut announced = consumer.announced();
 		let route = announced.assert_next_active("room/host");
 		let hops: Vec<_> = route.hops.iter().copied().collect();
-		assert_eq!(hops, vec![subscriber.stamp]);
+		assert_eq!(hops, vec![subscriber.stamp, crate::Hop::UNKNOWN]);
 		assert_ne!(subscriber.stamp, crate::Hop::UNKNOWN);
+		assert!(route.is_anonymous(), "the 0 after the stamp still ranks it as unknown");
 		assert_ne!(subscriber.stamp, assigned, "the assigned identity stays off the chain");
 
 		let mut hidden = consumer.excluding(assigned).announced();

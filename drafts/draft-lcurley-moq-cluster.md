@@ -109,7 +109,7 @@ It stands for an endpoint that did not negotiate this extension, and an endpoint
 Since any number of endpoints can be 0, it identifies nothing:
 
 - **Loop detection**: 0 in a HOP_PATH is never a loop. A receiver whose own Hop ID is 0 cannot detect loops through itself and MUST NOT discard an advertisement merely because the path contains 0.
-- **Origin identity**: an advertisement whose first entry is 0 has an unknown publisher, which a relay names with a stamp of its own before recording it ({{stamping}}). A receiver MUST NOT treat two unstamped ones as interchangeable ({{selection}}).
+- **Origin identity**: an advertisement whose first entry is 0 has an unknown publisher, which a relay names by putting a stamp of its own in front ({{stamping}}). A receiver MUST NOT treat two unstamped ones as interchangeable ({{selection}}).
 - **Filtering**: a peer that declared 0 gave the receiver nothing to filter that session on. The receiver MAY assign an ID of its own ({{assigned}}) as local selection state and MUST NOT write it into HOP_PATH.
 
 Duplicate *non-zero* Hop IDs in one HOP_PATH are a loop; duplicate zeros are not.
@@ -130,10 +130,11 @@ A peer the receiver authenticated, or dialed and therefore chose, SHOULD get one
 An anonymous accepted session cannot be correlated with anything, so it SHOULD get a distinct ID per session: not an identity, but enough to keep routes learned from it from being advertised back to it, which is the loop 0 cannot prevent.
 
 ## Stamping an Unknown Publisher {#stamping}
-A relay that records an advertisement whose first HOP_PATH entry is 0, or that arrived with no HOP_PATH ({{bridging}}), MUST replace that entry with a random non-zero Hop ID, picked once for the session the advertisement arrived on.
-A 0 anywhere else in HOP_PATH stays.
+A relay that records an advertisement whose first HOP_PATH entry is 0 MUST insert a random non-zero Hop ID in front of it, picked once for the session the advertisement arrived on.
+One that arrived with no HOP_PATH ({{bridging}}) becomes that stamp followed by 0.
 
 Nothing on the wire says whether an unnamed publisher that reconnects is the same one, so a fresh stamp per session makes its reconnect a change of publisher downstream ({{updating}}), while an update on the same session keeps the stamp and applies in place.
+The 0 behind the stamp keeps the path ranked below fully identified ones ({{selection}}), since the unnamed hop may hide any depth.
 A stamp names a session, not a peer: it MUST NOT be reused across sessions or taken as the peer's identity.
 
 
@@ -198,7 +199,7 @@ Unknown, out-of-budget, and saturated routes are outside the guarantee: a receiv
 
 # Relay Behavior
 A relay forwarding an advertisement MUST append its own Hop ID to the HOP_PATH it received, so its ID is always the last entry.
-A received 0 is forwarded unchanged, except as the first entry ({{stamping}}).
+A received 0 is forwarded unchanged, behind a stamp when it is the first entry ({{stamping}}).
 
 A relay MUST discard an advertisement whose HOP_PATH already contains its own non-zero Hop ID: forwarding it would extend a loop, and subscribing through it would route the relay back to itself.
 This check catches loops of any length and is the only loop defense required.
@@ -206,7 +207,7 @@ A conforming sender never sends one ({{selection}}), so a receiver MAY close the
 
 ## Bridging {#bridging}
 An upstream that did not negotiate the extension sends no HOP_PATH.
-The relay creates one holding only its stamp for that session ({{stamping}}), then appends its own Hop ID.
+The relay creates one holding its stamp for that session followed by 0 ({{stamping}}), then appends its own Hop ID.
 The identity a receiver assigned that upstream ({{assigned}}) is local selection state and MUST NOT appear in HOP_PATH.
 
 ## Accumulating Cost {#accumulating}
@@ -339,7 +340,7 @@ This document requests one registration in the "REQUEST_ERROR Codes" registry.
 - Defined request resolution against the longest covering prefix and the NO_CAPACITY refusal with its single re-resolution; any other refusal is terminal, including between several publishers of one namespace.
 - A relay does not advertise a namespace because it resolved it; the publisher advertises the concrete namespace once producing.
 - A change of original publisher is an ordinary update instead of a withdrawal and a new advertisement. Subscriptions already served drain the old source; new requests take the updated route.
-- A relay stamps an advertisement whose first HOP_PATH entry is 0, or that has no HOP_PATH, with a random Hop ID picked per session, instead of recording 0.
+- A relay puts a random Hop ID, picked per session, in front of an advertisement whose first HOP_PATH entry is 0, and writes that stamp followed by 0 for one with no HOP_PATH.
 
 ## moq-cluster-01
 - Assigned identities are local selection state and MUST NOT be forwarded.

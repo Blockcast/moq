@@ -4,7 +4,7 @@ import * as broadcast from "../broadcast.ts";
 import { BroadcastCache } from "../consume.ts";
 import { closeError, controlTimeout, error, ProtocolViolation, reason, sessionCause } from "../error.ts";
 import * as netGroup from "../group.ts";
-import { Cost, type Route, randomHop, routesEqual, stampHops } from "../hop.ts";
+import { Cost, type Route, randomHop, routesEqual, stampHops, UNKNOWN_HOP } from "../hop.ts";
 import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
 import type { Cursor, Reader, Stream } from "../stream.ts";
@@ -181,11 +181,12 @@ export class Subscriber {
 
 	/**
 	 * The route an advertisement carries; one without a path is free. A path that names no
-	 * publisher, or none at all, is named by this connection's stamp.
+	 * publisher, or none at all, gets this connection's stamp in front of a 0.
 	 */
 	#route(advert: Cluster.Advert | undefined): Route {
-		if (advert === undefined) return { hops: [this.#stamp], cost: Cost.zero };
-		// A stamp colliding with a later entry is a 1-in-2^53 draw: keep the path as sent.
+		if (advert === undefined) return { hops: [this.#stamp, UNKNOWN_HOP], cost: Cost.zero };
+		// A full chain, or a stamp colliding with an entry (a 1-in-2^53 draw), keeps the
+		// path as sent.
 		const hops = stampHops(advert.hops, this.#stamp) ?? [...advert.hops];
 		return { hops, cost: { warm: advert.cost, cold: advert.cost } };
 	}
