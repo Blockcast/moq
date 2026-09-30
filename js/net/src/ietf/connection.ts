@@ -185,7 +185,11 @@ export class Connection implements Established {
 				console.error("fatal error running connection", err);
 			}
 		} finally {
-			this.abort();
+			// A graceful close owns the teardown while it drains. runPublishNamespaces is
+			// a tracked withdrawal, so a failure in it ends this driver while close() is
+			// still waiting on the sibling loops; aborting here would drop their
+			// withdrawals. close() aborts once its barrier settles or the deadline hits.
+			if (!this.#closing) this.abort();
 		}
 	}
 
