@@ -21,8 +21,9 @@ datagram flag, and reports it as "unsupported":
 - FETCH never serves a datagram group. A publisher answers a FETCH for one the
   way it answers any group it won't deliver (dropped or does not exist),
   never with its payload.
-- A received fetch object with the datagram flag is refused as not fetchable,
-  a protocol error rather than `Unsupported`. That covers the relay's group
+- A received fetch object with the datagram flag is refused as not fetchable.
+  It fails only that fetch or fill, not the session, because draft-16+ allows
+  the flag (maintainer, 09-29, on Codex's review). That covers the relay's group
   fill (`recv_group_fetch_objects`, on the moxygen line) and the joining-fetch
   fill (`run_fill_objects`).
 - Update `drafts/draft-lcurley-moq-lite.md` to say datagrams are neither
@@ -35,7 +36,7 @@ a one-shot stream, not a cache.
 
 Tests: a subscriber joining after datagrams were sent receives only later
 ones. A FETCH covering a datagram group gets no payload. A fetch stream
-carrying a datagram-flagged object is refused.
+carrying a datagram-flagged object fails that fetch and leaves the session up.
 
 ## Related
 
