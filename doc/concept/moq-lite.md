@@ -227,7 +227,8 @@ publisher only ever sees the most tolerant budget across its subscribers.
 Across a native route failover, the reader still judges buffered groups against
 the logical track's live edge, including groups it is draining from a retired
 route. A successor group with no timestamp leaves the preceding group's reach
-unbounded until its first frame arrives. A cached open group's prefix remains
+unbounded until its first frame arrives; if it is dropped first, the next group
+takes its place. A cached open group's prefix remains
 readable across repeated takeovers and idle resumes.
 
 The publisher declares a retention window per track, which bounds how far back
