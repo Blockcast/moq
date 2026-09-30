@@ -22,9 +22,9 @@ over FETCH wants to say "if nobody is publishing this live, I have it", which
 is the catch-all `**`, a claim about every path at once.
 
 The cost of enumerating is real even though its last measurement is stale.
-[relay-memory](/quest/m1/relay-memory.md) measured one announcement at 8.8 KB
-per relay plus 4.3 KB per additional route before prefix routes made a
-standby route a table entry, and owns remeasuring it. Whatever the current
+One announcement measured 8.8 KB per relay plus 4.3 KB per additional route
+before prefix routes made a standby route a table entry;
+[Cluster routing](/quest/m1/cluster-routing/README.md) owns remeasuring it. Whatever the current
 number, every relay that hears an announcement pays it whether or not anything
 there subscribes, so "workers times broadcasts" is that number multiplied
 across the fleet in resident memory.
@@ -139,7 +139,7 @@ field.
   refused. A prefix wider than the grant is accepted, but it only routes
   requests for paths the grant covers. Fleet-wide services use the cluster
   identity; a customer service serves only what its own v1 grant contains.
-  Until [Advertise-only authorization](/quest/m1/processor/advertise-auth.md)
+  Until [Advertise-only authorization](/quest/m2/processor/advertise-auth.md)
   lands, the publish scope stands in for advertising; a credential with its own
   advertise scope is checked against that instead.
 - **Claims are visible to subscribers.** A subscriber sees every advertised
@@ -205,7 +205,9 @@ never see `.pro/` broadcasts, which could confuse their business logic. Those
 versions cannot opt into hidden routes, so the relay never announces them
 there. Hidden routes are a moq-lite-07 feature, so the player's covering check
 (Demand, done on the line branch) opts into them and sees a claim only when
-lite-07 is negotiated. A customer who wants transcodes upgrades, or
+lite-07 is negotiated. Finalizing lite-07 is a rollout condition, not a
+blocker for this line (decided in the 2026-09-30 audit), since the check works
+whenever lite-07 is negotiated. A customer who wants transcodes upgrades, or
 subscribes to the explicit `.pro/<service>/...` path, which works on any
 version. Grants and metering are the deployment's; moq.pro's are in its
 [wildcard questline](https://github.com/moq-dev/moq.pro/blob/main/quest/m2/wildcard/README.md).
@@ -220,9 +222,7 @@ distinguish recording generations reads the catalog's archive entry
 
 - [archive](/quest/m1/archive/README.md) - an archive claims the root, and its
   catalog names the generations a claim cannot
-- [Cluster routing](/quest/m1/cluster-routing.md) - origin selection by cost
-  with an HRW tie-break, built on this line's longest-prefix rule
 - [Broadcast epochs](/quest/m1/broadcast-epoch/README.md) - derived output
   mirrors the source path, `@<epoch>` segment included
-- [Announcement shapes](/quest/m3/announce-shapes.md) - moq-lite-only exact,
+- [Announcement shapes](/quest/m2/announce-shapes.md) - moq-lite-only exact,
   suffix, and prefix+suffix claims that survive relay hops

@@ -99,7 +99,7 @@ existing lite-06 ALPN.
 - [Expired token error](/quest/m1/auth/expired-error.md) - an expired token
   reports `Error::Expired`, not `Unauthorized`, in Rust, JS, and the bindings
 - [Bindings](/quest/m1/auth/bindings.md) - grants and tokens reach every
-  binding through moq-ffi and libmoq
+  binding through moq-ffi
 - [Token in band](/quest/m1/auth/token-in-band.md) - the credential can leave
   the URL: a session starts on what the URL carried and its AUTH streams add
   the rest, with the URL kept for peers below lite-06
@@ -108,6 +108,6 @@ existing lite-06 ALPN.
 
 ## Related
 
-- [Expiring media grants](/quest/m1/processor/grant-lease.md) - a worker's
+- [Expiring media grants](/quest/m2/processor/grant-lease.md) - a worker's
   lease renewal is a new in-band token
-- [P2P](/quest/m1/p2p/README.md) - the first consumer of hop-bound peer grants
+- [P2P](/quest/m2/p2p/README.md) - the first consumer of hop-bound peer grants

@@ -16,13 +16,14 @@ import {
 	unauthorized,
 } from "../error.ts";
 import * as netGroup from "../group.ts";
-import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
+import { Cost, type Hop, MAX_HOPS, type Route, randomHop, routesEqual, stampHops, UNKNOWN_HOP } from "../hop.ts";
 import { groupBounds, hiddenBelow, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
 import { type OpenOptions, type Reader, Stream } from "../stream.ts";
 import { TAIL_GRACE_MS, Tail } from "../tail.ts";
 import * as Time from "../time.ts";
 import type * as track from "../track.ts";
+import { untilAborted } from "../util/abort.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import {
@@ -142,6 +143,10 @@ export class Subscriber {
 	// Dedup consumed broadcasts per path: repeat consume() calls share one subscription.
 	#consumes = new BroadcastCache();
 
+	// A random Hop ID of this connection's own, written as the first hop of any chain that
+	// names no publisher, so a publisher that reconnects reads as a new one.
+	#stamp: Hop;
+
 	// Dedup in-flight one-shot fetches, keyed by [broadcast, track, sequence]. Concurrent (or
 	// repeat, while still open) fetchGroup() calls for the same group share one FETCH stream and
 	// each get an independent mirror; the entry is evicted once the group closes.
@@ -183,6 +188,7 @@ export class Subscriber {
 		this.#quic = quic;
 		this.version = version;
 		this.hop = hop;
+		this.#stamp = randomHop();
 		this.#probe = probe;
 		this.#peerSetup = peerSetup;
 		this.#grant = grant;
@@ -263,9 +269,9 @@ export class Subscriber {
 			// the map instead would let a later announce take the path, and the skipped one's
 			// `endedId` would then retract that one's state.
 			//
-			// `publisher` is what lets a restart tell a route change (same publisher,
-			// subscriptions resume) from a replacement (a new generation took the path,
-			// nothing carries over).
+			// `publisher` is what lets a restart tell a route change (same publisher) from a
+			// new publisher on the route, whose content the next consume must not share
+			// with the old one's.
 			type Advertisement = {
 				publisher: Hop | undefined;
 				live: boolean;
@@ -284,16 +290,16 @@ export class Subscriber {
 					// they go on record and obey the same one-per-path rule: the initial set
 					// naming a path twice is the same violation as two ANNOUNCE_STARTs for it,
 					// and the record is what catches either. Draft01/02 carry no hop ids and no
-					// ANNOUNCE_OK, so nothing names the publisher.
+					// ANNOUNCE_OK, so this connection's stamp names the publisher.
 					for (const suffix of init.suffixes) {
 						const path = Path.join(prefix, suffix);
 						if (advertised.has(path)) {
 							throw new ProtocolViolation(`duplicate announce for ${path}`);
 						}
-						const route = { hops: [UNKNOWN_HOP], cost: Cost.zero };
+						const route = { hops: [this.#stamp, UNKNOWN_HOP], cost: Cost.zero };
 						const live = visible(path);
 						const captures = scopeCaptures(scope, path);
-						advertised.set(path, { publisher: undefined, live, route, captures });
+						advertised.set(path, { publisher: this.#stamp, live, route, captures });
 						if (!live) continue;
 						console.debug(`announced: broadcast=${path} active=true`);
 						announced.append({ prefix: path, captures, kind: "announced", route });
@@ -420,23 +426,17 @@ export class Subscriber {
 				}
 
 				// The first hop identifies the original publisher; an empty chain means the
-				// peer itself originated it. See `restart_announce` in the Rust subscriber.
-				const publisher = hops?.[0] ?? responderOrigin;
-
-				// A publisher with no identity (an empty chain from a peer that withheld its
-				// own id, or a lite-03 UNKNOWN placeholder) never proves continuity: two such
-				// advertisements can be unrelated publishers. Mirrors the
-				// `publisher == Hop::UNKNOWN` arm of the Rust `restart_announce`.
-				const identified = publisher !== undefined && publisher !== UNKNOWN_HOP;
-				const fullHops =
+				// peer itself originated it. One that names nobody (lite-01..03, or a peer
+				// reporting 0) gets this connection's stamp in front of its 0.
+				const fullHops = stampHops(
 					hops !== undefined && responderOrigin !== undefined
 						? [...hops, responderOrigin]
-						: [...(hops ?? [])];
-				// A received empty list is the anonymous mark, not a local announcement.
-				if (fullHops.length === 0) fullHops.push(UNKNOWN_HOP);
+						: [...(hops ?? [])],
+					this.#stamp,
+				);
 				// Appending a withheld AnnounceOk(0) onto a 32-entry list is the same
 				// drop Rust's Hops::push makes: do not expose an overlong chain.
-				if (fullHops.length > MAX_HOPS) {
+				if (fullHops === undefined || fullHops.length > MAX_HOPS) {
 					console.debug(`announced: broadcast=${path} dropped (hop chain at MAX_HOPS)`);
 					advertised.set(path, {
 						publisher: undefined,
@@ -446,6 +446,7 @@ export class Subscriber {
 					});
 					continue;
 				}
+				const publisher = fullHops[0];
 				const route: Route = { hops: fullHops, cost: cost ?? Cost.zero };
 				const captures = scopeCaptures(scope, path);
 				if (!visible(path)) {
@@ -454,30 +455,22 @@ export class Subscriber {
 				}
 
 				// A second advertisement for a path we already carry is a restart: either an
-				// explicit ANNOUNCE_UPDATE, or (lite-05) a duplicate ANNOUNCE.
+				// explicit ANNOUNCE_UPDATE, or (lite-05) a duplicate ANNOUNCE. It updates the
+				// route in place, so a forwarder re-prices without retracting.
 				const previous = advertised.get(path);
 				if (previous?.live) {
-					if (identified && previous.publisher === publisher) {
-						// Same publisher, new route. In-flight subscriptions resume across it.
-						// Emit the route so a forwarder can re-price without retracting.
-						if (!routesEqual(previous.route, route)) {
-							advertised.set(path, { publisher, live: true, route, captures });
-							console.debug(`announced: broadcast=${path} rerouted`);
-							announced.append({ prefix: path, captures, kind: "updated", route });
-						} else {
-							console.debug(`announced: broadcast=${path} rerouted`);
-						}
-						continue;
+					// A different publisher took the path. Subscriptions already open drain
+					// the old copy, but the next consume starts fresh rather than reusing the
+					// old publisher's cached track info.
+					if (previous.publisher !== publisher) this.#consumes.evict(path);
+					advertised.set(path, { publisher, live: true, route, captures });
+					console.debug(`announced: broadcast=${path} rerouted`);
+					if (!routesEqual(previous.route, route)) {
+						announced.append({ prefix: path, captures, kind: "updated", route });
 					}
-
-					// A different publisher took the path, so cached track info and existing
-					// subscriptions must not carry over. Surface a real end before the start.
-					retract();
+					continue;
 				}
 
-				// After `retract()`, which clears the entry: the path is advertised again, by
-				// whoever just took it over. Recording it before would leave nothing behind, so
-				// the *next* takeover would read as a first announcement and skip its own end.
 				advertised.set(path, { publisher, live: true, route, captures });
 
 				console.debug(`announced: broadcast=${path} active=true`);
@@ -798,24 +791,32 @@ export class Subscriber {
 		sequence: number,
 		options: track.FetchGroupOptions = {},
 	): Promise<netGroup.Consumer> {
+		options.signal?.throwIfAborted();
+
 		// Coalesce onto a still-open fetch of the same group so we don't open a second FETCH
 		// stream (and re-download it); each caller reads an independent mirror.
+		//
+		// Reserve each caller's mirror before the fetch starts or is awaited: the fetch watches
+		// demand from the start, and a fast FIN cannot discard frames before these callers
+		// receive their handles. An abort closes only this caller's mirror, so the stream is
+		// cancelled once the last one leaves.
 		const key = JSON.stringify([broadcast, track, sequence]);
 		let entry = this.#fetches.get(key);
-		if (!entry || entry.group.isClosed) {
+		let consumer: netGroup.Consumer;
+		if (entry && !entry.group.isClosed) {
+			consumer = entry.group.mirror();
+		} else {
 			const group = new netGroup.Producer(sequence);
-			entry = { group, accepted: this.#runFetch(broadcast, track, sequence, options, group) };
+			consumer = group.mirror();
+			entry = { group, accepted: this.#runFetch(broadcast, track, sequence, options.priority ?? 0, group) };
 			this.#fetches.set(key, entry);
 			void group.closed.then(() => {
 				if (this.#fetches.get(key)?.group === group) this.#fetches.delete(key);
 			});
 		}
 
-		// Reserve each caller's mirror before awaiting acceptance so the pump sees demand,
-		// and a fast FIN cannot discard frames before these callers receive their handles.
-		const consumer = entry.group.mirror();
 		try {
-			await entry.accepted;
+			await untilAborted(entry.accepted, options.signal);
 			return consumer;
 		} catch (err) {
 			consumer.close();
@@ -824,12 +825,13 @@ export class Subscriber {
 	}
 
 	// Open the FETCH stream and pump the response into the shared group. Setup errors close the
-	// group, evict the entry, and reject every caller waiting for acceptance.
+	// group, evict the entry, and reject every caller waiting for acceptance. A setup every caller
+	// has abandoned is cancelled the same way.
 	async #runFetch(
 		broadcast: Path.Valid,
 		track: string,
 		sequence: number,
-		options: track.FetchGroupOptions,
+		priority: number,
 		group: netGroup.Producer,
 	): Promise<void> {
 		try {
@@ -840,10 +842,10 @@ export class Subscriber {
 			// Lite has no FETCH_OK, so a publisher that never answers would hold the setup forever.
 			// Subscriber.close() closing the group releases every caller at any stage, and resets
 			// the streams the setup opened.
-			const setup = this.#fetchSetup(broadcast, track, sequence, options);
+			const setup = this.#fetchSetup(broadcast, track, sequence, priority, group);
 			let accepted: { stream: Stream; info: TrackInfo };
 			try {
-				accepted = await untilClosed(group, setup);
+				accepted = await untilAbandoned(group, setup);
 			} catch (err: unknown) {
 				// A setup that finishes just after the close hands back a stream nobody will read.
 				void setup.then(
@@ -861,20 +863,21 @@ export class Subscriber {
 	}
 
 	// Resolve the track's timescale, then open the FETCH stream and wait for it to be accepted.
+	// Closing the group during that wait resets the stream.
 	async #fetchSetup(
 		broadcast: Path.Valid,
 		track: string,
 		sequence: number,
-		options: track.FetchGroupOptions,
+		priority: number,
+		group: netGroup.Producer,
 	): Promise<{ stream: Stream; info: TrackInfo }> {
-		const info = await this.#trackInfo(broadcast, track);
-		const priority = options.priority ?? 0;
+		const info = await untilClosed(group, this.#trackInfo(broadcast, track));
 		return this.#exchange({ sendOrder: sendOrder({ priority }) }, async (stream) => {
 			await stream.writer.u53(StreamId.Fetch);
 			await new FetchMessage({ broadcast, track, priority, group: sequence }).encode(stream.writer, this.version);
 			// A byte or an empty-group FIN accepts the fetch; a reset rejects it.
 			// done() buffers that byte so the response pump can decode it normally.
-			await stream.reader.done();
+			await untilClosed(group, stream.reader.done());
 			return { stream, info };
 		});
 	}
@@ -1287,6 +1290,17 @@ async function untilClosed<T>(group: netGroup.Producer, step: Promise<T>): Promi
 	const closed = group.closed.peek();
 	if (closed !== undefined) throw closed ?? new Error("fetch closed before it was accepted");
 	return value as T;
+}
+
+// Like untilClosed, but also cancels once every reader has left. Demand is level-triggered, so a
+// caller that coalesces onto the group before the check re-arms it.
+async function untilAbandoned<T>(group: netGroup.Producer, step: Promise<T>): Promise<T> {
+	const idle: unique symbol = Symbol("idle");
+	for (;;) {
+		const value = await untilClosed(group, race([step, group.unused().then((): typeof idle => idle)]));
+		if (value !== idle) return value as T;
+		if (!group.used.peek()) throw new StreamError(StreamCode.Cancel, { message: "cancel" });
+	}
 }
 
 /**
