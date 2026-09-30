@@ -91,6 +91,7 @@ existing lite-06 ALPN.
 
 - [AUTH endings](/quest/m1/auth/error-codes.md) - an out-of-range AUTH_ERROR code is refused, and both sides settle and recompute grants when a stream ends
 - [AUTH violations](/quest/m1/auth/violations.md) - every AUTH protocol violation closes the session in Rust and JS, lite and IETF
+- [JS fetch grant watch](/quest/m1/auth/js-fetch-watch.md) - a JS `fetchGroup` ends `Unauthorized` when its path leaves the grant
 - [Origin narrowing](/quest/m1/auth/narrowing.md) - a live grant narrows in
   place: subscriptions outside it reset, publishes outside it abort, and relay
   revalidation stops closing the session
