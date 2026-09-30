@@ -130,7 +130,9 @@ including after the consumer is cancelled. `frame.pixels(format)` converts it on
 demand: `VideoPixelFormat.I420`, or `VideoPixelFormat.RGBA` for four bytes a
 pixel. Drop frames promptly, since held frames hold decoder buffers. `resize`
 is best effort: only NVDEC has a built-in scaler, so read each frame's own
-`width()` and `height()` rather than assuming it took.
+`width()` and `height()` rather than assuming it took. `VideoDecoderOutput(surface=True)`
+keeps the decoder's surface for `frame.surface()` instead of downloading it. Only macOS
+has one, so `decode_video` fails as unsupported elsewhere.
 
 ## Connection stats
 

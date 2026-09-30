@@ -112,7 +112,9 @@ converts it on demand: `VideoPixelFormat.I420`, or `VideoPixelFormat.RGBA` for
 four bytes a pixel. Close frames promptly, since held frames hold decoder
 buffers. `resize` is best effort: only NVDEC has a built-in scaler, and
 MediaCodec is not it, so read each frame's own `width()` and `height()` rather
-than assuming it took.
+than assuming it took. `VideoDecoderOutput(surface = true)` keeps the decoder's
+surface for `frame.surface()` instead of downloading it. Only macOS has one, so
+`decodeVideo` fails as unsupported elsewhere.
 
 ## Connection stats
 

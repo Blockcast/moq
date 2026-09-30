@@ -109,7 +109,9 @@ including after the consumer is cancelled. `frame.pixels(format:)` converts it
 on demand: `.i420`, or `.rgba` for four bytes a pixel. Release frames promptly,
 since held frames hold decoder buffers. `resize` is best effort: only NVDEC has
 a built-in scaler, and VideoToolbox is not it, so read each frame's own
-`width()` and `height()` rather than assuming it took.
+`width()` and `height()` rather than assuming it took. `VideoDecoderOutput(surface: true)`
+keeps the decoder's surface for `frame.surface()` instead of downloading it. Only macOS
+has one, so `decodeVideo` fails as unsupported elsewhere.
 
 ## Connection stats
 

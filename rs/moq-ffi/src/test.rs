@@ -2054,10 +2054,10 @@ async fn video_raw_publish_consume() {
 }
 
 /// A decoded frame owns its surface and converts on demand: one frame yields
-/// both CPU layouts, a portable decode has no native view, and the frame stays
+/// both CPU layouts, a portable decode has no surface view, and the frame stays
 /// readable after its consumer is cancelled and dropped and the track is gone.
-/// A native decode keeps whatever surface the picked backend produced (CUDA
-/// where NVDEC is present, CPU from openh264) and still downloads on demand.
+/// A surface decode keeps the decoder's pixel buffer and still downloads on
+/// demand, where the platform has one (macOS) and is refused where it has none.
 #[cfg(feature = "video")]
 #[tokio::test]
 async fn video_decode_frame_ownership() {
@@ -2112,17 +2112,21 @@ async fn video_decode_frame_ownership() {
 		.decode_video(track.clone(), rendition.clone(), MoqVideoDecoderOutput::default())
 		.await
 		.unwrap();
-	let native = broadcast_consumer
-		.decode_video(
-			track.clone(),
-			rendition.clone(),
-			MoqVideoDecoderOutput {
-				native: true,
-				..Default::default()
-			},
-		)
-		.await
-		.unwrap();
+	let surface_output = MoqVideoDecoderOutput {
+		surface: true,
+		..Default::default()
+	};
+	let retaining = broadcast_consumer
+		.decode_video(track.clone(), rendition.clone(), surface_output)
+		.await;
+	// A platform with no surface variant refuses the opt-in up front, rather than
+	// decoding to a surface the caller can neither view nor always download.
+	let retaining = if cfg!(target_os = "macos") {
+		Some(retaining.unwrap())
+	} else {
+		assert!(matches!(retaining, Err(MoqError::Unsupported)));
+		None
+	};
 
 	// Keep the encoder fed so both decoders see frames after they joined.
 	for i in 10..40u64 {
@@ -2142,23 +2146,34 @@ async fn video_decode_frame_ownership() {
 			.expect("expected a frame")
 	};
 	let frame = next(&portable).await;
-	let retained = next(&native).await;
+	let retained = match &retaining {
+		Some(decoder) => Some(next(decoder).await),
+		None => None,
+	};
 
 	// Release everything upstream of the frames before reading them.
 	portable.cancel();
-	native.cancel();
-	drop((portable, native));
+	if let Some(decoder) = &retaining {
+		decoder.cancel();
+	}
+	drop((portable, retaining));
 	video.finish().unwrap();
 	broadcast.close().unwrap();
 
-	assert_eq!((retained.width(), retained.height()), (320, 240));
-	assert_eq!(
-		retained.pixels(MoqVideoPixelFormat::I420).unwrap().len(),
-		320 * 240 * 3 / 2
-	);
+	if let Some(retained) = retained {
+		assert_eq!((retained.width(), retained.height()), (320, 240));
+		assert!(
+			matches!(retained.surface(), Some(MoqVideoSurface::PixelBuffer { pointer }) if pointer != 0),
+			"a surface decode on macOS retains the pixel buffer"
+		);
+		assert_eq!(
+			retained.pixels(MoqVideoPixelFormat::I420).unwrap().len(),
+			320 * 240 * 3 / 2
+		);
+	}
 
 	assert_eq!((frame.width(), frame.height()), (320, 240));
-	assert!(frame.native().is_none(), "a portable decode holds CPU pixels");
+	assert!(frame.surface().is_none(), "a portable decode holds CPU pixels");
 
 	let i420 = frame.pixels(MoqVideoPixelFormat::I420).unwrap();
 	assert_eq!(i420.len(), 320 * 240 * 3 / 2);

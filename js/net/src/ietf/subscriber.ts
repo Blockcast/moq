@@ -533,14 +533,15 @@ export class Subscriber {
 		// would miss the local side going away and leave it serving a track nobody reads.
 		// Demand returning before we commit is not abandonment, matching the serving loop.
 		const waitAbandoned = async (): Promise<null> => {
+			const demand = producer.demand();
 			// An info-only lookup attaches no subscriber yet still waits on SUBSCRIBE_OK for
 			// the track info, so only demand that arrived and then left is abandonment.
-			while (!producer.used.peek() && producer.closed.peek() === undefined) {
-				await Signal.race(producer.used, producer.closed);
+			while (!demand.used.peek() && demand.closed.peek() === undefined) {
+				await Signal.race(demand.used, demand.closed);
 			}
 			for (;;) {
-				await producer.unused();
-				if (producer.closed.peek() !== undefined || !producer.used.peek()) return null;
+				await demand.unused();
+				if (demand.closed.peek() !== undefined || !demand.used.peek()) return null;
 			}
 		};
 
@@ -627,9 +628,10 @@ export class Subscriber {
 			// wake is level-triggered: re-check demand so a subscriber that returns before we tear
 			// down resumes on the same stream.
 			let terminal = localEnded;
+			const demand = producer.demand();
 			for (;;) {
-				const reason = await race([done, producer.unused().then(() => idle)]);
-				if (reason === idle && producer.closed.peek() === undefined && producer.used.peek()) continue;
+				const reason = await race([done, demand.unused().then(() => idle)]);
+				if (reason === idle && demand.closed.peek() === undefined && demand.used.peek()) continue;
 				terminal = reason;
 				break;
 			}
