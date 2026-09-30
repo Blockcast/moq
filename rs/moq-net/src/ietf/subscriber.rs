@@ -4733,9 +4733,10 @@ mod tests {
 	/// Regression: a publisher that declares no identity of its own contributes
 	/// `Hop::UNKNOWN` as the first hop, which identifies nothing. A repeat NAMESPACE
 	/// is still the same advertisement being repriced (the expected update, and how a
-	/// relay signals that it started carrying the namespace), so the source and every
-	/// live subscription on it must survive. Reading the repeat as a new publisher
-	/// detached the source milliseconds after SUBSCRIBE went out.
+	/// relay signals that it started carrying the namespace), so the route stays
+	/// attached and every live subscription on it drains rather than ending; only new
+	/// requests treat it as a new source. Detaching the route instead ended the source
+	/// milliseconds after SUBSCRIBE went out.
 	#[tokio::test(start_paused = true)]
 	async fn anonymous_publisher_survives_a_repricing_update() {
 		let (mut subscriber, origin) = cluster_subscriber(crate::Hop::new(1).unwrap());

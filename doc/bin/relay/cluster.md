@@ -30,10 +30,12 @@ are spliced in. If no compatible source remains, the track fails with
 identity.
 
 A route whose original publisher (its first hop) changes is updated in place on
-both wire protocols, so the broadcast never briefly vanishes downstream.
-Subscriptions already in flight keep draining the old publisher until it ends
-and are never spliced onto the new one. New requests resolve through the updated
-route as a fresh broadcast, without the old publisher's track properties.
+both wire protocols, so the broadcast never briefly vanishes downstream. An
+update to a route whose first hop is 0 counts as a new source too, since nothing
+shows it is the same publisher. Either way, subscriptions already in flight keep
+draining the old source until it ends and are never spliced onto the new one.
+New requests resolve through the updated route as a fresh broadcast, without the
+old source's track properties.
 
 ## Topology
 

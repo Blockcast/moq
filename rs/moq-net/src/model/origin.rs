@@ -737,6 +737,10 @@ struct RouteEntry {
 	/// through it. A broadcast is in the table from creation but serves nobody,
 	/// locally or remotely, until it announces.
 	advertised: bool,
+	/// Bumped by each update that makes the entry a new source: a first hop
+	/// that changed, or one that names nobody. An anonymous front serves only
+	/// the generation it started on.
+	generation: u64,
 	/// Whether a peer the chain passes through has since withdrawn this prefix.
 	/// The route was derived from that peer's advertisement, so it serves nobody
 	/// until the peer announces again. See [`Dynamic::withdrawn`].
@@ -753,6 +757,11 @@ impl RouteEntry {
 	/// Whether cursors see the entry and requests resolve through it.
 	fn live(&self) -> bool {
 		self.advertised && !self.stale
+	}
+
+	/// Whether the first hop names nobody, so no update can prove continuity.
+	fn first_unknown(&self) -> bool {
+		self.hops.iter().next().is_none_or(|first| *first == Hop::UNKNOWN)
 	}
 
 	fn is_anonymous(&self) -> bool {
@@ -780,8 +789,7 @@ impl RouteEntry {
 			Pin::Any => true,
 			Pin::Local => self.local,
 			Pin::Publisher(first) => self.hops.iter().next() == Some(&first),
-			// An update that names a publisher is a different one, even in place.
-			Pin::Route(id) => self.id == id && self.hops.iter().next().is_none_or(|first| *first == Hop::UNKNOWN),
+			Pin::Route { id, generation } => self.id == id && self.generation == generation && self.first_unknown(),
 		}
 	}
 
@@ -1725,6 +1733,7 @@ impl Announcing {
 				server: serving.server.clone(),
 				source: serving.source.clone(),
 				advertised: serving.advertised,
+				generation: 0,
 				stale,
 				claim: claim.clone(),
 			});
@@ -1822,12 +1831,16 @@ impl AnnounceProducer {
 			let Some(entry) = shared.routes.entry_mut(prefix, *id) else {
 				return Err(Error::Closed);
 			};
-			// A new first hop is a new publisher: a later request goes back to the
-			// handler rather than joining what the old one served.
-			if entry.hops.iter().next() != route.hops.iter().next()
-				&& let Some(server) = &entry.server
-			{
-				drop(std::mem::take(&mut server.lock().served));
+			// A new first hop is a new publisher, and an unknown one cannot prove it
+			// is the same: either way a later request goes back to the handler
+			// rather than joining what was served before.
+			let first = route.hops.iter().next();
+			let unknown = first.is_none_or(|first| *first == Hop::UNKNOWN);
+			if unknown || entry.hops.iter().next() != first {
+				entry.generation += 1;
+				if let Some(server) = &entry.server {
+					drop(std::mem::take(&mut server.lock().served));
+				}
 			}
 			entry.hops = route.hops.clone();
 			entry.stale = stale;
@@ -2329,6 +2342,7 @@ async fn run_front(task: FrontTask) {
 				route: entry.id,
 				first: entry.hops.iter().next().copied(),
 				local: entry.local,
+				generation: entry.generation,
 			});
 		let serving_closing = front
 			.serving()
@@ -2358,6 +2372,7 @@ async fn run_front(task: FrontTask) {
 											route,
 											first: entry.hops.iter().next().copied(),
 											local: entry.local,
+											generation: entry.generation,
 										},
 										entry.source.clone(),
 										entry.server.clone(),
@@ -3379,9 +3394,9 @@ impl Dynamic {
 	/// Re-price the route in place: replace its hops and cost.
 	///
 	/// Consumers observe another active update for the same prefix; sessions
-	/// forward it as a restart, so route churn never looks like new content. A
-	/// new first hop is a new publisher: broadcasts already served from the old
-	/// one drain, and later requests reach the handler again. The prefix is fixed
+	/// forward it as a restart. A new first hop, or an unknown one, is a new
+	/// source: broadcasts already served drain, and later requests reach the
+	/// handler again. The prefix is fixed
 	/// at announce time: to move a route, drop this and call
 	/// [`Producer::dynamic`] again. Fails with [`Error::Closed`] once the origin's
 	/// [`Driver`] has been dropped.
@@ -4077,7 +4092,7 @@ impl Consumer {
 	/// announced the route. When its serving source dies or a better qualifying
 	/// route appears, the front re-splices through the best route sharing its
 	/// first hop at a group boundary, invisibly to subscribers. A change that
-	/// does not preserve the first hop ends the broadcast instead, as does its
+	/// does not preserve a known first hop ends the broadcast instead, as does its
 	/// route retracting with no replacement, and the next request re-serves the
 	/// path. Tracks already in flight carry on to their own end.
 	///
@@ -6839,14 +6854,25 @@ mod tests {
 	}
 
 	/// A route updated in place to a new first hop names a new publisher, whether the
-	/// front started anonymous or named. The in-flight subscription drains the old copy
-	/// until it ends and never splices the new one; a new request gets a fresh front
-	/// through the new publisher, free of the old broadcast's track info.
+	/// front started anonymous or named, and an update that leaves the first hop unknown
+	/// cannot prove it is the same one. Either way the in-flight subscription drains the
+	/// old copy until it ends and never splices the new one; a new request gets a fresh
+	/// front through the updated route, free of the old broadcast's track info.
 	#[tokio::test]
-	async fn a_first_hop_update_drains_the_old_publisher() {
-		for first in [&[][..], &[0][..], &[10][..]] {
+	async fn a_new_source_drains_the_old_one() {
+		let cases: [(&[u64], &[u64]); 6] = [
+			(&[], &[11]),
+			(&[0], &[11]),
+			(&[10], &[11]),
+			(&[10], &[0]),
+			(&[0], &[0]),
+			(&[], &[]),
+		];
+		for (first, next) in cases {
 			let (mut rig, server, _source) = ResumeRig::new(first).await;
-			server.update(Route::default().with_hops(hops(&[11]))).unwrap();
+			server
+				.update(Route::default().with_hops(hops(next)).with_cost(3))
+				.unwrap();
 
 			// The old copy keeps flowing to the subscription already reading it.
 			let mut group = rig.incumbent_track.append_group().unwrap();
@@ -6857,7 +6883,7 @@ mod tests {
 				.expect("the in-flight subscription survives the update")
 				.expect("track ended early");
 			let frame = group.read_frame().await.expect("read frame").expect("frame");
-			assert_eq!(&frame.payload[..], b"draining", "first hop {first:?}");
+			assert_eq!(&frame.payload[..], b"draining", "{first:?} to {next:?}");
 
 			// A new request is a new broadcast from the new publisher, whose track info
 			// differs from what the old front cached.
@@ -6876,7 +6902,7 @@ mod tests {
 			let resolved = pending.await.expect("resolves through the new publisher");
 			assert!(
 				!resolved.is_clone(&rig.resolved),
-				"first hop {first:?} joined the old front"
+				"{first:?} to {next:?} joined the old front"
 			);
 			let mut fresh = resolved
 				.track("video")
@@ -6897,7 +6923,7 @@ mod tests {
 			let end = next_group(&mut rig.subscription).await;
 			assert!(
 				!matches!(end, Ok(Some(_))),
-				"first hop {first:?} spliced the new publisher into a live subscription"
+				"{first:?} to {next:?} spliced the new publisher into a live subscription"
 			);
 		}
 	}

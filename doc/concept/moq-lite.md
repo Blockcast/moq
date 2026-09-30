@@ -85,9 +85,9 @@ newer, a clean end requires `SUBSCRIBE_END` before the publisher's FIN. A FIN
 without that declaration fails the subscription with `ProtocolViolation`; older
 moq-lite versions use FIN alone. moq-transport requires `PUBLISH_DONE` before FIN.
 moq-transport sessions behave the same when a namespace is withdrawn. A route
-update that changes its first hop, the original publisher, is not a retraction:
-subscriptions in flight drain the old publisher, and new requests resolve
-through the new one.
+update that changes its first hop, the original publisher, or whose first hop is
+0 is a new source but not a retraction: subscriptions in flight drain the old
+source, and new requests resolve through the updated route.
 
 ### Hidden broadcasts
 

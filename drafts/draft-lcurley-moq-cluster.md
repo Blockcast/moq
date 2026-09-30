@@ -227,10 +227,11 @@ A receiver MUST NOT treat the repeat as a duplicate or a protocol violation.
 An advertisement lives as long as its stream, so an update on a new stream would leave two streams claiming one namespace.
 An endpoint MUST NOT open a second stream for an advertisement it already maintains on the session.
 
-An update replaces the old parameters atomically, so a receiver MUST NOT tear down subscriptions or drop cached state because one arrived.
-If the first HOP_PATH entry is unchanged the content is continuous and subscriptions MAY resume on the new route at a group boundary, even when that entry is 0: there is one advertisement, and its stream is the continuity.
-If the first entry changed, the publisher changed, and the endpoint still sends an ordinary update.
-The receiver keeps each subscription it is already serving on the old source until that source ends, MUST NOT resume or splice it onto the updated route, and serves new requests from the updated route without state cached from the old publisher.
+An update replaces the old parameters atomically, so a receiver MUST NOT tear down subscriptions because one arrived.
+If the first HOP_PATH entry is unchanged and non-zero the content is continuous and subscriptions MAY resume on the new route at a group boundary.
+Otherwise the update is a new source: the first entry changed, or it is 0 and cannot show that the publisher did not change ({{zero}}).
+The endpoint still sends it as an ordinary update.
+The receiver keeps each subscription it is already serving on the old source until that source ends, MUST NOT resume or splice it onto the updated route, and serves new requests from the updated route without state cached from the old source.
 
 The expected update is a ROUTE_COST change, which is how a relay signals that it started or stopped carrying the namespace.
 
@@ -332,6 +333,7 @@ This document requests one registration in the "REQUEST_ERROR Codes" registry.
 - Defined request resolution against the longest covering prefix and the NO_CAPACITY refusal with its single re-resolution; any other refusal is terminal, including between several publishers of one namespace.
 - A relay does not advertise a namespace because it resolved it; the publisher advertises the concrete namespace once producing.
 - A change of original publisher is an ordinary update instead of a withdrawal and a new advertisement. Subscriptions already served drain the old source; new requests take the updated route.
+- An update whose first HOP_PATH entry is 0 is a new source like a change of publisher, not a continuation.
 
 ## moq-cluster-01
 - Assigned identities are local selection state and MUST NOT be forwarded.

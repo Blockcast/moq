@@ -21,12 +21,14 @@ use std::{
 use crate::{Error, Hop, runtime::Instant, track};
 
 /// A route the table selected for the front: the entry id, the endpoint that
-/// originated it, and whether it is a broadcast published on this origin.
+/// originated it, whether it is a broadcast published on this origin, and how
+/// many times an update made it a new source.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Candidate {
 	pub route: u64,
 	pub first: Option<Hop>,
 	pub local: bool,
+	pub generation: u64,
 }
 
 /// Why an upstream request through a route did not produce a source.
@@ -138,9 +140,9 @@ pub(super) enum Identity {
 	Local,
 	/// The serving route's first hop was absent or [`Hop::UNKNOWN`], which
 	/// identifies nobody: the front cannot resume through any other route, so
-	/// its source ending, `route` leaving the table, or `route` gaining a first
-	/// hop ends it.
-	Anonymous { route: u64 },
+	/// its source ending, `route` leaving the table, or any update to `route`
+	/// (a new `generation`) ends it.
+	Anonymous { route: u64, generation: u64 },
 	/// The first hop of the serving route. Routes sharing it are the same
 	/// origin reached another way and safe to resume through.
 	Publisher(Hop),
@@ -155,9 +157,9 @@ pub(super) enum Pin {
 	Local,
 	/// Only routes originated by this first hop.
 	Publisher(Hop),
-	/// Only this route, while its publisher stays unknown: the front never fails
-	/// over, and an update naming a publisher ends it.
-	Route(u64),
+	/// Only this generation of this route, while its publisher stays unknown:
+	/// the front never fails over, and any update to the route ends it.
+	Route { id: u64, generation: u64 },
 }
 
 impl Identity {
@@ -165,7 +167,7 @@ impl Identity {
 		match self {
 			Self::Undetermined => Pin::Any,
 			Self::Local => Pin::Local,
-			Self::Anonymous { route } => Pin::Route(route),
+			Self::Anonymous { route, generation } => Pin::Route { id: route, generation },
 			Self::Publisher(hop) => Pin::Publisher(hop),
 		}
 	}
@@ -440,7 +442,10 @@ impl Front {
 		self.identity = match (candidate.local, candidate.first) {
 			(true, _) => Identity::Local,
 			(false, Some(hop)) if hop != Hop::UNKNOWN => Identity::Publisher(hop),
-			(false, _) => Identity::Anonymous { route: candidate.route },
+			(false, _) => Identity::Anonymous {
+				route: candidate.route,
+				generation: candidate.generation,
+			},
 		};
 	}
 
@@ -678,6 +683,7 @@ mod tests {
 			route,
 			first: Some(hop(first)),
 			local: false,
+			generation: 0,
 		}
 	}
 
@@ -686,6 +692,7 @@ mod tests {
 			route,
 			first: None,
 			local: true,
+			generation: 0,
 		}
 	}
 
@@ -886,6 +893,7 @@ mod tests {
 			route: 1,
 			first: Some(Hop::UNKNOWN),
 			local: false,
+			generation: 0,
 		};
 		let mut front = serving(candidate, 100);
 		assert_actions(
@@ -923,9 +931,10 @@ mod tests {
 			route: 1,
 			first: Some(Hop::UNKNOWN),
 			local: false,
+			generation: 0,
 		};
 		let mut front = serving(candidate, 100);
-		assert_eq!(front.pin(), Pin::Route(1));
+		assert_eq!(front.pin(), Pin::Route { id: 1, generation: 0 });
 		assert_actions(
 			front.step(Event::SourceClosed { source: 100 }),
 			&[Action::Detach { source: 100 }, Action::End { err: Error::Dropped }],
