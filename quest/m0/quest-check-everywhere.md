@@ -21,7 +21,3 @@
   against `origin/$GITHUB_BASE_REF`, which is empty on a push.
 
 Public API: none. Wire: none.
-
-## Required
-
-- #4428 merged to `dev`

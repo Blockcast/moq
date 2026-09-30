@@ -34,8 +34,3 @@ config instead of quietly refusing every session.
 
 Public API: breaks `moq_relay::auth::Config::validate` and `init`, removes
 `validate_client_ca`, so this targets `dev`. Wire: none.
-
-## Required
-
-- #4364 merged to `main`
-- `dev` has merged `main` after #4364 lands
