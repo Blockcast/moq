@@ -645,6 +645,11 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 
 		if is_clock {
+			// A clock-only stream never flushes, but sections are stamped with its PTS, so it
+			// anchors the catalog here like a flushed PES would.
+			if let Some(pts) = pes.header.pts {
+				self.catalog.anchor(Timestamp::from_scale(pts.as_u64(), 90_000)?)?;
+			}
 			return Ok(());
 		}
 
@@ -3237,6 +3242,31 @@ mod test {
 		assert_eq!(
 			import.last_pts, after_video,
 			"a later private PES must not overwrite the clock"
+		);
+	}
+
+	// MPEG-2 video only drives the section clock, so with nothing else to flush it must still
+	// anchor the catalog, or cues stamped with its PTS map to the construction-time clock.
+	#[test]
+	fn a_clock_only_stream_anchors_the_catalog() {
+		const VIDEO_PID: u16 = 0x0050;
+		const PTS_SECS: u64 = 3600;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		import
+			.decode(&synth_pmt(&[(StreamType::Mpeg2Video, VIDEO_PID)], true))
+			.unwrap();
+		import
+			.decode(pes_packet(VIDEO_PID, PTS_SECS * 90_000).as_slice())
+			.unwrap();
+
+		let now = catalog.clock().now().as_micros() / 1_000_000;
+		assert!(
+			(PTS_SECS as u128..PTS_SECS as u128 + 5).contains(&now),
+			"catalog clock reads {now}s, not the first video PTS"
 		);
 	}
 
