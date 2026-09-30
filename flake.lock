@@ -65,17 +65,17 @@
         ]
       },
       "locked": {
-        "lastModified": 1790781416,
-        "narHash": "sha256-I5Xrn5CSKWBJCDVSFmrPUYdN4ngtlILajfBtzRrNCQI=",
+        "lastModified": 1790783070,
+        "narHash": "sha256-3yTd+7K2g8YciThCpiS3Xs3zsivacJnW8oHfoYGCoKs=",
         "owner": "kixelated",
         "repo": "quest",
-        "rev": "72eae0b379368bcdc517df1ec9d015f36db3f5e6",
+        "rev": "1a126bbd67f7963f1eb8d4cc303dad68a0922c95",
         "type": "github"
       },
       "original": {
         "owner": "kixelated",
         "repo": "quest",
-        "rev": "72eae0b379368bcdc517df1ec9d015f36db3f5e6",
+        "rev": "1a126bbd67f7963f1eb8d4cc303dad68a0922c95",
         "type": "github"
       }
     },
