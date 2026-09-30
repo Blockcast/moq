@@ -5,7 +5,7 @@ import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
 import { controlTimeout, error, ProtocolViolation, reason, StreamCode, StreamError, sessionCause } from "../error.ts";
 import * as netGroup from "../group.ts";
-import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
+import { Cost, type Hop, MAX_HOPS, type Route, randomHop, routesEqual, stampHops, UNKNOWN_HOP } from "../hop.ts";
 import { groupBounds, hiddenBelow, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
 import { type OpenOptions, type Reader, Stream } from "../stream.ts";
@@ -137,6 +137,10 @@ export class Subscriber {
 	// Dedup consumed broadcasts per path: repeat consume() calls share one subscription.
 	#consumes = new BroadcastCache();
 
+	// A random Hop ID of this connection's own, written as the first hop of any chain that
+	// names no publisher, so a publisher that reconnects reads as a new one.
+	#stamp: Hop;
+
 	// Dedup in-flight one-shot fetches, keyed by [broadcast, track, sequence]. Concurrent (or
 	// repeat, while still open) fetchGroup() calls for the same group share one FETCH stream and
 	// each get an independent mirror; the entry is evicted once the group closes.
@@ -171,6 +175,7 @@ export class Subscriber {
 		this.#quic = quic;
 		this.version = version;
 		this.hop = hop;
+		this.#stamp = randomHop();
 		this.#probe = probe;
 		this.#peerSetup = peerSetup;
 	}
@@ -244,9 +249,9 @@ export class Subscriber {
 			// the map instead would let a later announce take the path, and the skipped one's
 			// `endedId` would then retract that one's state.
 			//
-			// `publisher` is what lets a restart tell a route change (same publisher,
-			// subscriptions resume) from a replacement (a new generation took the path,
-			// nothing carries over).
+			// `publisher` is what lets a restart tell a route change (same publisher) from a
+			// new publisher on the route, whose content the next consume must not share
+			// with the old one's.
 			type Advertisement = {
 				publisher: Hop | undefined;
 				live: boolean;
@@ -265,16 +270,16 @@ export class Subscriber {
 					// they go on record and obey the same one-per-path rule: the initial set
 					// naming a path twice is the same violation as two ANNOUNCE_STARTs for it,
 					// and the record is what catches either. Draft01/02 carry no hop ids and no
-					// ANNOUNCE_OK, so nothing names the publisher.
+					// ANNOUNCE_OK, so this connection's stamp names the publisher.
 					for (const suffix of init.suffixes) {
 						const path = Path.join(prefix, suffix);
 						if (advertised.has(path)) {
 							throw new ProtocolViolation(`duplicate announce for ${path}`);
 						}
-						const route = { hops: [UNKNOWN_HOP], cost: Cost.zero };
+						const route = { hops: [this.#stamp, UNKNOWN_HOP], cost: Cost.zero };
 						const live = visible(path);
 						const captures = scopeCaptures(scope, path);
-						advertised.set(path, { publisher: undefined, live, route, captures });
+						advertised.set(path, { publisher: this.#stamp, live, route, captures });
 						if (!live) continue;
 						console.debug(`announced: broadcast=${path} active=true`);
 						announced.append({ prefix: path, captures, kind: "announced", route });
@@ -401,23 +406,17 @@ export class Subscriber {
 				}
 
 				// The first hop identifies the original publisher; an empty chain means the
-				// peer itself originated it. See `restart_announce` in the Rust subscriber.
-				const publisher = hops?.[0] ?? responderOrigin;
-
-				// A publisher with no identity (an empty chain from a peer that withheld its
-				// own id, or a lite-03 UNKNOWN placeholder) never proves continuity: two such
-				// advertisements can be unrelated publishers. Mirrors the
-				// `publisher == Hop::UNKNOWN` arm of the Rust `restart_announce`.
-				const identified = publisher !== undefined && publisher !== UNKNOWN_HOP;
-				const fullHops =
+				// peer itself originated it. One that names nobody (lite-01..03, or a peer
+				// reporting 0) gets this connection's stamp in front of its 0.
+				const fullHops = stampHops(
 					hops !== undefined && responderOrigin !== undefined
 						? [...hops, responderOrigin]
-						: [...(hops ?? [])];
-				// A received empty list is the anonymous mark, not a local announcement.
-				if (fullHops.length === 0) fullHops.push(UNKNOWN_HOP);
+						: [...(hops ?? [])],
+					this.#stamp,
+				);
 				// Appending a withheld AnnounceOk(0) onto a 32-entry list is the same
 				// drop Rust's Hops::push makes: do not expose an overlong chain.
-				if (fullHops.length > MAX_HOPS) {
+				if (fullHops === undefined || fullHops.length > MAX_HOPS) {
 					console.debug(`announced: broadcast=${path} dropped (hop chain at MAX_HOPS)`);
 					advertised.set(path, {
 						publisher: undefined,
@@ -427,6 +426,7 @@ export class Subscriber {
 					});
 					continue;
 				}
+				const publisher = fullHops[0];
 				const route: Route = { hops: fullHops, cost: cost ?? Cost.zero };
 				const captures = scopeCaptures(scope, path);
 				if (!visible(path)) {
@@ -435,30 +435,22 @@ export class Subscriber {
 				}
 
 				// A second advertisement for a path we already carry is a restart: either an
-				// explicit ANNOUNCE_UPDATE, or (lite-05) a duplicate ANNOUNCE.
+				// explicit ANNOUNCE_UPDATE, or (lite-05) a duplicate ANNOUNCE. It updates the
+				// route in place, so a forwarder re-prices without retracting.
 				const previous = advertised.get(path);
 				if (previous?.live) {
-					if (identified && previous.publisher === publisher) {
-						// Same publisher, new route. In-flight subscriptions resume across it.
-						// Emit the route so a forwarder can re-price without retracting.
-						if (!routesEqual(previous.route, route)) {
-							advertised.set(path, { publisher, live: true, route, captures });
-							console.debug(`announced: broadcast=${path} rerouted`);
-							announced.append({ prefix: path, captures, kind: "updated", route });
-						} else {
-							console.debug(`announced: broadcast=${path} rerouted`);
-						}
-						continue;
+					// A different publisher took the path. Subscriptions already open drain
+					// the old copy, but the next consume starts fresh rather than reusing the
+					// old publisher's cached track info.
+					if (previous.publisher !== publisher) this.#consumes.evict(path);
+					advertised.set(path, { publisher, live: true, route, captures });
+					console.debug(`announced: broadcast=${path} rerouted`);
+					if (!routesEqual(previous.route, route)) {
+						announced.append({ prefix: path, captures, kind: "updated", route });
 					}
-
-					// A different publisher took the path, so cached track info and existing
-					// subscriptions must not carry over. Surface a real end before the start.
-					retract();
+					continue;
 				}
 
-				// After `retract()`, which clears the entry: the path is advertised again, by
-				// whoever just took it over. Recording it before would leave nothing behind, so
-				// the *next* takeover would read as a first announcement and skip its own end.
 				advertised.set(path, { publisher, live: true, route, captures });
 
 				console.debug(`announced: broadcast=${path} active=true`);

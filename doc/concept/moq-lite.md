@@ -72,7 +72,8 @@ that serves only some of the paths beneath its prefix refuses the rest as they
 are requested. Each route carries the chain of relay identities it passed
 through, which is how forwarding loops are caught, and a cost, which is how a
 subscriber picks among several routes to the same broadcast. A hop of 0 is the
-anonymous mark and travels the chain unchanged. A route that passed through an
+anonymous mark and travels the chain unchanged; when it is the first hop, a relay
+puts a random ID, fresh per connection, in front of it to name the publisher. A route that passed through an
 anonymous hop at any depth ranks below every fully identified route, whatever
 the costs say; among anonymous routes, cost keeps ordering.
 
@@ -91,7 +92,10 @@ in flight alone: each track runs to its own end or failure. On moq-lite 05 and
 newer, a clean end requires `SUBSCRIBE_END` before the publisher's FIN. A FIN
 without that declaration fails the subscription with `ProtocolViolation`; older
 moq-lite versions use FIN alone. moq-transport requires `PUBLISH_DONE` before FIN.
-moq-transport sessions behave the same when a namespace is withdrawn.
+moq-transport sessions behave the same when a namespace is withdrawn. A route
+update that changes its first hop, the original publisher, is not a retraction:
+subscriptions in flight drain the old publisher, and new requests resolve
+through the new one.
 
 ### Hidden broadcasts
 
