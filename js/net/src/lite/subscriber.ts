@@ -80,6 +80,15 @@ function supportsTrackStream(version: Version): boolean {
 	}
 }
 
+// What a subscription has set up so far, so a revocation (or a timeout) can reach it at
+// any stage.
+interface SubscribeSetup {
+	stream?: Stream;
+	producer?: track.Producer;
+	// Set once our grant stops covering the broadcast.
+	revoked?: Error;
+}
+
 interface SubscribeEntry {
 	// The write side: incoming GROUP streams are routed here. The application reads
 	// the matching track.Subscriber it got from broadcast.Consumer.subscribe.
@@ -533,10 +542,29 @@ export class Subscriber {
 			return;
 		}
 		const refused = unauthorized(broadcast);
-		if (this.#denied(broadcast)) {
-			request.reject(refused);
-			return;
+		// Armed before the first check and held to the end, so a shrink while the
+		// subscription sets up is never missed: it resets whatever reached the wire.
+		const state: SubscribeSetup = {};
+		const disposeGrant = this.#grant?.subscribe(() => {
+			if (state.revoked || !this.#denied(broadcast)) return;
+			state.revoked = refused;
+			console.debug(`subscribe revoked: id=${id} broadcast=${broadcast} track=${request.name}`);
+			state.producer?.close(refused);
+			state.stream?.abort(refused);
+		});
+		try {
+			if (this.#denied(broadcast)) {
+				request.reject(refused);
+				return;
+			}
+			await this.#serveSubscribe(id, broadcast, request, state);
+		} finally {
+			disposeGrant?.();
 		}
+	}
+
+	async #serveSubscribe(id: bigint, broadcast: Path.Valid, request: track.Request, state: SubscribeSetup) {
+		const subscription = request.subscription;
 
 		// `timescale` stays undefined until TRACK_INFO (or, on older drafts,
 		// implicit defaults) resolves it; runGroup blocks on it before decoding.
@@ -557,7 +585,6 @@ export class Subscriber {
 
 		// Open the stream under a timeout. The stream handle flows back via `state`
 		// so the timeout path can abort it if it finishes opening after the deadline.
-		const state: { stream?: Stream } = {};
 		const setup = this.#openSubscribe(state, msg, request, id, timescale);
 
 		let opened: { stream: Stream; entry: SubscribeEntry };
@@ -570,8 +597,10 @@ export class Subscriber {
 			console.debug(`subscribe ok: id=${id} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
 			// The setup outlived its deadline waiting for the first response: a control
-			// timeout, not content that arrived late.
-			const e = err instanceof TimeoutError ? controlTimeout(err) : await sessionCause(this.#quic, err);
+			// timeout, not content that arrived late. A revocation says so instead.
+			const e =
+				state.revoked ??
+				(err instanceof TimeoutError ? controlTimeout(err) : await sessionCause(this.#quic, err));
 			request.reject(e);
 			this.#subscribes.delete(id);
 			console.warn(`subscribe error: id=${id} broadcast=${broadcast} track=${request.name} error=${reason(e)}`);
@@ -587,13 +616,6 @@ export class Subscriber {
 
 		const { stream, entry } = opened;
 		const producer = entry.track;
-		// Losing the grant ends the subscription, leaving the session alone.
-		const disposeGrant = this.#grant?.subscribe(() => {
-			if (!this.#denied(broadcast)) return;
-			console.debug(`subscribe revoked: id=${id} broadcast=${broadcast} track=${request.name}`);
-			producer.close(refused);
-			stream.abort(refused);
-		});
 		try {
 			// Watch for subscription changes and send SUBSCRIBE_UPDATE. Lite01/Lite02
 			// don't carry SUBSCRIBE_UPDATE on the wire, so skip the watcher there
@@ -641,7 +663,6 @@ export class Subscriber {
 			console.warn(`subscribe error: id=${id} broadcast=${broadcast} track=${request.name} error=${reason(e)}`);
 			stream.abort(e);
 		} finally {
-			disposeGrant?.();
 			this.#subscribes.delete(id);
 		}
 	}
@@ -656,7 +677,7 @@ export class Subscriber {
 	// SUBSCRIBE is accepted implicitly (no SUBSCRIBE_OK). Older drafts carry no
 	// per-track properties, so they resolve to defaults and just drain SUBSCRIBE_OK.
 	async #openSubscribe(
-		state: { stream?: Stream },
+		state: SubscribeSetup,
 		msg: Subscribe,
 		request: track.Request,
 		id: bigint,
@@ -668,6 +689,7 @@ export class Subscriber {
 		if (supportsTrackStream(this.version)) {
 			// Fetch the immutable properties once via the TRACK stream.
 			const info = await this.#trackInfo(msg.broadcast, msg.track);
+			if (state.revoked) throw state.revoked;
 			producer = request.accept(this.#toModelInfo(info));
 			timescale.set(info.timescale);
 		} else {
@@ -693,8 +715,14 @@ export class Subscriber {
 			requested: msg.startGroup,
 		};
 		this.#subscribes.set(id, entry);
+		state.producer = producer;
 
 		state.stream = await Stream.open(this.#quic);
+		// Revoked while the stream opened: nothing reached the wire yet, so stop here.
+		if (state.revoked) {
+			state.stream.abort(state.revoked);
+			throw state.revoked;
+		}
 		await state.stream.writer.u53(StreamId.Subscribe);
 		await msg.encode(state.stream.writer, this.version);
 

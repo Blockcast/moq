@@ -8,7 +8,7 @@ session's grant ends with `Unauthorized` instead of finishing.
 
 ## Plan
 
-Found by [Origin narrowing](/quest/m1/auth/narrowing.md) (#4560), which gave
+Found by #4560, which gave
 every other JS request a watch armed before its first await. Follow the same
 pattern, and add a regression test where the grant changes during setup and
 mid-fetch.

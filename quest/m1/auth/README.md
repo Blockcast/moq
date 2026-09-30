@@ -39,9 +39,8 @@ Decisions settled while planning, recorded so review does not relitigate them:
   the union and cancels publications and subscriptions that lose authorization.
   Other authorized work continues on the same session. An empty union leaves
   the session connected with no access, so it can accept a fresh token.
-  [Origin narrowing](/quest/m1/auth/narrowing.md) owns the common resize
-  operation; relay token handling requires it rather than shipping a temporary
-  close-on-shrink policy.
+  `auth::Handle::authorize` is the common resize operation; relay token handling
+  uses it rather than shipping a temporary close-on-shrink policy.
 - **A public grant contains publish patterns, subscribe patterns, and an
   expiry**, in the presenter's own root; the presenter never sees the relay-side
   root, and every token in a union shares the connection's root. Unscoped
@@ -92,9 +91,6 @@ existing lite-06 ALPN.
 - [Lite NOT_SUPPORTED](/quest/m1/auth/not-supported.md) - a lite acceptor answers AUTH_ERROR NOT_SUPPORTED after a grant too, and lite messages cap at moq-transport's 65,535 bytes
 - [AUTH violations](/quest/m1/auth/violations.md) - every AUTH protocol violation closes the session in Rust and JS, lite and IETF
 - [JS fetch grant watch](/quest/m1/auth/js-fetch-watch.md) - a JS `fetchGroup` ends `Unauthorized` when its path leaves the grant
-- [Origin narrowing](/quest/m1/auth/narrowing.md) - a live grant narrows in
-  place: subscriptions outside it reset, publishes outside it abort, and relay
-  revalidation stops closing the session
 - [Relay tokens](/quest/m1/auth/relay-refresh.md) - the relay verifies tokens
   sent in band, unions their grants, and cancels only work that loses access
 - [Request tokens](/quest/m1/auth/request-token.md) - an `AUTHORIZATION
