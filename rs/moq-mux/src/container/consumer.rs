@@ -80,8 +80,8 @@ pub struct Consumer<F: Container> {
 	// carried it. `None` until the first frame is delivered.
 	live_edge: Option<(u64, Timestamp)>,
 
-	// The first frame delivered from the latest group, and that group. Group starts never go
-	// backwards, so a later group with a frame below this is malformed.
+	// The first frame delivered from the latest group, and that group. A later group must start
+	// strictly after it, and none of its frames may sit below it.
 	start: Option<(u64, Timestamp)>,
 
 	// The start of the group the cursor most recently left. B-frames, open-GOP pictures, and a
@@ -238,8 +238,13 @@ impl<F: Container> Consumer<F> {
 						if self.floor.is_some_and(|floor| ts.as_micros() < floor.as_micros()) {
 							return Poll::Ready(Err(TimestampRewind.into()));
 						}
-						if self.start.is_none_or(|(start, _)| start != seq) {
-							self.start = Some((seq, ts));
+						match self.start {
+							Some((start, _)) if start == seq => {}
+							// A later group starts strictly after every earlier one.
+							Some((_, previous)) if ts.as_micros() <= previous.as_micros() => {
+								return Poll::Ready(Err(TimestampRewind.into()));
+							}
+							_ => self.start = Some((seq, ts)),
 						}
 						if self.live_edge.is_none_or(|(_, high)| ts.as_micros() > high.as_micros()) {
 							self.live_edge = Some((seq, ts));
@@ -480,7 +485,7 @@ impl<F: Container> Consumer<F> {
 	}
 
 	// A later group with a media timestamp below the latest delivered group's start is malformed:
-	// group starts never go backwards. Markers have no media timestamp, so they are not this check.
+	// group starts strictly increase. Markers have no media timestamp, so they are not this check.
 	fn poll_malformed(&mut self, waiter: &kio::Waiter) -> Result<(), F::Error> {
 		let Some((prev_group, edge)) = self.start else {
 			return Ok(());
@@ -1141,6 +1146,18 @@ mod tests {
 			vec![ts(0), ts(66_000), ts(33_000)]
 		);
 		assert_eq!(consumer.discontinuity(), 0);
+	}
+
+	#[tokio::test]
+	async fn a_group_starting_at_the_previous_start_aborts() {
+		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let mut consumer = Consumer::new(track.subscribe(None), Container::Legacy(crate::container::Kind::Data));
+		write_group(&mut track, 0, &[ts(100_000)]);
+		assert_eq!(consumer.read().await.unwrap().unwrap().timestamp, ts(100_000));
+		write_group(&mut track, 1, &[ts(100_000)]);
+		track.finish().unwrap();
+		let err = consumer.read().await.unwrap_err();
+		assert!(matches!(err, crate::Error::TimestampRewind(_)));
 	}
 
 	/// A keyframe one frame below the previous group's last frame, but above its start, is an

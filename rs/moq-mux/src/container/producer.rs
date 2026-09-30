@@ -68,11 +68,11 @@ pub struct Producer<C: Container, R = ()> {
 	/// for a duration marker when the caller does not pass a bound.
 	end: Option<moq_net::Timestamp>,
 
-	/// Exclusive presentation end of finished groups, where a payload with no timestamp of its
-	/// own lands. Not a floor: a group may start below it.
+	/// Exclusive presentation end of finished groups, where a discontinuity marker lands. Not a
+	/// floor: a group may start below it.
 	live_edge: Option<moq_net::Timestamp>,
 
-	/// The keyframe timestamp that opened the latest group. The next group may not start below it.
+	/// The keyframe timestamp that opened the latest group. The next group starts strictly after it.
 	start: Option<moq_net::Timestamp>,
 	/// The start of the group before the latest one. No frame of the latest group sits below it.
 	floor: Option<moq_net::Timestamp>,
@@ -387,10 +387,16 @@ where
 
 	/// The exclusive presentation end earlier groups have reached, if any.
 	///
-	/// A source with no timestamp of its own (a section, a PES without PTS) lands on it. It is
-	/// not a floor: a keyframe may start below it (see [`write`](Self::write)).
+	/// Not a floor: a keyframe may start below it (see [`write`](Self::write)).
 	pub fn live_edge(&self) -> Option<moq_net::Timestamp> {
 		self.live_edge
+	}
+
+	/// The lowest timestamp the next group may start at: one microsecond past the latest group's
+	/// start. A payload with no timestamp of its own (a section, a PES without PTS) lands here.
+	pub(crate) fn next_start(&self) -> Option<moq_net::Timestamp> {
+		self.start
+			.and_then(|start| add_micros(start, moq_net::Timestamp::from_micros(1).ok()?))
 	}
 
 	/// Write a frame to the track.
@@ -401,18 +407,20 @@ where
 	/// independently decodable (audio) marks only the first frame of each group a keyframe (see
 	/// [`needs_keyframe`](Self::needs_keyframe)) so the group spans more than one frame.
 	///
-	/// Group starts never go backwards: a keyframe below the start of the previous group, or any
-	/// frame below the start of the group before its own, returns
+	/// Group starts strictly increase: a keyframe at or below the start of the previous group, or
+	/// any frame below the start of the group before its own, returns
 	/// [`TimestampRewind`](super::TimestampRewind) without writing, the way an oversized frame is
 	/// refused. That is a restart, which is a new broadcast. Frames may still dip below the
 	/// previous group's content: B-frames, open-GOP leading pictures, and a keyframe that
 	/// overlaps the previous group's last frame.
 	pub fn write(&mut self, frame: Frame) -> crate::Result<()> {
-		let floor = match frame.keyframe {
-			true => self.start,
-			false => self.floor,
+		// A group starts strictly after the previous one; a frame only has to stay at or above
+		// the start of the group before its own.
+		let rewound = match frame.keyframe {
+			true => self.start.is_some_and(|start| !timestamp_lt(start, frame.timestamp)),
+			false => self.floor.is_some_and(|floor| timestamp_lt(frame.timestamp, floor)),
 		};
-		if floor.is_some_and(|floor| timestamp_lt(frame.timestamp, floor)) {
+		if rewound {
 			return Err(super::TimestampRewind.into());
 		}
 
@@ -1465,6 +1473,16 @@ mod tests {
 		producer.finish().unwrap();
 		let groups = collect_payloads(consumer).await;
 		assert_eq!(groups[1][..2], [(150_000, 2), (183_000, 2)]);
+	}
+
+	/// A group starting exactly where the previous one did does not advance: a rewind too.
+	#[tokio::test]
+	async fn a_keyframe_at_the_previous_group_start_is_refused() {
+		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.audio));
+		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Audio));
+		producer.write(frame(100_000, true)).unwrap();
+		let err = producer.write(frame(100_000, true)).unwrap_err();
+		assert!(matches!(err, crate::Error::TimestampRewind(_)));
 	}
 
 	/// A frame below the start of the group before its own reaches back past a whole group.
