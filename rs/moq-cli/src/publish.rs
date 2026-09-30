@@ -378,23 +378,21 @@ impl Publish {
 			#[cfg(feature = "capture")]
 			Source::Capture { catalog, video, audio } => {
 				// Each enabled medium publishes its own track onto the shared
-				// broadcast + catalog. Frames are stamped from the catalog's
-				// advertised clock so HLS/DASH wall times match the mapping on
+				// broadcast + catalog. Both stamp frames on the catalog's
+				// advertised clock, so HLS/DASH wall times match the mapping on
 				// the wire. Video encodes on demand (camera opens only while
 				// subscribed). Both run on this task rather than a spawn: on
 				// macOS the audio future holds ObjC handles across an await,
 				// so it is `!Send`.
-				let clock = catalog.clock();
 				let video_fut = {
 					let broadcast = self.broadcast.clone();
 					let catalog = catalog.clone();
 					async move {
 						match video {
 							Some((config, encode)) => {
-								let mut options = moq_video::encode::CaptureOptions::default();
+								let mut options = moq_video::encode::Capture::default();
 								options.capture = config;
 								options.encode = encode;
-								options.clock = clock;
 								moq_video::encode::publish_capture(broadcast, catalog, options)
 									.await
 									.map_err(anyhow::Error::from)
@@ -408,10 +406,9 @@ impl Publish {
 					async move {
 						match audio {
 							Some((config, encode)) => {
-								let mut options = moq_audio::encode::CaptureOptions::default();
+								let mut options = moq_audio::encode::Capture::default();
 								options.capture = config;
 								options.encode = encode;
-								options.clock = clock;
 								moq_audio::encode::publish_capture(broadcast, catalog, options)
 									.await
 									.map_err(anyhow::Error::from)
