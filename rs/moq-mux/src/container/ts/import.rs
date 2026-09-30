@@ -1113,12 +1113,11 @@ impl<E: catalog::Catalog> SectionStream<E> {
 
 	/// Publish one complete section as a frame in its own group.
 	///
-	/// The clock follows the video's PTS, so it only steps back by a reorder: a B-frame
-	/// presents before the P-frame decoded ahead of it. Group starts strictly increase, so such a
-	/// cue, or one sharing the previous cue's instant, lands just after the previous cue rather
-	/// than shifting every cue after it, which would drift the cue track off the video.
+	/// The clock follows the video's PTS, so it only steps back by a reorder: a B-frame presents before the P-frame decoded ahead of it. Such a cue lands on
+	/// the edge rather than shifting every cue after it, which would drift the cue track off
+	/// the video by the reorder depth at each one.
 	fn emit(&mut self, section: Vec<u8>, pts: Option<Timestamp>) -> anyhow::Result<()> {
-		let timestamp = pts.max(self.track.next_start()).unwrap_or(Timestamp::ZERO);
+		let timestamp = pts.max(self.track.live_edge()).unwrap_or(Timestamp::ZERO);
 		let frame = crate::container::Frame {
 			timestamp,
 			duration: None,
@@ -1214,7 +1213,7 @@ impl<E: catalog::Catalog> VerbatimStream<E> {
 		let pts = match unwrap_pts(&mut self.unwrap, pending.pts)? {
 			Some(pts) => pts,
 			// No clock of its own, so land on the edge.
-			None => self.track.next_start().unwrap_or(Timestamp::ZERO),
+			None => self.track.live_edge().unwrap_or(Timestamp::ZERO),
 		};
 		let frame = crate::container::Frame {
 			timestamp: pts,
@@ -5320,7 +5319,7 @@ mod test {
 		assert!(is_rewind(&err), "{err:?}");
 	}
 
-	/// Group starts strictly increase, and no frame sits below the start of the group before
+	/// Group starts never go backwards, and no frame sits below the start of the group before
 	/// its own, which is what the producer demands. Frames may still present below the previous
 	/// group's content (B-frames, an overlapping keyframe).
 	fn assert_forward(frames: &[crate::container::Frame]) {
@@ -5329,8 +5328,8 @@ mod test {
 			let ts = frame.timestamp.as_micros();
 			if frame.keyframe {
 				assert!(
-					start.is_none_or(|start| ts > start),
-					"a group started at {ts}, not after {start:?}"
+					start.is_none_or(|start| ts >= start),
+					"a group started at {ts} before {start:?}"
 				);
 				floor = start;
 				start = Some(ts);

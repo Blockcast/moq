@@ -104,13 +104,11 @@ sharing the catalog, keeps that one mapping. A clock set with
 `Config::with_clock` is never re-anchored, for a recording whose zero names its
 real start.
 
-Each group starts higher than every group before it. A group starting at or
-before the previous group's start ends the import with `TimestampRewind`, as a
-restarted encoder or a looping file wrapping to the top does, flagged MPEG-TS
-discontinuity or not; republish it as a new broadcast. Audio never goes
-backwards, since each audio frame starts its own group. Video frames may still
-dip below the previous group's content, but not below its start: B-frames, and a
-keyframe overlapping the previous group's last frame. A flagged
+Group starts never go backwards. A group starting before the previous group's
+start ends the import with `TimestampRewind`, as a restarted encoder or a looping
+file wrapping to the top does, flagged MPEG-TS discontinuity or not; republish
+it as a new broadcast. Frames may still dip below the previous group's content:
+B-frames, and a keyframe overlapping the previous group's last frame. A flagged
 MPEG-TS discontinuity that jumps forward continues the broadcast.
 
 ```bash
