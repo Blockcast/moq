@@ -1098,22 +1098,6 @@ fn non_advancing_fragment_decode_time_is_rejected() {
 }
 
 #[test]
-fn seek_resets_fragment_decode_time() {
-	let (ftyp, moov) = decode_init(include_bytes!("test_data/bbb.mp4"));
-	let mut init = Vec::new();
-	ftyp.encode(&mut init).unwrap();
-	moov.encode(&mut init).unwrap();
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
-	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
-	fmp4.decode(&init).unwrap();
-	fmp4.decode(&audio_fragment(4096, 1024, 327)).unwrap();
-	fmp4.seek(1).unwrap();
-	fmp4.decode(&audio_fragment(0, 1024, 327)).unwrap();
-	fmp4.decode(&audio_fragment(1024, 1024, 327)).unwrap();
-}
-
-#[test]
 fn rejected_fragment_preserves_decode_time() {
 	let (ftyp, moov) = decode_init(include_bytes!("test_data/bbb.mp4"));
 	let mut init = Vec::new();
@@ -1393,4 +1377,31 @@ async fn import_refuses_a_restart() {
 		20,
 		"the first session stays published"
 	);
+}
+
+/// Skipping sequences (an HLS media-sequence gap) is not a new timeline: a rewound decode time
+/// after a seek is still refused. Only a signalled discontinuity starts the comparison afresh.
+#[tokio::test]
+async fn seek_keeps_the_decode_time_until_a_discontinuity() {
+	let (init, _, _) = bbb_init();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
+	fmp4.decode(&init).unwrap();
+	fmp4.decode(&live_session(5_000_000, 5)).unwrap();
+
+	fmp4.seek(100).unwrap();
+	let err = fmp4.decode(&live_session(0, 5)).unwrap_err();
+	assert!(
+		matches!(
+			err,
+			crate::Error::Cmaf(crate::container::fmp4::Error::NonMonotonicDecodeTime { .. })
+		),
+		"{err:?}"
+	);
+
+	fmp4.discontinuity();
+	fmp4.seek(200).unwrap();
+	fmp4.decode(&live_session(0, 5))
+		.expect("a signalled discontinuity starts a new timeline");
 }

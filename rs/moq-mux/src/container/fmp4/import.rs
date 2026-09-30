@@ -1013,7 +1013,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Close the current group on every track and open the next one at `sequence`.
 	///
 	/// Broadcast-wide: every track inside this fMP4 import advances together; per-track
-	/// control is intentionally not exposed.
+	/// control is intentionally not exposed. Skipping sequences is not a new timeline, so the
+	/// next fragment must still advance past the last decode time; see
+	/// [`discontinuity`](Self::discontinuity).
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		for track in self.tracks.values_mut() {
 			track.estimator.cut(None);
@@ -1022,9 +1024,16 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				g.finish()?;
 			}
 			track.pending_sequence = Some(sequence);
-			track.last_decode_time = None;
 		}
 		Ok(())
+	}
+
+	/// The source signalled a new timeline (an HLS `EXT-X-DISCONTINUITY`), so the next
+	/// fragment's decode time is not compared with the last one on each track.
+	pub fn discontinuity(&mut self) {
+		for track in self.tracks.values_mut() {
+			track.last_decode_time = None;
+		}
 	}
 }
 
