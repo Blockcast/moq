@@ -35,9 +35,12 @@ relay bounds a sparse FETCH only if the model can request ranges:
   relay never probes upstream one group at a time. Upstream, each run of
   locally missing groups becomes one standalone range FETCH, capped below the
   upstream's live group (which arrives via SUBSCRIBE), so it never blocks.
-  Fetching the live group through FETCH is what moq-transport forbids today.
-  Downstream, an IETF FETCH is served from the model's ranges, capped at the
-  Largest Object.
+  moq-transport caps a FETCH at the Largest Object, so it can return the live
+  group's existing prefix but never wait for its future objects. Open: whether
+  the current joining FETCH for that prefix (a SUBSCRIBE starting mid-group
+  whose head isn't cached) stays, which today's bridge relies on. Downstream,
+  an IETF FETCH is served from the model's ranges, capped at the Largest
+  Object.
 - The relay half of [fetch-span](/quest/m1/moxygen/README.md) (#4558) moves
   here; #4558 lands only the no-handler skip.
 
