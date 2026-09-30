@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { Signal } from "@moq/signals";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
-import { error, reason, StreamCode, StreamError } from "../error.ts";
+import { error, fromTransport, reason, StreamCode, StreamError } from "../error.ts";
 import { HopSchema, isAnonymous, MAX_HOPS, Route, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
 import { Writer } from "../stream.ts";
@@ -802,4 +802,86 @@ test("a fetch started after the subscriber closes rejects without opening a stre
 	const err = await subscriber.fetchGroup(Path.from("room"), "video", 0).catch((err: unknown) => err);
 	expectCut(err, undefined);
 	expect(streams.length).toBe(0);
+});
+
+test("an already-aborted fetch rejects without opening a stream", async () => {
+	const { quic, streams } = fakeSession();
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+	const cause = new Error("gone");
+
+	const err = await subscriber
+		.fetchGroup(Path.from("room"), "video", 0, { signal: AbortSignal.abort(cause) })
+		.catch((err: unknown) => err);
+	expect(err).toBe(cause);
+	expect(streams.length).toBe(0);
+});
+
+// Coalesced fetches share one FETCH stream. An abort releases only that caller's share; the
+// stream is cancelled once the last sharer leaves, before its FETCH is sent if it can be.
+test("one of two fetch sharers aborting leaves the other's fetch", async () => {
+	const { quic, streams } = fakeSession();
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+
+	const controller = new AbortController();
+	const a = subscriber.fetchGroup(Path.from("room"), "video", 0, { signal: controller.signal });
+	const b = subscriber.fetchGroup(Path.from("room"), "video", 0);
+
+	await drainUntil(() => streams.length === 1);
+	await answerTrackInfo(streams[0]);
+	await drainUntil(() => streams.length === 2);
+	await streams[1].reading;
+
+	const cause = new Error("gone");
+	controller.abort(cause);
+	expect(await a.catch((err: unknown) => err)).toBe(cause);
+
+	let aborted = false;
+	void streams[1].aborted.then(() => {
+		aborted = true;
+	});
+	// An empty-group FIN accepts the fetch.
+	streams[1].inbound.close();
+	const group = await b;
+	expect(await group.readFrame()).toBeUndefined();
+	expect(aborted).toBe(false);
+
+	subscriber.close();
+});
+
+test.each([
+	["the TRACK_INFO", "track"],
+	["the FETCH", "fetch"],
+] as const)("the last fetch sharer aborting during %s cancels it", async (_, stage) => {
+	const { quic, streams } = fakeSession();
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+
+	const first = new AbortController();
+	const second = new AbortController();
+	const a = subscriber.fetchGroup(Path.from("room"), "video", 0, { signal: first.signal });
+	const b = subscriber.fetchGroup(Path.from("room"), "video", 0, { signal: second.signal });
+
+	await drainUntil(() => streams.length === 1);
+	await streams[0].reading;
+	if (stage === "fetch") {
+		await answerTrackInfo(streams[0]);
+		await drainUntil(() => streams.length === 2);
+		await streams[1].reading;
+	}
+
+	first.abort(new Error("first"));
+	second.abort(new Error("second"));
+	expect(((await a.catch((err: unknown) => err)) as Error).message).toBe("first");
+	expect(((await b.catch((err: unknown) => err)) as Error).message).toBe("second");
+
+	if (stage === "track") {
+		// The TRACK_INFO still completes, but no FETCH is sent for the abandoned group.
+		await answerTrackInfo(streams[0]);
+		for (let i = 0; i < 100; i++) await Promise.resolve();
+		expect(streams.length).toBe(1);
+	} else {
+		const err = fromTransport(await streams[1].aborted) as StreamError;
+		expect(err.code).toBe(StreamCode.Cancel);
+	}
+
+	subscriber.close();
 });

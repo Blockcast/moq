@@ -243,6 +243,14 @@ export class Request {
 export interface FetchGroupOptions {
 	/** Delivery priority for the fetch stream. Defaults to `0`. */
 	priority?: number;
+
+	/**
+	 * Abandons this fetch, rejecting with the signal's reason. Concurrent fetches of the same
+	 * group share one stream, cancelled only once every caller has left. An already-aborted
+	 * signal rejects before anything is sent, and aborting after the group resolves has no
+	 * effect; close the group instead.
+	 */
+	signal?: AbortSignal;
 }
 
 /**
