@@ -1020,13 +1020,17 @@ export class Publisher {
 				if (!this.#offerable(key, ns.refused)) continue;
 				answer = await target.advertise(key, snap);
 			}
-			ns.offered.set(key, snap.identity);
-
+			// `offered` pairs with `refused`, so a held or withdrawn path leaves nothing behind.
 			if (answer === "held") {
 				held.set(key, snap);
+				ns.refused.delete(key);
+				ns.offered.delete(key);
 			} else {
 				held.delete(key);
-				if (answer !== "dropped") ns.refused.set(key, answer);
+				if (answer !== "dropped") {
+					ns.refused.set(key, answer);
+					ns.offered.set(key, snap.identity);
+				}
 			}
 		}
 
@@ -1207,7 +1211,9 @@ export class Publisher {
 			return "dropped";
 		}
 
-		if (answer !== "held") await this.#withdraw(path, requests);
+		// The peer already closed out a refused request, and its STOP_SENDING can reject the
+		// wait on our FIN. That is the withdrawal finishing, not a reason to end the loop.
+		if (answer !== "held") await this.#withdraw(path, requests).catch(() => undefined);
 		return answer;
 	}
 
