@@ -431,7 +431,7 @@ impl Token {
 pub struct Lease {
 	consumer: lease::Consumer,
 	token: Token,
-	/// The live session a re-check resizes in place, once attached.
+	/// The live session a re-check re-authorizes in place, once attached.
 	session: Option<moq_net::auth::Handle>,
 	/// When the grant runs out, enforced here whoever drives the lease: a fixed
 	/// grant has no driver, and an auth server's may be mid-outage. Fixed on tokio's
@@ -456,9 +456,9 @@ impl Lease {
 		}
 	}
 
-	/// Resize `session` in place when a re-check changes what the grant allows,
+	/// Re-authorize `session` in place when a re-check changes what the grant allows,
 	/// narrower or wider. Without it a narrower grant ends the lease.
-	pub(crate) fn limiting(mut self, session: &moq_net::Session) -> Self {
+	pub(crate) fn authorizing(mut self, session: &moq_net::Session) -> Self {
 		self.session = Some(session.auth());
 		self
 	}
@@ -483,7 +483,7 @@ impl Lease {
 	/// Wait for the lease to stop covering the session: the grant expired, was
 	/// revoked, or was re-checked into one that no longer covers the token.
 	///
-	/// A grant with the same root and mounts sets an attached session's limit to its
+	/// A grant with the same root and mounts re-authorizes an attached session for its
 	/// patterns, narrower or wider, and keeps going; the origin handles the session was
 	/// admitted with still bound it, so it never reaches past them. Without an attached
 	/// session a narrower grant ends the lease and a wider one changes nothing.
@@ -520,9 +520,9 @@ impl Lease {
 									tracing::info!(
 										publish = %join(&fresh.publish),
 										subscribe = %join(&fresh.subscribe),
-										"grant changed; resizing the session",
+										"grant changed; re-authorizing the session",
 									);
-									session.limit(&moq_net::auth::Grant {
+									session.authorize(&moq_net::auth::Grant {
 										publish: fresh.publish.clone(),
 										subscribe: fresh.subscribe.clone(),
 										expires: None,

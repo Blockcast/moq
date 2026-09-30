@@ -1075,7 +1075,7 @@ async fn a_narrowing_deafens_one_path(version: &'static str) {
 		let mut video_sub = remote.track("h264").unwrap().subscribe(prefs()).await.unwrap();
 		video_sub.recv_group().await.unwrap().unwrap();
 
-		pair.server.auth().limit(&grant(&[], &["room/alice/video"]));
+		pair.server.auth().authorize(&grant(&[], &["room/alice/video"]));
 
 		let err = ended(&mut audio_sub).await;
 		assert!(unauthorized(&err), "{err:?}");
@@ -1147,7 +1147,7 @@ async fn a_narrowing_aborts_what_the_peer_published(version: &'static str) {
 		let mut cam_sub = remote.track("h264").unwrap().subscribe(prefs()).await.unwrap();
 		cam_sub.recv_group().await.unwrap().unwrap();
 
-		pair.server.auth().limit(&grant(&["room/bob/cam"], &[]));
+		pair.server.auth().authorize(&grant(&["room/bob/cam"], &[]));
 
 		let err = ended(&mut mic_sub).await;
 		assert!(unauthorized(&err), "{err:?}");
@@ -1193,7 +1193,7 @@ async fn a_narrowing_resets_a_fetch_in_flight(version: &'static str) {
 		let frame = fetched.read_frame().await.unwrap().expect("first frame");
 		assert_eq!(frame.payload.as_ref(), b"first");
 
-		pair.server.auth().limit(&grant(&[], &["room/y"]));
+		pair.server.auth().authorize(&grant(&[], &["room/y"]));
 
 		let err = loop {
 			match fetched.read_frame().await {
@@ -1248,13 +1248,13 @@ async fn a_widening_brings_back_a_deafened_path(version: &'static str) {
 		let mut sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();
 		sub.recv_group().await.unwrap().unwrap();
 
-		pair.server.auth().limit(&grant(&[], &["room/alice/video"]));
+		pair.server.auth().authorize(&grant(&[], &["room/alice/video"]));
 		let err = ended(&mut sub).await;
 		assert!(unauthorized(&err), "{err:?}");
 		wait_announced(&received.consume(), "room/alice/audio", false).await;
 		drop((sub, remote));
 
-		pair.server.auth().limit(&grant(&[], &["room"]));
+		pair.server.auth().authorize(&grant(&[], &["room"]));
 		wait_announced(&received.consume(), "room/alice/audio", true).await;
 		let remote = received.consume().routed_broadcast("room/alice/audio").await.unwrap();
 		let mut sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();
@@ -1300,10 +1300,10 @@ async fn a_widening_brings_back_what_the_peer_published(version: &'static str) {
 		.await;
 		wait_announced(&relay.consume(), "room/bob/mic", true).await;
 
-		pair.server.auth().limit(&grant(&["room/bob/cam"], &[]));
+		pair.server.auth().authorize(&grant(&["room/bob/cam"], &[]));
 		wait_announced(&relay.consume(), "room/bob/mic", false).await;
 
-		pair.server.auth().limit(&grant(&["room"], &[]));
+		pair.server.auth().authorize(&grant(&["room"], &[]));
 		wait_announced(&relay.consume(), "room/bob/mic", true).await;
 		let remote = relay.consume().routed_broadcast("room/bob/mic").await.unwrap();
 		let mut sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();

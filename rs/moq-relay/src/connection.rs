@@ -275,7 +275,7 @@ pub(crate) fn authorize(
 /// the internal listener re-checks this lease; `None` for a session that is
 /// not in the table.
 ///
-/// The lease is the decider's live word on the grant: a re-check resizes the
+/// The lease is the decider's live word on the grant: a re-check re-authorizes the
 /// session in place, narrower or wider, and when it stops covering the session
 /// ([`auth::Lease::ended`]) the session closes with the reason. The session's own
 /// close is reported back through the lease as the `end` event. Either way, a relay
@@ -289,7 +289,7 @@ pub async fn supervise(
 	mut shutdown: crate::shutdown::Observer,
 	registration: Option<crate::session::Registration>,
 ) -> anyhow::Result<()> {
-	let mut lease = lease.limiting(&session);
+	let mut lease = lease.authorizing(&session);
 	loop {
 		let nudged = async {
 			match &registration {

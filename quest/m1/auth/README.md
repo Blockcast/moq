@@ -39,7 +39,7 @@ Decisions settled while planning, recorded so review does not relitigate them:
   the union and cancels publications and subscriptions that lose authorization.
   Other authorized work continues on the same session. An empty union leaves
   the session connected with no access, so it can accept a fresh token.
-  `auth::Handle::limit` is the common resize operation; relay token handling
+  `auth::Handle::authorize` is the common resize operation; relay token handling
   uses it rather than shipping a temporary close-on-shrink policy.
 - **A public grant contains publish patterns, subscribe patterns, and an
   expiry**, in the presenter's own root; the presenter never sees the relay-side

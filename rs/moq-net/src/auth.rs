@@ -11,8 +11,8 @@
 //! grants what its own origin handles allow. An application that verifies tokens
 //! itself takes [`requests`](Handle::requests) before running the session's
 //! driver, and then answers every token the peer presents. Either way,
-//! [`limit`](Handle::limit) resizes what the peer may do on a live session, on
-//! every version, whether or not it speaks AUTH.
+//! [`authorize`](Handle::authorize) re-authorizes the peer on a live session, narrower
+//! or wider, on every version, whether or not it speaks AUTH.
 //!
 //! moq-transport draft-17+ carries the same exchange when both sides negotiate the
 //! MoQ Auth extension. Older versions, and peers that do not negotiate it, carry no
@@ -115,7 +115,8 @@ pub(crate) struct State {
 	/// The peer replied to some token, so the union is known even when empty.
 	replied: bool,
 	/// The most this side lets the peer do, in the peer's terms: `None` (only the
-	/// origin handles bound it) until [`Handle::limit`] sets it.
+	/// origin handles bound it) until [`Handle::authorize`] sets it; the grant it was
+	/// last called with.
 	limit: Option<Grant>,
 	/// Bumped whenever the union or the limit changes, so the session's per-stream
 	/// gates can skip re-matching paths on every wakeup.
@@ -439,22 +440,22 @@ impl Handle {
 		Poll::Ready(())
 	}
 
-	/// Set the most the peer may do on this session to `grant`, in the session's own
-	/// paths, replacing any earlier limit. The session's origin handles still bound it,
-	/// so a limit never grants more than they allow.
+	/// Authorize the peer for `grant` on this session, in the session's own paths.
+	/// Calling it again re-authorizes, narrower or wider, replacing the last grant. The
+	/// session's origin handles still bound it, so it never grants more than they allow.
 	///
-	/// A narrower limit ends what falls outside at once, with [`Error::Unauthorized`]
+	/// A narrower grant ends what falls outside at once, with [`Error::Unauthorized`]
 	/// where it has a reader: announcements to the peer retract, its new requests are
 	/// refused, its subscriptions reset, and the broadcasts it published abort. A wider
-	/// one brings back what the old limit held back: announcements to the peer are made
+	/// one brings back what the old grant held back: announcements to the peer are made
 	/// again, and so are the peer's announcements it withheld from the origin, and new
 	/// requests are accepted. The rest of the session carries on. It works on every
 	/// version, since the session enforces it without the peer's help.
 	///
 	/// When the session answers the peer's connection credential itself, the peer is
-	/// told its grant within the limit, `expires` included. An application answering
+	/// told the grant, within what the origin handles allow, `expires` included. An application answering
 	/// tokens through [`requests`](Self::requests) updates its own [`Issued`] grants.
-	pub fn limit(&self, grant: &Grant) {
+	pub fn authorize(&self, grant: &Grant) {
 		let mut state = self.state.lock();
 		if state.limit.as_ref() != Some(grant) {
 			state.limit = Some(grant.clone());
@@ -1014,19 +1015,19 @@ mod tests {
 		let handle = Handle::new(false);
 		assert!(handle.allows(Direction::Publish, "room/alice/audio"));
 
-		handle.limit(&grant(&["room/bob"], &["room/alice"]));
+		handle.authorize(&grant(&["room/bob"], &["room/alice"]));
 		// What we send is what the peer may subscribe to, and the other way around.
 		assert!(handle.allows(Direction::Publish, "room/alice/audio"));
 		assert!(!handle.allows(Direction::Publish, "room/bob/cam"));
 		assert!(handle.allows(Direction::Subscribe, "room/bob/cam"));
 		assert!(!handle.allows(Direction::Subscribe, "room/alice/audio"));
 
-		handle.limit(&grant(&[""], &["room/alice/video"]));
+		handle.authorize(&grant(&[""], &["room/alice/video"]));
 		assert!(!handle.allows(Direction::Publish, "room/alice/audio"));
 		assert!(handle.allows(Direction::Publish, "room/alice/video"));
 		assert!(handle.allows(Direction::Subscribe, "other"));
 
-		handle.limit(&Grant::all());
+		handle.authorize(&Grant::all());
 		assert!(handle.allows(Direction::Publish, "room/alice/audio"));
 		assert!(handle.allows(Direction::Subscribe, "other"));
 	}
@@ -1040,7 +1041,7 @@ mod tests {
 		assert!(!handle.allows(Direction::Subscribe, "room/bob/cam"));
 		assert!(handle.within_limit(Direction::Subscribe, "room/bob/cam"));
 
-		handle.limit(&grant(&["room/alice"], &[]));
+		handle.authorize(&grant(&["room/alice"], &[]));
 		assert!(!handle.within_limit(Direction::Subscribe, "room/bob/cam"));
 		assert!(handle.within_limit(Direction::Subscribe, "room/alice/cam"));
 		drop(token);
@@ -1057,15 +1058,15 @@ mod tests {
 		assert_eq!(default.poll(&waiter), Poll::Ready(grant(&["room"], &["room"])));
 		assert!(default.poll(&waiter).is_pending());
 
-		handle.limit(&grant(&["room"], &["room/alice"]));
+		handle.authorize(&grant(&["room"], &["room/alice"]));
 		assert_eq!(default.poll(&waiter), Poll::Ready(grant(&["room"], &["room/alice"])));
 
 		// Wider again, but never past what the origin handles allow.
-		handle.limit(&Grant::all());
+		handle.authorize(&Grant::all());
 		assert_eq!(default.poll(&waiter), Poll::Ready(grant(&["room"], &["room"])));
 
 		// A limit that leaves the grant as it is: nothing to tell the peer.
-		handle.limit(&grant(&[""], &[""]));
+		handle.authorize(&grant(&[""], &[""]));
 		assert!(default.poll(&waiter).is_pending());
 	}
 }
