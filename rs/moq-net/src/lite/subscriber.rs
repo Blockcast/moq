@@ -2836,7 +2836,7 @@ enum Held {
 	/// limit allows it.
 	Withheld(crate::origin::Route),
 	/// In the origin, serving requests.
-	Attached(AnnouncedRoute),
+	Attached(Box<AnnouncedRoute>),
 }
 
 impl Announced {
@@ -2853,7 +2853,7 @@ impl Announced {
 		});
 		let route = AnnouncedRoute::new(route, dynamic, wake);
 		route.waker.wake_by_ref();
-		self.routes.insert(path, Held::Attached(route));
+		self.routes.insert(path, Held::Attached(Box::new(route)));
 	}
 
 	/// Put the peer's route into the origin, so paths under it resolve through this
@@ -2907,7 +2907,7 @@ impl Announced {
 
 	fn attached(&mut self, path: &PathOwned) -> Option<&mut AnnouncedRoute> {
 		match self.routes.get_mut(path)? {
-			Held::Attached(route) => Some(route),
+			Held::Attached(route) => Some(route.as_mut()),
 			_ => None,
 		}
 	}
