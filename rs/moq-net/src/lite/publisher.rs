@@ -40,7 +40,14 @@ pub(super) struct PublisherConfig<S: crate::transport::poll::Session> {
 	/// The origin (hop) id assigned to the peer, used whenever the peer doesn't
 	/// declare one itself. See `Client::with_peer_hop`.
 	pub peer_hop: Option<Hop>,
+	/// Whether the peer is a cluster relay that re-advertises what we announce.
+	pub relay: bool,
 }
+
+/// How long a peer relay waits for the replacement when the route we advertised
+/// is withdrawn. A withdrawal crosses the mesh within this, so a replacement
+/// derived from the withdrawn announcement is gone before it would spread.
+const HOLD_DOWN: Duration = Duration::from_secs(1);
 
 /// Context shared by every control-stream child.
 struct Shared<S: crate::transport::poll::Session> {
@@ -56,6 +63,8 @@ struct Shared<S: crate::transport::poll::Session> {
 	// peer declines to declare one. Backs both the announce filter and the serving
 	// origin, so a peer that names itself nowhere on the wire is still split-horizoned.
 	peer_hop: Option<Hop>,
+	// Whether the peer re-advertises what we announce: see `HOLD_DOWN`.
+	relay: bool,
 	// The excluded origin handle, resolved once: the peer sends exactly one
 	// SETUP, so its declared id never changes for the session.
 	serving: std::sync::OnceLock<origin::Consumer>,
@@ -158,6 +167,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 				self_origin,
 				peer_setup: config.peer_setup,
 				peer_hop: config.peer_hop,
+				relay: config.relay,
 				serving: std::sync::OnceLock::new(),
 				priority: Default::default(),
 				version: config.version,
@@ -286,7 +296,7 @@ impl<S: crate::transport::poll::Session> Control<S> {
 					};
 					self.state = match kind {
 						lite::ControlType::Announce => {
-							ControlState::Announce(AnnounceServe::new(self.shared.clone(), stream))
+							ControlState::Announce(AnnounceServe::new(self.shared.clone(), self.runtime.clone(), stream))
 						}
 						lite::ControlType::Subscribe => {
 							ControlState::Subscribe(SubscribeServe::new(self.shared.clone(), stream))
@@ -479,6 +489,7 @@ impl<S: crate::transport::poll::Session> ProbeServe<S> {
 /// demand, and the origin change.
 struct AnnounceServe<S: crate::transport::poll::Session> {
 	shared: Arc<Shared<S>>,
+	runtime: crate::time::Clock,
 	stream: Option<Stream<S, Version>>,
 	state: AnnounceState,
 }
@@ -501,9 +512,10 @@ enum AnnounceState {
 }
 
 impl<S: crate::transport::poll::Session> AnnounceServe<S> {
-	fn new(shared: Arc<Shared<S>>, stream: Stream<S, Version>) -> Self {
+	fn new(shared: Arc<Shared<S>>, runtime: crate::time::Clock, stream: Stream<S, Version>) -> Self {
 		Self {
 			shared,
+			runtime,
 			stream: Some(stream),
 			state: AnnounceState::Decode,
 		}
@@ -597,7 +609,10 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 			false => origin,
 		};
 		let announced = origin.announced();
-		let run = AnnounceRun::new(self.shared.self_origin, self.shared.version);
+		let mut run = AnnounceRun::new(self.shared.self_origin, self.shared.version);
+		if self.shared.relay && lite::restart_supported(self.shared.version) {
+			run = run.with_hold(&self.runtime, HOLD_DOWN);
+		}
 		self.state = AnnounceState::Run { origin, announced, run };
 	}
 }
@@ -615,7 +630,63 @@ struct AnnounceRun {
 	// The routes the peer currently holds, keyed by the suffix under the requested
 	// prefix.
 	live: HashMap<crate::PathOwned, Advertised>,
+	// Replacements for withdrawn routes, advertised once they survive the hold-down.
+	// Never set for peers that do not re-advertise.
+	hold: Option<Hold>,
 	phase: AnnouncePhase,
+}
+
+/// Replacement routes waiting out [`HOLD_DOWN`] before they reach a peer relay.
+///
+/// When the route we advertised is withdrawn and an alternative takes over, the
+/// alternative is usually derived from the same announcement, reaching us through
+/// a peer the withdrawal has not crossed yet. Advertising it would send the peer
+/// hunting through every such path; waiting lets the withdrawal catch up first.
+struct Hold {
+	delay: Duration,
+	runtime: crate::time::Clock,
+	/// Fires when the front of `due` comes due.
+	deadline: crate::runtime::Deadline<crate::time::Clock>,
+	/// Held suffixes in the order they come due. An entry whose suffix was released
+	/// or held again since is skipped.
+	due: std::collections::VecDeque<(crate::time::Instant, crate::PathOwned)>,
+	/// The latest route per held suffix and when it comes due. A held suffix is not
+	/// in [`AnnounceRun::live`]: the peer holds nothing for it.
+	routes: HashMap<crate::PathOwned, (crate::time::Instant, Hops, crate::origin::Cost)>,
+}
+
+impl Hold {
+	/// Hold `route` for `suffix`, keeping the deadline of a suffix already held.
+	fn hold(&mut self, suffix: crate::PathOwned, hops: Hops, cost: crate::origin::Cost) {
+		let at = match self.routes.get(&suffix) {
+			Some((at, ..)) => *at,
+			None => {
+				let at = self.runtime.now() + self.delay;
+				self.due.push_back((at, suffix.clone()));
+				at
+			}
+		};
+		self.routes.insert(suffix, (at, hops, cost));
+	}
+
+	/// The next held route whose hold-down has passed.
+	fn poll_due(&mut self, waiter: &kio::Waiter) -> Poll<(crate::PathOwned, Hops, crate::origin::Cost)> {
+		loop {
+			let Some((at, suffix)) = self.due.front() else {
+				self.deadline.set(None);
+				return Poll::Pending;
+			};
+			if self.routes.get(suffix).is_none_or(|(held, ..)| held != at) {
+				self.due.pop_front();
+				continue;
+			}
+			self.deadline.set(Some(*at));
+			ready!(self.deadline.poll(waiter));
+			let (_, suffix) = self.due.pop_front().expect("front checked above");
+			let (_, hops, cost) = self.routes.remove(&suffix).expect("held checked above");
+			return Poll::Ready((suffix, hops, cost));
+		}
+	}
 }
 
 /// What the peer holds for one advertised suffix.
@@ -643,8 +714,21 @@ impl AnnounceRun {
 			version,
 			encoder: lite::AnnounceEncoder::new(version),
 			live: HashMap::new(),
+			hold: None,
 			phase: AnnouncePhase::Init,
 		}
+	}
+
+	/// Hold a replacement for a withdrawn route `delay` before advertising it.
+	fn with_hold(mut self, runtime: &crate::time::Clock, delay: Duration) -> Self {
+		self.hold = Some(Hold {
+			delay,
+			runtime: runtime.clone(),
+			deadline: crate::runtime::Deadline::new(runtime),
+			due: Default::default(),
+			routes: HashMap::new(),
+		});
+		self
 	}
 
 	/// The chain and cost to put on the wire for `route`, or `None` when it must

@@ -138,6 +138,9 @@ where
 	// An unset half gets an empty origin: an empty publish origin announces nothing
 	// (and answers the peer's announce-interest with an empty set), and an empty
 	// subscribe origin issues no ANNOUNCE_PLEASE.
+	// Whether the peer is a cluster relay: we mark what it announces as peer
+	// routes, and it re-advertises what we announce to it.
+	let relay = subscribe.as_ref().is_some_and(origin::Producer::is_peer);
 	let publish = publish.unwrap_or_else(|| origin::Producer::empty(Hop::random()).consume());
 	let subscribe = subscribe.unwrap_or_else(|| origin::Producer::empty(Hop::random()));
 
@@ -172,6 +175,7 @@ where
 		peer_setup: peer_setup.clone(),
 		goaway: goaway.clone(),
 		peer_hop,
+		relay,
 	});
 	let subscriber = Subscriber::new(SubscriberConfig {
 		runtime: runtime.clone(),

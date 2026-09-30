@@ -1395,6 +1395,11 @@ impl Producer {
 		self
 	}
 
+	/// Whether [`Self::peer`] marked this handle.
+	pub(crate) fn is_peer(&self) -> bool {
+		self.peer
+	}
+
 	/// This origin's construction config.
 	pub fn config(&self) -> Config {
 		Config {
@@ -3820,6 +3825,19 @@ impl Consumer {
 	pub(crate) fn excluding(mut self, peer: Hop) -> Self {
 		self.horizon.exclude = Some(peer);
 		self
+	}
+
+	/// Whether a live route this consumer sees still covers `path` along exactly `hops`.
+	pub(crate) fn carries(&self, path: impl AsPath, hops: &Hops) -> bool {
+		let named = self.root.join(&path.as_path()).to_owned();
+		let Some(absolute) = self.scope.resolve(&named) else {
+			return false;
+		};
+		let state = self.shared.read();
+		state
+			.routes
+			.covering(&absolute)
+			.any(|entry| entry.live() && self.horizon.admits(entry) && entry.hops == *hops)
 	}
 
 	/// A view of the routes that entered here: every route a handle marked

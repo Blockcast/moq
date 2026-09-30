@@ -144,3 +144,67 @@ async fn partial_mesh_withdraw_then_republish() {
 	}
 	let _broadcasts = mesh.publish(100, 5).await;
 }
+
+/// A 34-relay partial mesh: moq.pro's production graph on 2026-09-30, where
+/// relays in neighboring PoPs peer and most reach a publisher's relay through
+/// others.
+#[rustfmt::skip]
+const PRODUCTION: &[(usize, usize)] = &[
+	(0, 20), (0, 22), (0, 29), (1, 3), (1, 12), (1, 14), (1, 21), (2, 20), (2, 26), (2, 32), (3, 8),
+	(3, 11), (3, 15), (3, 16), (3, 17), (3, 18), (3, 21), (3, 22), (3, 23), (3, 24), (3, 29), (3, 30),
+	(3, 31), (4, 7), (4, 20), (4, 22), (4, 25), (4, 29), (5, 20), (5, 27), (5, 33), (6, 23), (6, 24),
+	(6, 30), (6, 31), (7, 22), (7, 25), (7, 29), (8, 15), (8, 17), (8, 21), (8, 23), (8, 30), (9, 19),
+	(9, 22), (9, 23), (9, 28), (9, 29), (9, 30), (10, 19), (10, 20), (10, 22), (10, 23), (10, 26),
+	(10, 27), (10, 28), (10, 29), (10, 30), (10, 32), (10, 33), (11, 15), (11, 16), (11, 21),
+	(12, 14), (12, 27), (12, 33), (13, 14), (13, 27), (13, 33), (14, 26), (14, 27), (14, 32),
+	(14, 33), (15, 21), (16, 18), (16, 21), (17, 21), (17, 24), (17, 31), (18, 21), (18, 22),
+	(18, 23), (18, 24), (18, 29), (18, 30), (18, 31), (19, 22), (19, 23), (19, 26), (19, 28),
+	(19, 29), (19, 30), (19, 32), (20, 22), (20, 26), (20, 27), (20, 29), (20, 32), (20, 33),
+	(21, 22), (21, 23), (21, 24), (21, 29), (21, 30), (21, 31), (22, 23), (22, 24), (22, 25),
+	(22, 26), (22, 27), (22, 28), (22, 29), (22, 30), (22, 31), (22, 32), (22, 33), (23, 24),
+	(23, 28), (23, 29), (23, 30), (23, 31), (24, 29), (24, 30), (24, 31), (25, 29), (26, 27),
+	(26, 28), (26, 29), (26, 32), (26, 33), (27, 29), (27, 32), (27, 33), (28, 29), (28, 30),
+	(28, 32), (29, 30), (29, 31), (29, 32), (29, 33), (30, 31), (32, 33),
+];
+
+#[tokio::test(start_paused = true)]
+async fn measure_production() {
+	for latency in [Duration::ZERO, Duration::from_millis(20)] {
+		let version: Version = "moq-lite-06".parse().unwrap();
+		let nodes: Vec<_> = (1..=34).map(produce_origin).collect();
+		let mut pairs = Vec::new();
+		for &(a, b) in PRODUCTION {
+			pairs.push(support::harness::peer_with_latency(version, &nodes[a], &nodes[b], latency).await);
+		}
+		let mut watched: Vec<_> = nodes.iter().map(|node| watch(node.consume().announced())).collect();
+
+		let mut total = (0, 0, 0);
+		for publisher in 0..34 {
+			let broadcast = nodes[publisher].create_broadcast(format!("room/{publisher}")).unwrap();
+			broadcast.announce(Default::default()).unwrap();
+			for watched in watched.iter_mut() {
+				drain(watched).await;
+			}
+			drop(broadcast);
+			let (mut ann, mut upd, mut ret) = (0, 0, 0);
+			for watched in watched.iter_mut() {
+				let updates = drain(watched).await;
+				for kind in updates.get(&format!("room/{publisher}")).into_iter().flatten() {
+					match kind {
+						announce::Kind::Announced => ann += 1,
+						announce::Kind::Updated => upd += 1,
+						announce::Kind::Retracted => ret += 1,
+					}
+				}
+			}
+			println!("latency {latency:?} publisher {publisher}: announced {ann} updated {upd} retracted {ret}");
+			total.0 += ann;
+			total.1 += upd;
+			total.2 += ret;
+		}
+		println!(
+			"latency {latency:?} TOTAL announced {} updated {} retracted {}",
+			total.0, total.1, total.2
+		);
+	}
+}
