@@ -412,20 +412,12 @@ impl Token {
 	}
 
 	/// Whether `other` still covers everything this token scopes: the same root and
-	/// mounts, and every grant still held. A narrower re-check narrows the session.
+	/// mounts, and every grant still held.
 	pub(crate) fn covered_by(&self, other: &Self) -> bool {
 		self.root == other.root
 			&& self.mounts == other.mounts
 			&& other.subscribe.covers(&self.subscribe)
 			&& other.publish.covers(&self.publish)
-	}
-
-	/// Keep only what `other` also grants. Fails closed: an intersection too large
-	/// to hold grants nothing.
-	fn narrow(&mut self, other: &Self) {
-		let both = |this: &Patterns, other: &Patterns| this.intersect(other).unwrap_or_default();
-		self.subscribe = both(&self.subscribe, &other.subscribe);
-		self.publish = both(&self.publish, &other.publish);
 	}
 }
 
@@ -439,7 +431,7 @@ impl Token {
 pub struct Lease {
 	consumer: lease::Consumer,
 	token: Token,
-	/// The live session a narrower re-check narrows in place, once attached.
+	/// The live session a re-check resizes in place, once attached.
 	session: Option<moq_net::auth::Handle>,
 	/// When the grant runs out, enforced here whoever drives the lease: a fixed
 	/// grant has no driver, and an auth server's may be mid-outage. Fixed on tokio's
@@ -464,9 +456,9 @@ impl Lease {
 		}
 	}
 
-	/// Narrow `session` in place when a re-check narrows the grant, instead of ending
-	/// the lease. Without it a narrower grant ends the lease.
-	pub(crate) fn narrowing(mut self, session: &moq_net::Session) -> Self {
+	/// Resize `session` in place when a re-check changes what the grant allows,
+	/// narrower or wider. Without it a narrower grant ends the lease.
+	pub(crate) fn limiting(mut self, session: &moq_net::Session) -> Self {
 		self.session = Some(session.auth());
 		self
 	}
@@ -477,8 +469,8 @@ impl Lease {
 		self
 	}
 
-	/// The scope the session holds: what it was admitted under, less what any
-	/// re-check narrowed away since.
+	/// The scope the session holds: what it was admitted under, with the patterns of
+	/// the latest re-check that resized it.
 	pub fn token(&self) -> &Token {
 		&self.token
 	}
@@ -491,9 +483,10 @@ impl Lease {
 	/// Wait for the lease to stop covering the session: the grant expired, was
 	/// revoked, or was re-checked into one that no longer covers the token.
 	///
-	/// A narrower grant with the same root and mounts narrows an attached session in
-	/// place and keeps going; the session keeps only what both grants allow, so a
-	/// wider part waits for a reconnect. Without an attached session it ends the lease.
+	/// A grant with the same root and mounts sets an attached session's limit to its
+	/// patterns, narrower or wider, and keeps going; the origin handles the session was
+	/// admitted with still bound it, so it never reaches past them. Without an attached
+	/// session a narrower grant ends the lease and a wider one changes nothing.
 	/// A changed root or mounts ends it, and so does a flipped `peer`, since the
 	/// routes it already announced would be misreported as entering here or from a
 	/// peer. A changed tier keeps the session and moves its
@@ -521,21 +514,25 @@ impl Lease {
 						if fresh.peer != self.token.peer {
 							return "peer changed".into();
 						}
-						if !self.token.covered_by(&fresh) {
-							let Some(session) = &self.session else {
-								return "grant narrowed".into();
-							};
-							self.token.narrow(&fresh);
-							tracing::info!(
-								publish = %join(&self.token.publish),
-								subscribe = %join(&self.token.subscribe),
-								"grant narrowed; narrowing the session",
-							);
-							session.narrow(&moq_net::auth::Grant {
-								publish: self.token.publish.clone(),
-								subscribe: self.token.subscribe.clone(),
-								expires: None,
-							});
+						if fresh.publish != self.token.publish || fresh.subscribe != self.token.subscribe {
+							match &self.session {
+								Some(session) => {
+									tracing::info!(
+										publish = %join(&fresh.publish),
+										subscribe = %join(&fresh.subscribe),
+										"grant changed; resizing the session",
+									);
+									session.limit(&moq_net::auth::Grant {
+										publish: fresh.publish.clone(),
+										subscribe: fresh.subscribe.clone(),
+										expires: None,
+									});
+									self.token.publish = fresh.publish;
+									self.token.subscribe = fresh.subscribe;
+								}
+								None if !self.token.covered_by(&fresh) => return "grant narrowed".into(),
+								None => {}
+							}
 						}
 						if fresh.tier != self.token.tier {
 							tracing::info!(from = %self.token.tier, to = %fresh.tier, "tier changed");

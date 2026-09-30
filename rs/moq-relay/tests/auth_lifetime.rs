@@ -4,7 +4,7 @@
 //! or QUIC) or its axum WebSocket path (`serve_ws` over `ws://`), points it at a
 //! scripted auth server, connects a publisher and a subscriber, confirms media
 //! flows, then asserts the relay follows the server's word: a re-check that moves
-//! the tier retags the live session's stats, a narrower grant narrows it in place, a
+//! the tier retags the live session's stats, a changed grant resizes it in place, a
 //! moved root or a refusal closes it, an outage keeps it until `expires`, and every
 //! close reports `end` with what it moved.
 //! The last tests swap the server for an in-process decider answering
@@ -556,11 +556,11 @@ async fn a_moved_tier_retags_the_live_session() {
 	relay.abort();
 }
 
-/// A narrower grant narrows the live session in place on the next re-check, over TCP
-/// and WebSocket: the deafened path resets with `Unauthorized`, a sibling under the
-/// same prefix keeps flowing, and neither session closes.
+/// A re-check resizes the live session in place, over TCP and WebSocket: a narrower
+/// grant resets the deafened path with `Unauthorized` while a sibling under the same
+/// prefix keeps flowing, a wider one brings the path back, and neither session closes.
 #[tokio::test]
-async fn a_narrower_grant_narrows_live_sessions() {
+async fn a_rechecked_grant_resizes_live_sessions() {
 	for scheme in ["tcp", "ws"] {
 		let script = Script::new(grant(Duration::from_secs(3600)));
 		let auth = build_auth(script.spawn().await);
@@ -667,12 +667,32 @@ async fn a_narrower_grant_narrows_live_sessions() {
 			.expect("the sibling track closed");
 		assert_eq!(group.sequence, 1, "{scheme}");
 
+		// Undeafen: the path is announced again and a new subscription flows.
+		script.on_revalidate(Answer::Grant(grant(Duration::from_secs(3600))));
+		let broadcast = tokio::time::timeout(TIMEOUT, sub_consumer.routed_broadcast("alice/audio"))
+			.await
+			.expect("the undeafened path was never announced again")
+			.expect("announced broadcast resolves");
+		let mut audio = broadcast
+			.track("media")
+			.unwrap()
+			.subscribe(None)
+			.await
+			.expect("subscribe");
+		send(0, 1);
+		let group = tokio::time::timeout(TIMEOUT, audio.recv_group())
+			.await
+			.expect("recv_group timeout")
+			.expect("recv_group failed")
+			.expect("the undeafened track closed");
+		assert!(group.sequence >= 1, "{scheme}");
+
 		for (session, what) in [(pub_session, "publisher"), (sub_session, "subscriber")] {
 			assert!(
 				tokio::time::timeout(Duration::from_millis(200), session.closed())
 					.await
 					.is_err(),
-				"{scheme}: a narrowing must not close the {what}"
+				"{scheme}: a resize must not close the {what}"
 			);
 		}
 		relay.abort();

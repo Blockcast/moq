@@ -104,22 +104,27 @@ shrinks withdraws the announcements and cancels the subscriptions it no longer
 covers, and leaves the session up. On moq-lite each cancelled stream resets with
 `StreamError::Unauthorized`.
 
-`session.auth().narrow(&grant)` takes access away from the peer on a live session,
-on every version, whether or not the peer speaks AUTH: the session enforces it
-itself. It only ever narrows, keeping what both the current ceiling and `grant`
-allow. What falls outside ends at once: announcements to the peer retract, its
-new requests are refused, its subscriptions and fetches reset with
+`session.auth().limit(&grant)` sets the most the peer may do on a live session,
+replacing any earlier limit, on every version, whether or not the peer speaks
+AUTH: the session enforces it itself, and never past its origin handles. A
+narrower limit ends what falls outside at once: announcements to the peer
+retract, its new requests are refused, its subscriptions and fetches reset with
 `Unauthorized`, and the broadcasts it published abort, so local readers see
-`Unauthorized` too. The rest of the session carries on. When the session answers
-the peer's connection credential itself, the peer is sent the narrowed grant.
+`Unauthorized` too. A wider one brings back what the old limit held back:
+announcements are made again, the peer's own announcements return to the origin,
+and new requests are accepted. The rest of the session carries on. When the
+session answers the peer's connection credential itself, the peer is sent its
+grant within the limit.
 
 ```rust
 // Deafen alice's audio: the peer may still subscribe to her video.
 let video: Pattern = "room/alice/video/**".parse()?;
-session.auth().narrow(&auth::Grant {
+session.auth().limit(&auth::Grant {
     subscribe: video.into(),
     ..auth::Grant::all()
 });
+// Undeafen.
+session.auth().limit(&auth::Grant::all());
 ```
 
 ## Patterns

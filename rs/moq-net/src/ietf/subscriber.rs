@@ -393,9 +393,13 @@ struct BroadcastState {
 	route: crate::origin::Route,
 
 	// The served route: dropping it (and the serve task's clone) retracts the
-	// route and rejects its queued requests. `None` once a narrowing took it away
-	// while the peer still advertises it.
+	// route and rejects its queued requests. `None` while the session's limit holds
+	// it back, though the peer still advertises it.
 	dynamic: Option<crate::origin::Dynamic>,
+
+	// Bumped each time the route attaches, so a serve task outlived by a limit that
+	// took the route away and gave it back ends rather than serve beside the new one.
+	generation: u64,
 
 	// active number of PUBLISH_NAMESPACE messages.
 	count: usize,
@@ -515,10 +519,63 @@ where
 		}
 	}
 
-	/// Bound what we subscribe to by the grant this session's tokens earn (MoQ Auth).
+	/// Bound what we subscribe to by the grant this session's tokens earn (MoQ Auth),
+	/// and what the peer may publish to us by the session's limit, as either changes.
 	pub fn with_auth(mut self, auth: crate::auth::Handle) -> Self {
 		self.auth = auth;
+		let this = self.clone();
+		self.tasks.push(async move { this.run_limit().await });
 		self
+	}
+
+	/// Follow the session's limit, attaching every withheld namespace a new limit
+	/// covers. Each route's own serve task holds itself back when a limit no longer
+	/// covers it.
+	async fn run_limit(&self) {
+		let mut epoch = 0;
+		loop {
+			let permit = kio::wait(|waiter| {
+				self.auth
+					.poll_permit(crate::auth::Direction::Subscribe, &mut epoch, waiter)
+			})
+			.await;
+			let mut state = self.state.lock();
+			let mut attached = Vec::new();
+			for (path, entry) in state.broadcasts.iter_mut() {
+				let allowed = permit.within_limit(path.as_str());
+				match &entry.dynamic {
+					None if allowed => {
+						let mut route = entry.route.clone();
+						if self.going_away.is_set() {
+							route.cost = crate::origin::Cost::DRAIN;
+						}
+						let Ok(dynamic) = self.origin.dynamic(path, route) else {
+							continue;
+						};
+						tracing::info!(route = %self.origin.absolute(path), "namespace authorized again");
+						entry.dynamic = Some(dynamic);
+						entry.generation += 1;
+						attached.push((path.clone(), entry.generation));
+					}
+					_ => {}
+				}
+			}
+			drop(state);
+			for (path, generation) in attached {
+				self.serve_route(path, generation);
+			}
+		}
+	}
+
+	/// Serve the requests beneath one attached namespace on its own task.
+	fn serve_route(&self, path: PathOwned, generation: u64) {
+		let this = self.clone();
+		self.tasks.push(async move {
+			// stop_announce is the authoritative remover: it drops the entry
+			// (retracting the route) once the announce refcount hits zero,
+			// which is what makes run_route exit, as does a limit holding it back.
+			this.run_route(path, generation).await;
+		});
 	}
 
 	/// End every active subscription with the error that ended the session.
@@ -1378,12 +1435,18 @@ where
 				Ok(())
 			}
 			Entry::Vacant(entry) => {
-				// Nothing the session no longer lets the peer publish is accepted.
-				if !self
-					.auth
-					.within_ceiling(crate::auth::Direction::Subscribe, path.as_str())
-				{
-					return Err(Error::Unauthorized);
+				// Outside the session's limit: held, not refused, so a wider limit can
+				// attach it while the peer still advertises it.
+				if !self.auth.within_limit(crate::auth::Direction::Subscribe, path.as_str()) {
+					tracing::debug!(route = %self.origin.absolute(&path), "withholding announce outside the limit");
+					entry.insert(BroadcastState {
+						route,
+						dynamic: None,
+						generation: 0,
+						count: 1,
+						sources: HashMap::new(),
+					});
+					return Ok(());
 				}
 				// Propagates Error::Unauthorized if the namespace is out of scope.
 				let dynamic = self.origin.dynamic(&path, route.clone())?;
@@ -1391,19 +1454,13 @@ where
 				entry.insert(BroadcastState {
 					route,
 					dynamic: Some(dynamic),
+					generation: 0,
 					count: 1,
 					sources: HashMap::new(),
 				});
 
 				tracing::debug!(route = %self.origin.absolute(&path), "announce");
-
-				let this = self.clone();
-				self.tasks.push(async move {
-					// stop_announce is the authoritative remover: it drops the entry
-					// (retracting the route) once the announce refcount hits zero,
-					// which is what makes run_route exit.
-					this.run_route(path).await;
-				});
+				self.serve_route(path, 0);
 
 				Ok(())
 			}
@@ -1450,7 +1507,7 @@ where
 	/// per requested path and serve its track requests until the route is
 	/// retracted or the session dies. Tracks in flight at a retraction run to
 	/// their own end.
-	async fn run_route(&self, path: PathOwned) {
+	async fn run_route(&self, path: PathOwned, generation: u64) {
 		let mut broadcasts = TaskSet::owned();
 		let mut closed_session = self.session.clone();
 		let mut epoch = 0;
@@ -1468,15 +1525,15 @@ where
 					if self.going_away.poll(waiter).is_ready() {
 						self.drain_route(&path);
 					}
-					// A narrowing that excludes the namespace takes the route away as a
+					// A limit that no longer covers the namespace holds the route back as a
 					// retraction would, closing its sources. Tracks in flight end on their
 					// own gates, with `Unauthorized`.
-					let mut narrowed = false;
+					let mut excluded = false;
 					while let Poll::Ready(permit) =
 						self.auth
 							.poll_permit(crate::auth::Direction::Subscribe, &mut epoch, waiter)
 					{
-						narrowed |= !permit.within_ceiling(path.as_str());
+						excluded = !permit.within_limit(path.as_str());
 					}
 					// The route lives in the entry: stop_announce removing it retracts
 					// the route, and this loop ends with it.
@@ -1484,7 +1541,10 @@ where
 					let Some(entry) = state.broadcasts.get_mut(&path) else {
 						return Poll::Ready(None);
 					};
-					if narrowed && entry.dynamic.is_some() {
+					if entry.generation != generation {
+						return Poll::Ready(None);
+					}
+					if excluded && entry.dynamic.is_some() {
 						tracing::info!(route = %self.origin.absolute(&path), "namespace no longer authorized");
 						entry.dynamic = None;
 						entry.sources.clear();

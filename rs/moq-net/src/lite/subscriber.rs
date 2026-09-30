@@ -326,27 +326,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		// outside our scope, so don't serve it. Reflections are already
 		// filtered above.
 		let route = self.announced_route(hops, cost, link_cost, responder_origin);
-		let Some(dynamic) = self.serve_route(&path, route.clone()) else {
-			return Ok(false);
-		};
-
-		announced.attach(path, route, dynamic);
-
-		Ok(true)
-	}
-
-	/// Announce the peer's route into the origin, so paths under it resolve through
-	/// this session on demand. `None` when we may not accept it: outside our origin's
-	/// scope, or outside what the session still lets the peer publish.
-	fn serve_route(&self, path: &Path, route: crate::origin::Route) -> Option<crate::origin::Dynamic> {
-		if !self
-			.auth
-			.within_ceiling(crate::auth::Direction::Subscribe, path.as_str())
-		{
-			tracing::debug!(route = %self.log_path(path), "declining announce outside the narrowed grant");
-			return None;
-		}
-		self.origin.dynamic(path, route).ok()
+		Ok(announced.offer(self, path, route))
 	}
 
 	/// The route to announce for a prefix this peer advertised, charging our
@@ -442,13 +422,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			return Ok(true);
 		}
 
-		let Some(dynamic) = self.serve_route(&path, metadata.clone()) else {
-			announced.declined(path);
-			return Ok(false);
-		};
-		announced.attach(path, metadata, dynamic);
-
-		Ok(true)
+		Ok(announced.offer(self, path, metadata))
 	}
 
 	/// Remove a subscription, releasing the session's handle on its producer.
@@ -1166,7 +1140,7 @@ struct PrefixRun {
 	// path, and lite-07 bases name it too. Tracked even for announces we drop
 	// locally (reflected loops), since the sender doesn't know we dropped them.
 	decoder: lite::AnnounceDecoder,
-	/// The auth epoch last applied, so a narrowing drops the routes it excludes.
+	/// The auth epoch last applied, so a new limit holds back or brings back routes.
 	epoch: u64,
 }
 
@@ -1295,14 +1269,15 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 					if self.subscriber.going_away.poll(waiter).is_ready() {
 						run.announced.drain();
 					}
-					// A narrowing aborts what the peer may no longer publish to us. The
-					// peer still holds each advertisement, so the path stays reserved.
+					// A new limit holds back what the peer may no longer publish to us,
+					// and brings back what it may again. The peer still holds each
+					// advertisement either way.
 					while let Poll::Ready(permit) =
 						self.subscriber
 							.auth
 							.poll_permit(crate::auth::Direction::Subscribe, &mut run.epoch, waiter)
 					{
-						run.announced.narrow(&permit, &self.subscriber);
+						run.announced.limit(&permit, &self.subscriber);
 					}
 					loop {
 						match stream.reader.poll_decode_maybe::<lite::AnnounceBroadcast>(&mut cx) {
@@ -1682,10 +1657,10 @@ mod tests {
 		assert!(wire.is_empty(), "a second SUBSCRIBE trailed the first");
 	}
 
-	/// A narrowing that lands while the SUBSCRIBE is still opening resets it with
+	/// A narrower limit landing while the SUBSCRIBE is still opening resets it with
 	/// UNAUTHORIZED, like a live one, and releases its id.
 	#[tokio::test]
-	async fn a_narrowing_resets_a_subscribe_still_opening() {
+	async fn a_narrower_limit_resets_a_subscribe_still_opening() {
 		// Writes park, so the SUBSCRIBE is on an open stream but not yet flushed.
 		let gate = kio::Producer::new(false);
 		let session = SinkSession::gated_bi(gate.consume());
@@ -1730,7 +1705,7 @@ mod tests {
 		assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending());
 		assert_eq!(session.log.bi_opens(), 1, "the SUBSCRIBE stream is open");
 
-		auth.narrow(&crate::auth::Grant::default());
+		auth.limit(&crate::auth::Grant::default());
 		assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_ready());
 
 		let unauthorized = crate::StreamError::Unauthorized.to_code();
@@ -2846,11 +2821,22 @@ enum Sub<S: crate::transport::poll::Session> {
 /// owns its path and announce id until it retracts or restarts it.
 #[derive(Default)]
 struct Announced {
-	routes: HashMap<PathOwned, Option<AnnouncedRoute>>,
+	routes: HashMap<PathOwned, Held>,
 	/// Attached routes whose request queue woke since the last serve pass. The
 	/// driver wakes for every group the session carries, so a pass must cost what
 	/// was requested, not every route the peer announced.
 	ready: kio::Queue<PathOwned>,
+}
+
+/// What we made of one advertisement the peer holds.
+enum Held {
+	/// Not in the origin for good: a reflection, or outside our origin's scope.
+	Declined,
+	/// Outside the session's limit: the route as advertised, attached once a
+	/// limit allows it.
+	Withheld(crate::origin::Route),
+	/// In the origin, serving requests.
+	Attached(AnnouncedRoute),
 }
 
 impl Announced {
@@ -2867,12 +2853,42 @@ impl Announced {
 		});
 		let route = AnnouncedRoute::new(route, dynamic, wake);
 		route.waker.wake_by_ref();
-		self.routes.insert(path, Some(route));
+		self.routes.insert(path, Held::Attached(route));
+	}
+
+	/// Put the peer's route into the origin, so paths under it resolve through this
+	/// session on demand, or hold it back when the session's limit does not cover it.
+	/// Returns whether it attached.
+	fn offer<S: crate::transport::poll::Session>(
+		&mut self,
+		subscriber: &Subscriber<S>,
+		path: PathOwned,
+		route: crate::origin::Route,
+	) -> bool {
+		if !subscriber
+			.auth
+			.within_limit(crate::auth::Direction::Subscribe, path.as_str())
+		{
+			tracing::debug!(route = %subscriber.log_path(&path), "withholding announce outside the limit");
+			self.routes.insert(path, Held::Withheld(route));
+			return false;
+		}
+		// An error means the prefix is outside our origin's scope, so don't serve it.
+		match subscriber.origin.dynamic(&path, route.clone()) {
+			Ok(dynamic) => {
+				self.attach(path, route, dynamic);
+				true
+			}
+			Err(_) => {
+				self.declined(path);
+				false
+			}
+		}
 	}
 
 	fn declined(&mut self, path: PathOwned) {
 		// Dropping a replaced route closes its sources.
-		self.routes.insert(path, None);
+		self.routes.insert(path, Held::Declined);
 	}
 
 	/// Record an advertisement before deciding what to do with it.
@@ -2886,11 +2902,14 @@ impl Announced {
 	/// with [`Self::contains`]. Overwriting an attached route is [`Self::declined`]'s job.
 	fn reserve(&mut self, path: PathOwned) {
 		debug_assert!(!self.routes.contains_key(&path), "reserved a prefix already advertised");
-		self.routes.insert(path, None);
+		self.routes.insert(path, Held::Declined);
 	}
 
 	fn attached(&mut self, path: &PathOwned) -> Option<&mut AnnouncedRoute> {
-		self.routes.get_mut(path)?.as_mut()
+		match self.routes.get_mut(path)? {
+			Held::Attached(route) => Some(route),
+			_ => None,
+		}
 	}
 
 	fn retire(&mut self, path: &PathOwned) {
@@ -2905,7 +2924,7 @@ impl Announced {
 		let root = subscriber.origin.root().to_owned();
 		while let Poll::Ready(Ok(path)) = self.ready.poll_pop(waiter) {
 			// A route retired since it woke has nothing left to serve.
-			let Some(Some(entry)) = self.routes.get_mut(&path) else {
+			let Some(Held::Attached(entry)) = self.routes.get_mut(&path) else {
 				continue;
 			};
 			// Cleared before polling, so a request landing mid-pass queues the route again.
@@ -2930,21 +2949,44 @@ impl Announced {
 		}
 	}
 
-	/// Drop every attached route the session no longer lets the peer publish, closing
-	/// its sources. Tracks in flight end on their own gates, with `Unauthorized`.
-	fn narrow<S: crate::transport::poll::Session>(&mut self, permit: &crate::auth::Permit, subscriber: &Subscriber<S>) {
-		for (path, route) in self.routes.iter_mut() {
-			if route.is_some() && !permit.within_ceiling(path.as_str()) {
-				tracing::info!(route = %subscriber.log_path(path), "announce no longer authorized");
-				*route = None;
+	/// Apply a new limit: hold back every attached route it no longer covers, closing
+	/// its sources (tracks in flight end on their own gates, with `Unauthorized`), and
+	/// attach every withheld one it now does.
+	fn limit<S: crate::transport::poll::Session>(&mut self, permit: &crate::auth::Permit, subscriber: &Subscriber<S>) {
+		let changed: Vec<PathOwned> = self
+			.routes
+			.iter()
+			.filter(|(path, held)| match held {
+				Held::Attached(_) => !permit.within_limit(path.as_str()),
+				Held::Withheld(_) => permit.within_limit(path.as_str()),
+				Held::Declined => false,
+			})
+			.map(|(path, _)| path.clone())
+			.collect();
+		for path in changed {
+			match self.routes.remove(&path) {
+				Some(Held::Attached(entry)) => {
+					tracing::info!(route = %subscriber.log_path(&path), "announce no longer authorized");
+					self.routes.insert(path, Held::Withheld(entry.route.clone()));
+				}
+				Some(Held::Withheld(mut route)) => {
+					tracing::info!(route = %subscriber.log_path(&path), "announce authorized again");
+					if subscriber.going_away.is_set() {
+						route.cost = crate::origin::Cost::DRAIN;
+					}
+					self.offer(subscriber, path, route);
+				}
+				_ => unreachable!("only attached and withheld routes change"),
 			}
 		}
 	}
 
 	/// Re-price every attached route to a draining cost (the peer sent a GOAWAY).
 	fn drain(&mut self) {
-		for entry in self.routes.values_mut().flatten() {
-			entry.drain();
+		for held in self.routes.values_mut() {
+			if let Held::Attached(entry) = held {
+				entry.drain();
+			}
 		}
 	}
 }

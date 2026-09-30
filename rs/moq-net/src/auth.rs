@@ -11,8 +11,8 @@
 //! grants what its own origin handles allow. An application that verifies tokens
 //! itself takes [`requests`](Handle::requests) before running the session's
 //! driver, and then answers every token the peer presents. Either way,
-//! [`narrow`](Handle::narrow) takes access away from the peer on a live session,
-//! on every version, whether or not it speaks AUTH.
+//! [`limit`](Handle::limit) resizes what the peer may do on a live session, on
+//! every version, whether or not it speaks AUTH.
 //!
 //! moq-transport draft-17+ carries the same exchange when both sides negotiate the
 //! MoQ Auth extension. Older versions, and peers that do not negotiate it, carry no
@@ -114,10 +114,10 @@ pub(crate) struct State {
 	union: Option<Grant>,
 	/// The peer replied to some token, so the union is known even when empty.
 	replied: bool,
-	/// The most this side lets the peer do, in the peer's terms: `None` until
-	/// [`Handle::narrow`], then only ever narrower.
-	ceiling: Option<Grant>,
-	/// Bumped whenever the union or the ceiling changes, so the session's per-stream
+	/// The most this side lets the peer do, in the peer's terms: `None` (only the
+	/// origin handles bound it) until [`Handle::limit`] sets it.
+	limit: Option<Grant>,
+	/// Bumped whenever the union or the limit changes, so the session's per-stream
 	/// gates can skip re-matching paths on every wakeup.
 	epoch: u64,
 	acceptor: Acceptor,
@@ -171,58 +171,58 @@ impl State {
 		self.closed.clone()
 	}
 
-	/// The union's and the ceiling's patterns for `direction`, each `None` while
+	/// The union's and the limit's patterns for `direction`, each `None` while
 	/// unrestricted.
 	fn parts(&self, direction: Direction) -> (Option<&Patterns>, Option<&Patterns>) {
-		// The peer's grant names what we may do; the ceiling names what the peer may,
+		// The peer's grant names what we may do; the limit names what the peer may,
 		// so what we send is what the peer may subscribe to, and the other way around.
 		match direction {
 			Direction::Publish => (
 				self.union.as_ref().map(|union| &union.publish),
-				self.ceiling.as_ref().map(|ceiling| &ceiling.subscribe),
+				self.limit.as_ref().map(|limit| &limit.subscribe),
 			),
 			Direction::Subscribe => (
 				self.union.as_ref().map(|union| &union.subscribe),
-				self.ceiling.as_ref().map(|ceiling| &ceiling.publish),
+				self.limit.as_ref().map(|limit| &limit.publish),
 			),
 		}
 	}
 
 	/// What `direction` allows right now.
 	fn permit(&self, direction: Direction) -> Permit {
-		let (granted, ceiling) = self.parts(direction);
+		let (granted, limit) = self.parts(direction);
 		Permit {
 			granted: granted.cloned(),
-			ceiling: ceiling.cloned(),
+			limit: limit.cloned(),
 		}
 	}
 
 	/// Whether `direction` allows `path` right now, without copying the patterns.
 	fn allows(&self, direction: Direction, path: &str) -> bool {
-		let (granted, ceiling) = self.parts(direction);
-		granted.is_none_or(|granted| granted.matches(path)) && ceiling.is_none_or(|ceiling| ceiling.matches(path))
+		let (granted, limit) = self.parts(direction);
+		granted.is_none_or(|granted| granted.matches(path)) && limit.is_none_or(|limit| limit.matches(path))
 	}
 }
 
 /// What one direction of a session allows: the grant the peer gave this side (the
-/// union of its tokens) and the ceiling this side narrowed the peer to, each `None`
+/// union of its tokens) and the limit this side set on the peer, each `None`
 /// while unrestricted.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Permit {
 	granted: Option<Patterns>,
-	ceiling: Option<Patterns>,
+	limit: Option<Patterns>,
 }
 
 impl Permit {
 	/// Whether both allow `path`.
 	pub(crate) fn matches(&self, path: &str) -> bool {
-		self.granted.as_ref().is_none_or(|granted| granted.matches(path)) && self.within_ceiling(path)
+		self.granted.as_ref().is_none_or(|granted| granted.matches(path)) && self.within_limit(path)
 	}
 
-	/// Whether the ceiling alone allows `path`: for what the peer offers us, which our
+	/// Whether the limit alone allows `path`: for what the peer offers us, which our
 	/// own grant does not decide.
-	pub(crate) fn within_ceiling(&self, path: &str) -> bool {
-		self.ceiling.as_ref().is_none_or(|ceiling| ceiling.matches(path))
+	pub(crate) fn within_limit(&self, path: &str) -> bool {
+		self.limit.as_ref().is_none_or(|limit| limit.matches(path))
 	}
 
 	/// Whether this allows everything `other` does, judged part by part, so a `false`
@@ -233,7 +233,7 @@ impl Permit {
 			(Some(_), None) => false,
 			(Some(this), Some(other)) => this.covers(other),
 		};
-		covers(&self.granted, &other.granted) && covers(&self.ceiling, &other.ceiling)
+		covers(&self.granted, &other.granted) && covers(&self.limit, &other.limit)
 	}
 }
 
@@ -439,27 +439,25 @@ impl Handle {
 		Poll::Ready(())
 	}
 
-	/// Narrow what the peer may do on this session to at most `grant`, in the
-	/// session's own paths.
+	/// Set the most the peer may do on this session to `grant`, in the session's own
+	/// paths, replacing any earlier limit. The session's origin handles still bound it,
+	/// so a limit never grants more than they allow.
 	///
-	/// A narrowing only ever takes away: the session keeps what both its current
-	/// ceiling and `grant` allow, so a wider grant changes nothing. What falls outside
-	/// ends at once, with [`Error::Unauthorized`] where it has a reader: announcements
-	/// to the peer retract, its new requests are refused, its subscriptions reset, and
-	/// the broadcasts it published abort. The rest of the session carries on. It works
-	/// on every version, since the session enforces it without the peer's help.
+	/// A narrower limit ends what falls outside at once, with [`Error::Unauthorized`]
+	/// where it has a reader: announcements to the peer retract, its new requests are
+	/// refused, its subscriptions reset, and the broadcasts it published abort. A wider
+	/// one brings back what the old limit held back: announcements to the peer are made
+	/// again, and so are the peer's announcements it withheld from the origin, and new
+	/// requests are accepted. The rest of the session carries on. It works on every
+	/// version, since the session enforces it without the peer's help.
 	///
 	/// When the session answers the peer's connection credential itself, the peer is
-	/// told the narrowed grant, `expires` included. An application answering tokens
-	/// through [`requests`](Self::requests) updates its own [`Issued`] grants.
-	pub fn narrow(&self, grant: &Grant) {
+	/// told its grant within the limit, `expires` included. An application answering
+	/// tokens through [`requests`](Self::requests) updates its own [`Issued`] grants.
+	pub fn limit(&self, grant: &Grant) {
 		let mut state = self.state.lock();
-		let ceiling = match &state.ceiling {
-			Some(ceiling) => ceiling.intersect(grant),
-			None => grant.clone(),
-		};
-		if state.ceiling.as_ref() != Some(&ceiling) {
-			state.ceiling = Some(ceiling);
+		if state.limit.as_ref() != Some(grant) {
+			state.limit = Some(grant.clone());
 			state.epoch += 1;
 		}
 	}
@@ -480,11 +478,11 @@ impl Handle {
 		Poll::Ready(state.permit(direction))
 	}
 
-	/// The ceiling once it may have changed since `epoch` last saw it, advancing `epoch`.
-	pub(crate) fn poll_ceiling(&self, epoch: &mut u64, waiter: &kio::Waiter) -> Poll<Option<Grant>> {
+	/// The limit once it may have changed since `epoch` last saw it, advancing `epoch`.
+	pub(crate) fn poll_limit(&self, epoch: &mut u64, waiter: &kio::Waiter) -> Poll<Option<Grant>> {
 		let state = ready_or!(self.poll_epoch(*epoch, waiter));
 		*epoch = state.epoch;
-		Poll::Ready(state.ceiling.clone())
+		Poll::Ready(state.limit.clone())
 	}
 
 	fn poll_epoch(&self, seen: u64, waiter: &kio::Waiter) -> Poll<kio::Mut<'_, State>> {
@@ -496,17 +494,17 @@ impl Handle {
 
 	/// Whether `direction` allows `path` right now: the union (allowing everything
 	/// while it is `None`, before an answer or on a version without AUTH) and the
-	/// ceiling both.
+	/// limit both.
 	pub(crate) fn allows(&self, direction: Direction, path: &str) -> bool {
 		self.state.read().allows(direction, path)
 	}
 
-	/// Whether the ceiling alone allows `direction` at `path`: for a route the peer
+	/// Whether the limit alone allows `direction` at `path`: for a route the peer
 	/// offers us, which our own grant does not decide.
-	pub(crate) fn within_ceiling(&self, direction: Direction, path: &str) -> bool {
+	pub(crate) fn within_limit(&self, direction: Direction, path: &str) -> bool {
 		let state = self.state.read();
-		let (_, ceiling) = state.parts(direction);
-		ceiling.is_none_or(|ceiling| ceiling.matches(path))
+		let (_, limit) = state.parts(direction);
+		limit.is_none_or(|limit| limit.matches(path))
 	}
 
 	/// The peer turned out not to negotiate AUTH: fail every token as unsupported and
@@ -843,9 +841,9 @@ impl Drop for Issued {
 /// Which way media flows, from this side's view.
 #[derive(Clone, Copy)]
 pub(crate) enum Direction {
-	/// This side sends to the peer: our grant's `publish`, and the ceiling's `subscribe`.
+	/// This side sends to the peer: our grant's `publish`, and the limit's `subscribe`.
 	Publish,
-	/// The peer sends to this side: our grant's `subscribe`, and the ceiling's `publish`.
+	/// The peer sends to this side: our grant's `subscribe`, and the limit's `publish`.
 	Subscribe,
 }
 
@@ -854,7 +852,7 @@ pub(crate) enum Direction {
 ///
 /// Create it at the request's first check and hold it to the end, so a change
 /// landing in between is never missed. Cheap to poll on every wakeup: the path is
-/// only re-matched when the union or the ceiling changes.
+/// only re-matched when the union or the limit changes.
 pub(crate) struct Gate {
 	handle: Handle,
 	path: crate::PathOwned,
@@ -873,7 +871,7 @@ impl Gate {
 	}
 
 	/// Resolve once the session no longer allows the path. A union that is still
-	/// `None` (no answer yet, or a version without AUTH) and a session never narrowed
+	/// `None` (no answer yet, or a version without AUTH) and a session never limited
 	/// allow everything.
 	pub(crate) fn poll_denied(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		loop {
@@ -886,35 +884,35 @@ impl Gate {
 }
 
 /// The default acceptor's answer to the peer's connection credential: the grant
-/// the session's origin handles allow, narrowed by the ceiling as it changes.
+/// the session's origin handles allow, within the limit as it changes.
 pub(crate) struct DefaultGrant {
 	handle: Handle,
 	base: Grant,
 	epoch: u64,
-	ceiling: Option<Grant>,
+	limit: Option<Grant>,
 	/// The grant last handed out, so an unrelated wakeup sends nothing.
 	sent: Option<Grant>,
 }
 
 impl DefaultGrant {
 	pub(crate) fn new(handle: Handle, base: Grant) -> Self {
-		let ceiling = handle.state.read().ceiling.clone();
+		let limit = handle.state.read().limit.clone();
 		Self {
 			handle,
 			base,
 			epoch: 0,
-			ceiling,
+			limit,
 			sent: None,
 		}
 	}
 
-	/// The grant to send next: the first, then each one a narrowing changes.
+	/// The grant to send next: the first, then each one a new limit changes.
 	pub(crate) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Grant> {
-		while let Poll::Ready(ceiling) = self.handle.poll_ceiling(&mut self.epoch, waiter) {
-			self.ceiling = ceiling;
+		while let Poll::Ready(limit) = self.handle.poll_limit(&mut self.epoch, waiter) {
+			self.limit = limit;
 		}
-		let grant = match &self.ceiling {
-			Some(ceiling) => self.base.intersect(ceiling),
+		let grant = match &self.limit {
+			Some(limit) => self.base.intersect(limit),
 			None => self.base.clone(),
 		};
 		if self.sent.as_ref() == Some(&grant) {
@@ -1009,49 +1007,49 @@ mod tests {
 		}
 	}
 
-	/// A narrowing keeps only what every narrowing so far allows, so a wider one
-	/// changes nothing, and it applies to a version without AUTH too.
+	/// A limit replaces the last one, narrower or wider, and applies to a version
+	/// without AUTH too.
 	#[test]
-	fn a_narrowing_only_ever_narrows() {
+	fn a_limit_replaces_the_last() {
 		let handle = Handle::new(false);
 		assert!(handle.allows(Direction::Publish, "room/alice/audio"));
 
-		handle.narrow(&grant(&["room/bob"], &["room/alice"]));
+		handle.limit(&grant(&["room/bob"], &["room/alice"]));
 		// What we send is what the peer may subscribe to, and the other way around.
 		assert!(handle.allows(Direction::Publish, "room/alice/audio"));
 		assert!(!handle.allows(Direction::Publish, "room/bob/cam"));
 		assert!(handle.allows(Direction::Subscribe, "room/bob/cam"));
 		assert!(!handle.allows(Direction::Subscribe, "room/alice/audio"));
 
-		handle.narrow(&grant(&[""], &["room/alice/video"]));
+		handle.limit(&grant(&[""], &["room/alice/video"]));
 		assert!(!handle.allows(Direction::Publish, "room/alice/audio"));
 		assert!(handle.allows(Direction::Publish, "room/alice/video"));
-		assert!(handle.allows(Direction::Subscribe, "room/bob/cam"));
+		assert!(handle.allows(Direction::Subscribe, "other"));
 
-		handle.narrow(&Grant::all());
-		assert!(!handle.allows(Direction::Publish, "room/alice/audio"));
-		assert!(!handle.allows(Direction::Subscribe, "other"));
+		handle.limit(&Grant::all());
+		assert!(handle.allows(Direction::Publish, "room/alice/audio"));
+		assert!(handle.allows(Direction::Subscribe, "other"));
 	}
 
-	/// Our own grant does not decide what the peer may offer us, only the ceiling does.
+	/// Our own grant does not decide what the peer may offer us, only the limit does.
 	#[test]
-	fn the_ceiling_alone_decides_what_the_peer_offers() {
+	fn the_limit_alone_decides_what_the_peer_offers() {
 		let handle = Handle::new(true);
 		let token = handle.present(Bytes::new(), true).unwrap();
 		handle.granted(0, grant(&[], &[]));
 		assert!(!handle.allows(Direction::Subscribe, "room/bob/cam"));
-		assert!(handle.within_ceiling(Direction::Subscribe, "room/bob/cam"));
+		assert!(handle.within_limit(Direction::Subscribe, "room/bob/cam"));
 
-		handle.narrow(&grant(&["room/alice"], &[]));
-		assert!(!handle.within_ceiling(Direction::Subscribe, "room/bob/cam"));
-		assert!(handle.within_ceiling(Direction::Subscribe, "room/alice/cam"));
+		handle.limit(&grant(&["room/alice"], &[]));
+		assert!(!handle.within_limit(Direction::Subscribe, "room/bob/cam"));
+		assert!(handle.within_limit(Direction::Subscribe, "room/alice/cam"));
 		drop(token);
 	}
 
-	/// The default acceptor answers with its base grant, then with each grant a
-	/// narrowing changes, and stays quiet on a change that leaves it alone.
+	/// The default acceptor answers with its base grant, then with each grant a new
+	/// limit changes, narrower or wider, and stays quiet on a change that leaves it alone.
 	#[test]
-	fn the_default_grant_follows_the_ceiling() {
+	fn the_default_grant_follows_the_limit() {
 		let handle = Handle::new(true);
 		let mut default = DefaultGrant::new(handle.clone(), grant(&["room"], &["room"]));
 		let waiter = kio::Waiter::noop();
@@ -1059,11 +1057,15 @@ mod tests {
 		assert_eq!(default.poll(&waiter), Poll::Ready(grant(&["room"], &["room"])));
 		assert!(default.poll(&waiter).is_pending());
 
-		handle.narrow(&grant(&["room"], &["room/alice"]));
+		handle.limit(&grant(&["room"], &["room/alice"]));
 		assert_eq!(default.poll(&waiter), Poll::Ready(grant(&["room"], &["room/alice"])));
 
-		// Wider than the ceiling already is: nothing to tell the peer.
-		handle.narrow(&Grant::all());
+		// Wider again, but never past what the origin handles allow.
+		handle.limit(&Grant::all());
+		assert_eq!(default.poll(&waiter), Poll::Ready(grant(&["room"], &["room"])));
+
+		// A limit that leaves the grant as it is: nothing to tell the peer.
+		handle.limit(&grant(&[""], &[""]));
 		assert!(default.poll(&waiter).is_pending());
 	}
 }

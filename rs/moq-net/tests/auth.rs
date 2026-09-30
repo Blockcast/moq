@@ -136,15 +136,22 @@ async fn granted(session: &Session) -> Grant {
 async fn wait_announced(origin: &origin::Consumer, path: &str, active: bool) {
 	let mut announced = origin.announced();
 	let mut live = std::collections::HashSet::new();
-	loop {
-		if live.contains(path) == active {
-			return;
-		}
-		let update = announced.next().await.expect("origin closed");
+	let apply = |live: &mut std::collections::HashSet<String>, update: moq_net::announce::Update| {
 		match update.kind.is_active() {
 			true => live.insert(update.prefix.to_string()),
 			false => live.remove(update.prefix.as_str()),
 		};
+	};
+	// Take in the replay first, so a retraction is judged against what is announced now
+	// rather than against an empty start.
+	while let Some(update) = futures::FutureExt::now_or_never(announced.next()).flatten() {
+		apply(&mut live, update);
+	}
+	loop {
+		if live.contains(path) == active {
+			return;
+		}
+		apply(&mut live, announced.next().await.expect("origin closed"));
 	}
 }
 
@@ -973,26 +980,31 @@ async fn nothing_outside_the_grant_reaches_the_peer(version: &'static str) {
 	.expect("timed out");
 }
 
-/// Run each narrowing case on every version family: the session enforces a narrowing
-/// itself, so a peer without AUTH (or one that ignores it) cannot keep what it lost.
-macro_rules! narrow_cases {
+/// Run each limit case on every version family: the session enforces its limit itself,
+/// so a peer without AUTH (or one that ignores it) cannot keep what it lost.
+macro_rules! limit_cases {
 	($($case:ident),* $(,)?) => {
-		mod narrow_lite_05 {
+		mod limit_lite_05 {
 			$(#[tokio::test] async fn $case() { super::$case("moq-lite-05").await })*
 		}
-		mod narrow_lite_06 {
+		mod limit_lite_06 {
 			$(#[tokio::test] async fn $case() { super::$case(super::LITE_06).await })*
 		}
-		mod narrow_moqt_16 {
+		mod limit_moqt_16 {
 			$(#[tokio::test] async fn $case() { super::$case("moq-transport-16").await })*
 		}
-		mod narrow_moqt_17 {
+		mod limit_moqt_17 {
 			$(#[tokio::test] async fn $case() { super::$case(super::MOQT_17).await })*
 		}
 	};
 }
 
-narrow_cases!(a_narrowing_deafens_one_path, a_narrowing_aborts_what_the_peer_published);
+limit_cases!(
+	a_narrowing_deafens_one_path,
+	a_narrowing_aborts_what_the_peer_published,
+	a_widening_brings_back_a_deafened_path,
+	a_widening_brings_back_what_the_peer_published,
+);
 
 #[tokio::test]
 async fn lite_05_narrowing_resets_a_fetch_in_flight() {
@@ -1063,7 +1075,7 @@ async fn a_narrowing_deafens_one_path(version: &'static str) {
 		let mut video_sub = remote.track("h264").unwrap().subscribe(prefs()).await.unwrap();
 		video_sub.recv_group().await.unwrap().unwrap();
 
-		pair.server.auth().narrow(&grant(&[], &["room/alice/video"]));
+		pair.server.auth().limit(&grant(&[], &["room/alice/video"]));
 
 		let err = ended(&mut audio_sub).await;
 		assert!(unauthorized(&err), "{err:?}");
@@ -1135,7 +1147,7 @@ async fn a_narrowing_aborts_what_the_peer_published(version: &'static str) {
 		let mut cam_sub = remote.track("h264").unwrap().subscribe(prefs()).await.unwrap();
 		cam_sub.recv_group().await.unwrap().unwrap();
 
-		pair.server.auth().narrow(&grant(&["room/bob/cam"], &[]));
+		pair.server.auth().limit(&grant(&["room/bob/cam"], &[]));
 
 		let err = ended(&mut mic_sub).await;
 		assert!(unauthorized(&err), "{err:?}");
@@ -1181,7 +1193,7 @@ async fn a_narrowing_resets_a_fetch_in_flight(version: &'static str) {
 		let frame = fetched.read_frame().await.unwrap().expect("first frame");
 		assert_eq!(frame.payload.as_ref(), b"first");
 
-		pair.server.auth().narrow(&grant(&[], &["room/y"]));
+		pair.server.auth().limit(&grant(&[], &["room/y"]));
 
 		let err = loop {
 			match fetched.read_frame().await {
@@ -1194,6 +1206,113 @@ async fn a_narrowing_resets_a_fetch_in_flight(version: &'static str) {
 		let resets = pair.server_transport.resets();
 		assert!(resets.contains(&StreamError::Unauthorized.to_code()), "{resets:x?}");
 		drop(group);
+	})
+	.await
+	.expect("timed out");
+}
+
+/// Read groups until one at `sequence` or later arrives.
+async fn recv_through(sub: &mut moq_net::track::Subscriber, sequence: u64) {
+	loop {
+		let group = sub.recv_group().await.unwrap().expect("track ended");
+		if group.sequence >= sequence {
+			return;
+		}
+	}
+}
+
+/// Widening the limit after a narrowing brings the deafened path back: it is announced
+/// again and a new subscription to it flows.
+async fn a_widening_brings_back_a_deafened_path(version: &'static str) {
+	within(async {
+		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
+		let prefs = || moq_net::track::Subscription::default().with_max_age(Duration::from_secs(10));
+
+		let relay = produce_origin(1);
+		let audio = relay.create_broadcast("room/alice/audio").unwrap();
+		let audio_track = audio.create_track("opus", None).unwrap();
+		audio.announce(Default::default()).unwrap();
+
+		let received = produce_origin(3);
+		let pair = connect(Options {
+			version: Some(version),
+			client_subscribe: Some(received.clone()),
+			server_publish: Some(relay.scope("", &patterns(&["room"])).unwrap()),
+			..Default::default()
+		})
+		.await;
+
+		let mut group = audio_track.append_group().unwrap();
+		group.write_frame(ts(0), b"a".as_ref()).unwrap();
+		let remote = received.consume().routed_broadcast("room/alice/audio").await.unwrap();
+		let mut sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();
+		sub.recv_group().await.unwrap().unwrap();
+
+		pair.server.auth().limit(&grant(&[], &["room/alice/video"]));
+		let err = ended(&mut sub).await;
+		assert!(unauthorized(&err), "{err:?}");
+		wait_announced(&received.consume(), "room/alice/audio", false).await;
+		drop((sub, remote));
+
+		pair.server.auth().limit(&grant(&[], &["room"]));
+		wait_announced(&received.consume(), "room/alice/audio", true).await;
+		let remote = received.consume().routed_broadcast("room/alice/audio").await.unwrap();
+		let mut sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();
+		let mut group = audio_track.append_group().unwrap();
+		group.write_frame(ts(1), b"a".as_ref()).unwrap();
+		recv_through(&mut sub, 1).await;
+
+		// A peer that speaks AUTH is told it may subscribe again.
+		if speaks_auth(version) {
+			let widened = wait_for(pair.client.auth().grant(), |grant| {
+				grant
+					.as_ref()
+					.is_some_and(|grant| grant.subscribe == patterns(&["room"]))
+			})
+			.await;
+			assert_eq!(widened, Some(grant(&[], &["room"])));
+		}
+		assert_eq!(pair.client_transport.close_reason(), None);
+	})
+	.await
+	.expect("timed out");
+}
+
+/// Widening the limit after a narrowing brings back what the peer published: its route
+/// is in the origin again and the relay's own readers can subscribe to it.
+async fn a_widening_brings_back_what_the_peer_published(version: &'static str) {
+	within(async {
+		let ts = |ms| moq_net::Timestamp::from_millis(ms).unwrap();
+		let prefs = || moq_net::track::Subscription::default().with_max_age(Duration::from_secs(10));
+
+		let client_origin = produce_origin(2);
+		let mic = client_origin.create_broadcast("room/bob/mic").unwrap();
+		let mic_track = mic.create_track("opus", None).unwrap();
+		mic.announce(Default::default()).unwrap();
+
+		let relay = produce_origin(1);
+		let pair = connect(Options {
+			version: Some(version),
+			client_publish: Some(client_origin.clone()),
+			server_subscribe: Some(relay.clone()),
+			..Default::default()
+		})
+		.await;
+		wait_announced(&relay.consume(), "room/bob/mic", true).await;
+
+		pair.server.auth().limit(&grant(&["room/bob/cam"], &[]));
+		wait_announced(&relay.consume(), "room/bob/mic", false).await;
+
+		pair.server.auth().limit(&grant(&["room"], &[]));
+		wait_announced(&relay.consume(), "room/bob/mic", true).await;
+		let remote = relay.consume().routed_broadcast("room/bob/mic").await.unwrap();
+		let mut sub = remote.track("opus").unwrap().subscribe(prefs()).await.unwrap();
+		let mut group = mic_track.append_group().unwrap();
+		group.write_frame(ts(0), b"m".as_ref()).unwrap();
+		recv_through(&mut sub, 0).await;
+
+		// Neither the narrowing nor the widening is a publication outside the grant.
+		assert_eq!(pair.client_transport.close_reason(), None);
 	})
 	.await
 	.expect("timed out");

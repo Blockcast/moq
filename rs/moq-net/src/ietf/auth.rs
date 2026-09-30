@@ -413,7 +413,7 @@ impl Serve {
 				}
 				return;
 			}
-			// Re-sent whenever a narrowing changes it.
+			// Re-sent whenever a new limit changes it.
 			None => default = Some(crate::auth::DefaultGrant::new(self.handle.clone(), self.peer_grant)),
 		}
 

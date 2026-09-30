@@ -154,7 +154,7 @@ where
 				let control = Control::new(request_id_max, client);
 				let adapter = ControlStreamAdapter::new(session.clone(), control.clone(), version);
 
-				// No AUTH on these drafts, but a narrowing still reaches both halves.
+				// No AUTH on these drafts, but a limit still reaches both halves.
 				let publisher = Publisher::new(
 					runtime.clone(),
 					adapter.clone(),

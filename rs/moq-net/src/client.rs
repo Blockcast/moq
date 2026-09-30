@@ -408,7 +408,7 @@ impl Client {
 				};
 
 				let stream = stream.with_version(v);
-				// Draft 14-16 carry no AUTH, but the session still narrows through this handle.
+				// Draft 14-16 carry no AUTH, but the session is still limited through this handle.
 				let auth = crate::auth::Handle::new(false);
 				// Draft 14-16: the path rode in the bidi SETUP above, not the uni one.
 				let (protocol, goaway) = ietf::start(ietf::Config {

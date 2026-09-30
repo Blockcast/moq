@@ -540,7 +540,7 @@ fn bench_narrow_delivery(c: &mut Criterion) {
 					// Covers every subscription but the muted one, which is not subscribed here.
 					let mut grant = room();
 					grant.subscribe.insert(Pattern::literal("muted").unwrap());
-					watching.pair.server.auth().narrow(&grant);
+					watching.pair.server.auth().limit(&grant);
 				}
 				b.iter(|| rt.block_on(watching.round()));
 			});
@@ -566,7 +566,7 @@ fn bench_narrow(c: &mut Criterion) {
 				for _ in 0..iters {
 					let mut watching = rt.block_on(watching(routes, subscribers));
 					let start = std::time::Instant::now();
-					watching.pair.server.auth().narrow(&room());
+					watching.pair.server.auth().limit(&room());
 					let ended = rt.block_on(watching.subscriptions[0].recv_group());
 					elapsed += start.elapsed();
 					assert!(ended.is_err(), "the muted subscription outlived the narrowing");

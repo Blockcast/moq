@@ -358,7 +358,7 @@ struct AuthServe<S: crate::transport::poll::Session> {
 	/// filled in by the default acceptor.
 	issue: Option<kio::Shared<crate::auth::Issue>>,
 	/// The default acceptor's grant for the connection's credential, re-sent as a
-	/// narrowing changes it. `None` when the app answers.
+	/// new limit changes it. `None` when the app answers.
 	default: Option<crate::auth::DefaultGrant>,
 	/// Our side is finished: FIN sent, waiting for the acknowledgement.
 	finished: bool,

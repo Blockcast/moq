@@ -64,12 +64,13 @@ The client and relay snapshot each accepted grant's deadline on a monotonic
 clock, so later polls, outages, and wall-clock adjustments do not restart it.
 
 **Revalidate and outage.** On the cadence the relay POSTs `revalidate` with the
-same request. A grant applies: one that no longer covers what the session holds
-narrows the live session in place to what both grants allow, so a moderation
-decision lands on the session it targets. Its subscriptions and fetches outside
-the new grant reset with `Unauthorized`, the broadcasts it published outside
-abort, and everything else keeps flowing; a wider part waits for a reconnect. A
-one-shot HTTP `/fetch` ends instead. A
+same request. A grant applies: its patterns resize the live session in place,
+narrower or wider, so a moderation decision lands on the session it targets and
+can be lifted the same way. Subscriptions and fetches outside a narrower grant
+reset with `Unauthorized`, the broadcasts it published outside abort, and
+everything else keeps flowing; a wider grant brings those paths back, up to what
+the session was admitted with. A one-shot HTTP `/fetch` ends on a narrower grant
+instead. A
 changed `root` or `mounts` closes the session with `Unauthorized`, and so does a
 flipped `peer`; a changed `tier` keeps the
 session and moves its stats: its presence counts under the new tier from then
