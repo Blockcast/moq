@@ -1558,10 +1558,11 @@ mod tests {
 				.subscribe(None)
 				.await
 				.unwrap();
+			let gate = serve.gate();
 			let mut running = TrackServeRun {
 				serve,
 				state: TrackRunState::Serve(serving),
-				gate: None,
+				gate,
 			};
 			kio::wait(|waiter| kio::Task::poll(&mut running, waiter)).await;
 
@@ -3172,7 +3173,7 @@ impl Announced {
 	/// Retire this session's advertisement without invalidating another live
 	/// session from the same peer. Dropping its sources closes their requests.
 	fn withdraw(&mut self, path: &PathOwned) {
-		if let Some(Some(entry)) = self.routes.remove(path) {
+		if let Some(Held::Attached(entry)) = self.routes.remove(path) {
 			entry.dynamic.withdrawn();
 		}
 	}

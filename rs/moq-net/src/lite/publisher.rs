@@ -1089,7 +1089,7 @@ impl AnnounceRun {
 	) -> Result<(), Error> {
 		match self.version {
 			Version::Lite01 | Version::Lite02 => {
-				let mut init = Vec::new();
+				let mut init: Vec<(crate::PathOwned, Hops, crate::origin::Cost)> = Vec::new();
 
 				// Send ANNOUNCE_INIT as the first message with all currently active routes.
 				// We use `try_next()` to synchronously get the initial updates.
@@ -1098,25 +1098,30 @@ impl AnnounceRun {
 					let suffix = update.prefix;
 
 					if update.kind.is_active() {
-						if !self.permitted(&suffix) || self.outgoing(&update.route, &absolute).is_none() {
+						if !self.permitted(&suffix) {
 							continue;
 						}
+						let Some((hops, cost)) = self.outgoing(&update.route, &absolute) else {
+							continue;
+						};
 						tracing::debug!(route = %absolute, "announce");
-						if !init.contains(&suffix) {
-							init.push(suffix);
+						if !init.iter().any(|(p, ..)| p == &suffix) {
+							init.push((suffix, hops, cost));
 						}
 					} else {
 						// A potential race: a just-announced route already retracted.
 						tracing::debug!(route = %absolute, "unannounce");
-						init.retain(|p| p != &suffix);
+						init.retain(|(p, ..)| p != &suffix);
 					}
 				}
 
-				// The peer holds these now, so a later retraction or narrowing ends them.
-				for suffix in &init {
-					self.live.insert(suffix.clone(), None);
+				// The peer holds these now, so a later retraction or a narrower grant ends them.
+				let mut suffixes = Vec::with_capacity(init.len());
+				for (suffix, hops, cost) in init {
+					self.live.insert(suffix.clone(), Advertised { id: None, hops, cost });
+					suffixes.push(suffix);
 				}
-				let announce_init = lite::AnnounceInit { suffixes: init };
+				let announce_init = lite::AnnounceInit { suffixes };
 				stream.writer.buffer(&announce_init)?;
 			}
 			_ if self.version.has_announce_ok() => {
