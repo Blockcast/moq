@@ -41,6 +41,9 @@ relay bounds a sparse FETCH only if the model can request ranges:
   whose head isn't cached) stays, which today's bridge relies on. Downstream,
   an IETF FETCH is served from the model's ranges, capped at the Largest
   Object.
+- Ranges are frame-precise (`Position`), not whole groups. The IETF joining
+  FETCH for a mid-group SUBSCRIBE's uncached prefix stays, because today's
+  bridge relies on it (maintainer, 09-29).
 - The relay half of [fetch-span](/quest/m1/moxygen/README.md) (#4558) moves
   here; #4558 lands only the no-handler skip.
 
