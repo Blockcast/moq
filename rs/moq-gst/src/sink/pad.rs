@@ -1779,16 +1779,17 @@ mod tests {
 				pad.push_buffer(data, Some(gst::ClockTime::from_mseconds(pts)), None, None, now)
 					.unwrap()
 			};
-			assert_eq!(push(&mut pad, h264_keyframe_au(), 0), PushOutcome::Published);
-			assert_eq!(push(&mut pad, delta.clone(), 33), PushOutcome::Published);
-			assert_eq!(push(&mut pad, h264_keyframe_au(), 100), PushOutcome::Published);
-			assert_eq!(push(&mut pad, delta.clone(), 133), PushOutcome::Published);
+			assert_eq!(push(&mut pad, h264_keyframe_au(), 1000), PushOutcome::Published);
+			assert_eq!(push(&mut pad, delta.clone(), 1033), PushOutcome::Published);
+			assert_eq!(push(&mut pad, h264_keyframe_au(), 1100), PushOutcome::Published);
+			assert_eq!(push(&mut pad, delta.clone(), 1133), PushOutcome::Published);
+			// Below the previous group's start, so not a reordered frame the producer tolerates.
 			assert_eq!(push(&mut pad, rewind, 16), PushOutcome::Dropped);
 			assert!(!pad.is_failed());
-			assert_eq!(push(&mut pad, delta.clone(), 166), PushOutcome::Dropped);
-			assert_eq!(push(&mut pad, h264_keyframe_au(), 66), PushOutcome::Dropped);
-			assert_eq!(push(&mut pad, h264_keyframe_au(), 200), PushOutcome::Published);
-			assert_eq!(push(&mut pad, delta.clone(), 233), PushOutcome::Published);
+			assert_eq!(push(&mut pad, delta.clone(), 1166), PushOutcome::Dropped);
+			assert_eq!(push(&mut pad, h264_keyframe_au(), 1066), PushOutcome::Dropped);
+			assert_eq!(push(&mut pad, h264_keyframe_au(), 1200), PushOutcome::Published);
+			assert_eq!(push(&mut pad, delta.clone(), 1233), PushOutcome::Published);
 		}
 	}
 

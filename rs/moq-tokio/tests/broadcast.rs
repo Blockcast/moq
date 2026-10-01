@@ -432,7 +432,7 @@ async fn transport_fetch_roundtrip(version: &str, served: bool) {
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	tokio::time::timeout(TIMEOUT, announcements.next())
+	tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");

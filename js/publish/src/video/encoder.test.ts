@@ -758,17 +758,31 @@ test("cut forces a keyframe, coalescing requests and spacing them at least 500ms
 	const keys: number[] = [];
 	class RecordingVideoEncoder {
 		state: CodecState = "unconfigured";
+		#output: VideoEncoderInit["output"];
+		#codec?: string;
+
+		constructor(init: VideoEncoderInit) {
+			this.#output = init.output;
+		}
 
 		static async isConfigSupported(config: VideoEncoderConfig): Promise<{ supported: boolean }> {
 			return { supported: config.codec.startsWith("avc1") };
 		}
 
-		configure(): void {
+		configure(config: VideoEncoderConfig): void {
 			this.state = "configured";
+			this.#codec = config.codec;
 		}
 
+		// Records the test's frames only, not the probe's.
 		encode(frame: VideoFrame, options?: VideoEncoderEncodeOptions): void {
-			if (options?.keyFrame) keys.push(frame.timestamp / 1000);
+			if (options?.keyFrame && frame instanceof Frame) keys.push(frame.timestamp / 1000);
+		}
+
+		// Only the probe flushes; report the configured codec, as Chrome does.
+		async flush(): Promise<void> {
+			const chunk = { type: "key", timestamp: 0, byteLength: 1, copyTo: () => {} };
+			this.#output(chunk as never, { decoderConfig: { codec: this.#codec } } as never);
 		}
 
 		close(): void {
@@ -782,6 +796,8 @@ test("cut forces a keyframe, coalescing requests and spacing them at least 500ms
 		value: RecordingVideoEncoder,
 		writable: true,
 	});
+	const videoFrame = Object.getOwnPropertyDescriptor(globalThis, "VideoFrame");
+	Object.defineProperty(globalThis, "VideoFrame", { configurable: true, value: FakeVideoFrame, writable: true });
 
 	class Frame {
 		readonly timestamp: number;
@@ -852,5 +868,7 @@ test("cut forces a keyframe, coalescing requests and spacing them at least 500ms
 		track.close();
 		if (original) Object.defineProperty(globalThis, "VideoEncoder", original);
 		else Reflect.deleteProperty(globalThis, "VideoEncoder");
+		if (videoFrame) Object.defineProperty(globalThis, "VideoFrame", videoFrame);
+		else Reflect.deleteProperty(globalThis, "VideoFrame");
 	}
 });

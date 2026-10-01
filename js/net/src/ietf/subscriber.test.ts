@@ -128,7 +128,7 @@ test("an advertisement with no path is stamped per connection", async () => {
 			new PublishNamespace({ requestId: 0n, trackNamespace: Path.from("legacy") }),
 			stream,
 		);
-		const hops = (await announced.next())?.route.hops ?? [];
+		const hops = (await nextRoute(announced))?.route.hops ?? [];
 		expect(hops).toHaveLength(2);
 		expect(hops[0]).not.toBe(UNKNOWN_HOP);
 		expect(hops[1]).toBe(UNKNOWN_HOP);
@@ -1125,9 +1125,9 @@ test("local readers filter hidden unsolicited namespaces from a legacy peer", as
 			),
 		);
 	}
-	expect((await plain.next())?.prefix).toBe(Path.from("visible"));
-	expect((await opted.next())?.prefix).toBe(Path.from(".stats/node"));
-	expect((await opted.next())?.prefix).toBe(Path.from("visible"));
+	expect((await nextRoute(plain))?.prefix).toBe(Path.from("visible"));
+	expect((await nextRoute(opted))?.prefix).toBe(Path.from(".stats/node"));
+	expect((await nextRoute(opted))?.prefix).toBe(Path.from("visible"));
 	for (const stream of streams) stream.close();
 	plain.close();
 	opted.close();

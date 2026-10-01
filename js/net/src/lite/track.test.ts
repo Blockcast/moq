@@ -141,8 +141,8 @@ test("mutated TrackInfo fields emit no bytes on encode", async () => {
 for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 	test(`optional max age survives ${version}`, async () => {
 		for (const maxAge of [undefined, 0, 30_000, Number.MAX_SAFE_INTEGER]) {
-			const encoded = await bytes((w) => new TrackInfo({ maxAge }).encode(w, version));
-			const got = await TrackInfo.decode(new Reader(undefined, encoded), version);
+			const encoded = await bytes((w) => new TrackInfo({ maxAge }).encode(w, version), version);
+			const got = await TrackInfo.decode(new Reader(undefined, encoded, version), version);
 			expect(got.maxAge).toBe(
 				version !== Version.DRAFT_07 && maxAge === Number.MAX_SAFE_INTEGER ? undefined : maxAge,
 			);
@@ -152,8 +152,8 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 
 for (const version of [Version.DRAFT_05, Version.DRAFT_06]) {
 	test(`legacy unlimited value fits the old u53 reader on ${version}`, async () => {
-		const encoded = await bytes((w) => new TrackInfo({}).encode(w, version));
-		const old = new Reader(undefined, encoded);
+		const encoded = await bytes((w) => new TrackInfo({}).encode(w, version), version);
+		const old = new Reader(undefined, encoded, version);
 		await old.u53(); // message length
 		await old.u8(); // priority
 		if (version === Version.DRAFT_05) await old.bool();
@@ -170,12 +170,12 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06]) {
 				if (version === Version.DRAFT_05) await w.bool(false);
 				await w.u62(age);
 				await w.u53(1000);
-			});
+			}, version);
 			const encoded = await bytes(async (w) => {
 				await w.u53(payload.length);
 				await w.write(payload);
-			});
-			const info = await TrackInfo.decode(new Reader(undefined, encoded), version);
+			}, version);
+			const info = await TrackInfo.decode(new Reader(undefined, encoded, version), version);
 			expect(info.maxAge).toBe(age < boundary ? Number(age) : undefined);
 		}
 	});

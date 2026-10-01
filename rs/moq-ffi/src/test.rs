@@ -581,7 +581,7 @@ async fn raw_audio_codec_default_frame() {
 	};
 	assert!(message.contains("no aac audio encoder"), "{message}");
 
-	broadcast.finish().unwrap();
+	broadcast.close().unwrap();
 }
 
 #[tokio::test]
