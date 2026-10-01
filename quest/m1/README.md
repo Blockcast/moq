@@ -22,7 +22,6 @@ QUIC studies there on that rule.
 
 ## Required
 
-- [Cluster idle timeout](/quest/m1/cluster-idle-timeout.md) - a relay notices a silent peer relay within seconds, not after the shared 30 s QUIC idle timeout
 - [moq-transport peers are plain clients](/quest/m1/ietf-cluster-off.md) - no moq-transport session negotiates the cluster extension, so none can splice a pool's members on a Hop ID label
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - edge and core tiers carry each broadcast into a region once over path vector, with the backbone hidden from end users
 - [Remove `--hop`](/quest/m1/hop-removal.md) - on `dev`, redundant publishers share an explicit `@<epoch>`, and `--hop` and the publisher's Hop ID are gone

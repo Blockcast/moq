@@ -84,7 +84,7 @@ registry.
 - Unbatched, one relay restart at 340 relays sent half a million liveness
   messages; batched for 50 ms, 27k.
 - Failure detection, not routing, sets every outage window: a silent link or
-  relay loss is noticed after the 30 s QUIC idle timeout in every candidate,
+  relay loss is noticed only after the QUIC idle timeout in every candidate,
   and subscribes through it go nowhere until then.
 - The simulator saw no loop while views agreed, and HRW split an equal-cost
   pool 63/49 where a hash of the announced prefix sent all of it to one
