@@ -362,19 +362,23 @@ groups fetchable, which the [HLS gateway](/bin/hls) depends on. `export --max-ag
 stalled group before skipping. Raising the first never delays playback.
 
 `export ts` takes `--delay` (default 500 ms) instead, and works like an SRT
-receiver's latency. Every frame is muxed that long after its decode time,
-with the clock started when the first frame arrived, so the output keeps the
-source's pace and muxes all tracks in decode order whatever their arrival
-skew: two exporters of one broadcast emit them in one order. A frame that
-arrives later than its deadline is dropped, and video then resumes at its next
-keyframe. The clock follows the source's, so a source whose clock runs a little
-fast or slow neither goes late nor piles up over a long run, and a lead it
-started with wears away. The output's PCR is that clock, so it keeps to what
-ISO/IEC 13818-1 allows a system clock: within 30 ppm of the exporter's, its
-rate changing by at most 0.075 Hz/s. Catching up with a source near that limit
-takes hours, and one further off fails the export once it has used half the
-delay. Each 25 ms
-slice of the output is written when the clock reaches it. The delay is also how
+receiver's latency. Every frame is muxed that long after its decode time, on
+a clock that keeps the source's pace and muxes all tracks in decode order
+whatever their arrival skew: two exporters of one broadcast emit them in one
+order. The export joins at the newest group and holds its output until a
+track starts its next group, or one of the frames it holds falls due, then
+starts the clock on the freshest frame it saw. What of the joined group is
+older than the delay is dropped, so a joiner runs at the delay from its first
+output. A frame that arrives later than its deadline is dropped, and video
+then resumes at its next keyframe. The clock follows the source's, measured
+from the frames that arrive least delayed, so a source whose clock runs a
+little fast or slow neither goes late nor piles up over a long run, and a
+spell of network queueing does not move it. The output's PCR is that clock,
+so it keeps to what ISO/IEC 13818-1 allows a system clock: within 30 ppm of
+the exporter's, its rate changing by at most 0.075 Hz/s. Catching up with a
+source near that limit takes hours; one further off is counted in the
+export's stats, and fails the export once it has used half the delay. Each
+25 ms slice of the output is written when the clock reaches it. The delay is also how
 stale a group may get before it is skipped. `--delay 0` holds nothing and drops
 nothing, writing frames in arrival order as they come.
 

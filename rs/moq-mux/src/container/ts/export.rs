@@ -89,6 +89,21 @@ fn sanitize_mux_rate(rate: u64) -> Option<u64> {
 	(1..=MAX_MUX_RATE).contains(&rate).then_some(rate)
 }
 
+/// How an [`Export`]'s release clock is keeping up with the source. See [`Export::stats`].
+#[derive(Clone, Debug, Default, PartialEq)]
+#[non_exhaustive]
+pub struct ExportStats {
+	/// Frames dropped for arriving after their deadline, and the frames a video track then
+	/// dropped waiting for its next keyframe.
+	pub dropped: u64,
+	/// How fast the source's clock runs against ours, in parts per million (positive runs
+	/// fast), as last measured. `None` until there is a measurement.
+	pub drift: Option<f64>,
+	/// How many measurements found the source's clock further off ours than the 30 ppm an
+	/// MPEG-TS system clock may be (ISO/IEC 13818-1 2.4.2.1), which the output cannot follow.
+	pub out_of_tolerance: u64,
+}
+
 /// Subscribe to a broadcast and produce an MPEG-TS byte stream.
 ///
 /// Use [`next`](Self::next) to pull one [`Frame`] per PCR grid slot: its `payload`
@@ -176,6 +191,8 @@ struct Pending {
 	skip: u64,
 	/// The earliest the frame could have arrived: when its source was last found empty.
 	arrived: web_async::time::Instant,
+	/// When it was read: the latest it could have arrived.
+	read: web_async::time::Instant,
 }
 
 /// A frame waiting in the jitter buffer, with what it needs from the moment it was read.
@@ -312,6 +329,7 @@ impl Track {
 			restart,
 			skip,
 			arrived,
+			read,
 		} = pending;
 		let dts = dts.filter(|&dts| dts != to_ticks(frame.timestamp));
 		let decode = dts
@@ -319,6 +337,7 @@ impl Track {
 			.unwrap_or(frame.timestamp);
 		let arrival = Arrival {
 			arrived,
+			read,
 			decode,
 			restart,
 			skip,
@@ -734,16 +753,20 @@ impl<E: catalog::Catalog> Export<E> {
 	}
 
 	/// Read each track from the oldest group the delay still reaches instead of the live
-	/// edge, for a test that writes a broadcast whole before exporting it.
+	/// edge, and anchor the clock on the first frame instead of acquiring it, for a test that
+	/// writes a broadcast whole before exporting it.
 	#[cfg(test)]
 	pub(super) fn with_replay(mut self) -> Self {
 		self.replay = true;
+		self.jitter = jitter::Buffer::new(self.delay).replay();
 		self
 	}
 
 	/// Mux each frame this long after its decode time, like an SRT receiver's TSBPD.
 	///
-	/// The clock starts at the first frame's arrival, so the output keeps the source's
+	/// The clock is acquired before anything goes out: frames are held until a track starts
+	/// a new group, or for the delay at most, and the freshest of them sets the clock, so a
+	/// joiner runs at the delay from its first output. The output then keeps the source's
 	/// pace and muxes every track in `(DTS, PID)` order whatever the arrival skew between
 	/// them. A frame that arrives after its deadline is dropped, and a video track that
 	/// dropped one resumes at its next keyframe. The delay is also each source's staleness
@@ -757,6 +780,10 @@ impl<E: catalog::Catalog> Export<E> {
 	pub fn with_delay(mut self, delay: Duration) -> Self {
 		self.delay = delay;
 		self.jitter = jitter::Buffer::new(delay);
+		#[cfg(test)]
+		if self.replay {
+			self.jitter = jitter::Buffer::new(delay).replay();
+		}
 		self.schedule = Schedule::new(delay);
 		self.schedule.set_rate(self.mux_rate);
 		self
@@ -1004,6 +1031,7 @@ impl<E: catalog::Catalog> Export<E> {
 							restart: track.source.restarts(),
 							skip: track.source.skips(),
 							arrived: track.empty,
+							read: web_async::time::Instant::now(),
 						};
 						// A new timeline must reach the reset before tune-in alignment can drop it.
 						if let Some(start) = video_start
@@ -1270,6 +1298,15 @@ impl<E: catalog::Catalog> Export<E> {
 	#[cfg(test)]
 	pub(super) fn dropped(&self) -> u64 {
 		self.jitter.dropped()
+	}
+
+	/// How the release clock is keeping up with the source.
+	pub fn stats(&self) -> ExportStats {
+		ExportStats {
+			dropped: self.jitter.dropped(),
+			drift: self.jitter.drift().map(|drift| drift * 1e6),
+			out_of_tolerance: self.jitter.out_of_tolerance(),
+		}
 	}
 
 	/// When the next queued frame is due, or the next grid slot while media is queued or

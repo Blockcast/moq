@@ -16,7 +16,7 @@ use mpeg2ts::ts::{ReadTsPacket, TsPacketReader, TsPayload};
 use tokio::time::Instant;
 
 use crate::catalog::hang::Container as HangContainer;
-use crate::container::ts::Export;
+use crate::container::ts::{Export, ExportStats};
 use crate::container::ts::export::PCR_INTERVAL;
 use crate::container::{Container as _, Frame, Producer};
 
@@ -520,21 +520,24 @@ async fn a_skip_while_running_keeps_one_clock() {
 // A source's clock is never the receiver's. A transport stream's 27 MHz may be off by 30 ppm,
 // which walks a fixed anchor 108 ms an hour: a source running slow makes every frame late in
 // turn once the walk passes the delay, and one running fast makes the buffer grow without bound.
-// These cases run the source 400 ppm off, past what it may be off but inside the 500 ppm the
-// jitter buffer steers by, so that five minutes of media walk an unsteered clock 120 ms.
+// The output's clock may follow it only as fast as 13818-1 lets a system clock change, so
+// reaching a source 30 ppm off takes hours (the jitter buffer's own tests run a day); these
+// cases run twenty minutes of a source at the limit, long enough to measure its rate.
 
-/// How far the instant each slot goes out may wander against the source over a run. A
-/// tracker may lag; what this rules out is the delay walking with the source clock.
-const DRIFT_SLACK: Duration = Duration::from_millis(100);
+/// How far the instant each slot goes out may wander against the source over a run: what
+/// reaching a source at the limit costs under the slew limit (30 ppm squared over twice
+/// 0.075 Hz/s of 27 MHz), and a slot.
+const DRIFT_SLACK: Duration = Duration::from_millis(162 + 25);
 
-/// Five minutes of media.
-const DRIFT_TICKS: u64 = 300_000_000 / VIDEO_US;
+/// Twenty minutes of media.
+const DRIFT_TICKS: u64 = 1_200_000_000 / VIDEO_US;
 
-/// The spread of (slot sent − source's clock at the slot) after the first 10 s, and the drops.
-async fn on_a_scaled_clock(scale: f64) -> (Duration, u64) {
+/// The spread of (slot sent − source's clock at the slot) after the first 10 s over `ticks`
+/// of media, the drops, and the export's stats at the end.
+async fn on_a_scaled_clock(scale: f64, ticks: u64) -> (Duration, u64, ExportStats) {
 	let mut live = Live::new(scale, 0);
 	let mut leg = live.join(Duration::ZERO).await;
-	live.run(DRIFT_TICKS, &mut [&mut leg], |_| false).await;
+	live.run(ticks, &mut [&mut leg], |_| false).await;
 
 	let first = leg.out.first().expect("output").1.timestamp.as_micros() as u64;
 	let held: Vec<Duration> = leg
@@ -545,21 +548,34 @@ async fn on_a_scaled_clock(scale: f64) -> (Duration, u64) {
 		.collect();
 	assert!(held.len() > 1_000, "too little output to judge: {}", held.len());
 	let spread = *held.iter().max().unwrap() - *held.iter().min().unwrap();
-	(spread, leg.export.dropped())
+	(spread, leg.export.dropped(), leg.export.stats())
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_slow_source_clock_keeps_the_delay() {
-	let (spread, dropped) = on_a_scaled_clock(0.9996).await;
+	let (spread, dropped, stats) = on_a_scaled_clock(1.0 - 30e-6, DRIFT_TICKS).await;
 	assert_eq!(dropped, 0, "frames went late as the source fell behind the anchor");
 	assert!(spread <= DRIFT_SLACK, "the delay walked by {spread:?}");
+	let drift = stats.drift.expect("a measurement");
+	assert!((drift + 30.0).abs() < 0.5, "measured {drift} ppm");
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_fast_source_clock_keeps_the_delay() {
-	let (spread, dropped) = on_a_scaled_clock(1.0004).await;
+	let (spread, dropped, stats) = on_a_scaled_clock(1.0 + 30e-6, DRIFT_TICKS).await;
 	assert_eq!(dropped, 0);
 	assert!(spread <= DRIFT_SLACK, "the delay walked by {spread:?}");
+	let drift = stats.drift.expect("a measurement");
+	assert!((drift - 30.0).abs() < 0.5, "measured {drift} ppm");
+}
+
+/// A source 400 ppm off, past what the output's clock may follow, is measured and counted.
+#[tokio::test(start_paused = true)]
+async fn a_source_past_the_limit_is_counted() {
+	let (_, _, stats) = on_a_scaled_clock(1.0004, 300_000_000 / VIDEO_US).await;
+	let drift = stats.drift.expect("a measurement");
+	assert!((drift - 400.0).abs() < 1.0, "measured {drift} ppm");
+	assert!(stats.out_of_tolerance > 0, "not counted");
 }
 
 // A 1+1 pair is two receivers of one broadcast whose outputs a seamless switch compares packet
@@ -637,7 +653,7 @@ async fn two_legs_pad_the_same_slots_at_a_fractional_rate() {
 
 /// A slow group reaches both legs. Both have to skip it the same way.
 #[tokio::test(start_paused = true)]
-#[ignore = "fails on 49efbc9a1: after the skip each leg anchors its new generation on its own reads"]
+#[ignore = "1+1 (ST 2022-7) packet identity across a skip is deferred to an m2 follow-up"]
 async fn two_legs_render_a_skip_the_same_way() {
 	for lag in LAGS {
 		let (a, b, from) = pair(1.0, lag, 12 * GOP, |tick| (6 * GOP + 7..7 * GOP).contains(&tick)).await;
@@ -650,7 +666,7 @@ async fn two_legs_render_a_skip_the_same_way() {
 #[tokio::test(start_paused = true)]
 async fn two_legs_render_a_drifting_source_the_same_way() {
 	for scale in [0.9996, 1.0004] {
-		let (a, b, from) = pair(scale, 0, DRIFT_TICKS * 3 / 5, |_| false).await;
+		let (a, b, from) = pair(scale, 0, 180_000_000 / VIDEO_US, |_| false).await;
 		assert_same_packets(&a, &b, from);
 	}
 }
@@ -662,7 +678,6 @@ async fn two_legs_render_a_drifting_source_the_same_way() {
 /// A receiver that joins a running broadcast mid-group keeps its output's system clock within
 /// 30 ppm of the source's and slews it no faster than 0.075 Hz/s, over 30 s windows of slots.
 #[tokio::test(start_paused = true)]
-#[ignore = "fails on 49efbc9a1: the clock steers at 500 ppm to wear away the join's lead"]
 async fn a_joiner_keeps_the_system_clock_in_tolerance() {
 	const WINDOW: u64 = 30_000_000;
 	let mut live = Live::new(1.0, 0);
@@ -702,6 +717,33 @@ async fn a_joiner_keeps_the_system_clock_in_tolerance() {
 			slew <= 0.075,
 			"the system clock slewed {slew:.3} Hz/s at {:.0} s",
 			pair[1].0
+		);
+	}
+}
+
+/// A receiver that joins mid-group runs at the delay from its first output: every slot goes
+/// out a fixed lag after the source sent its media (the delay before release, and the delay
+/// the schedule sends ahead of the decode time), rather than that plus how old the group it
+/// joined on was.
+#[tokio::test(start_paused = true)]
+async fn a_joiner_runs_at_the_delay_from_its_first_output() {
+	let mut live = Live::new(1.0, 0);
+	live.run(JOIN, &mut [], |_| false).await;
+	let mut leg = live.join(Duration::ZERO).await;
+	live.run(JOIN + 10_000_000 / VIDEO_US, &mut [&mut leg], |_| false).await;
+	assert_eq!(leg.export.dropped(), 0, "every frame arrived inside its deadline");
+
+	let held: Vec<Duration> = leg
+		.out
+		.iter()
+		.map(|(sent, frame)| sent.saturating_duration_since(live.sent(frame.timestamp.as_micros() as u64)))
+		.collect();
+	assert!(held.len() > 100, "too little output to judge: {}", held.len());
+	let slot = Duration::from_millis(SLOT_MS as u64);
+	for (i, held) in held.iter().enumerate() {
+		assert!(
+			*held >= 2 * DELAY && *held <= 2 * DELAY + 2 * slot,
+			"slot {i} went out {held:?} after the source sent it, against a {DELAY:?} delay"
 		);
 	}
 }

@@ -5307,7 +5307,8 @@ async fn a_heavy_passage_fills_the_slots_before_it() {
 		.await
 		.unwrap()
 		.with_mux_rate(2_000_000)
-		.with_delay(Duration::from_millis(500));
+		.with_delay(Duration::from_millis(500))
+		.with_replay();
 	let frames = drain_frames(&mut export).await;
 	let ts: Vec<u8> = frames.iter().flat_map(|f| f.payload.iter().copied()).collect();
 	assert_eq!(video_pes_timing(&ts).len(), 100, "every frame went out");
@@ -5826,7 +5827,11 @@ async fn declared_reorder_sizes_the_decode_clock_from_the_first_frame() {
 		&[],
 	);
 	let max_age = Duration::from_millis(500);
-	let (mut late, mut whole) = (rig.export(max_age).await, rig.export(max_age).await);
+	// Written as fast as it is read, so the broadcast is all there at once.
+	let (mut late, mut whole) = (
+		rig.export(max_age).await.with_replay(),
+		rig.export(max_age).await.with_replay(),
+	);
 	let (mut out_late, mut out_whole) = (Vec::new(), Vec::new());
 	for tick in 0..TICKS / 2 {
 		while rig.audio_before(tick + 2) {
