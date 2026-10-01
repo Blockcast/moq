@@ -915,14 +915,16 @@ impl AnnounceRun {
 			if let Poll::Ready(res) = stream.reader.poll_closed(&mut cx) {
 				return Poll::Ready(res);
 			}
-			if let Some(hold) = &mut self.hold
-				&& let Poll::Ready((suffix, hops, cost)) = hold.poll_due(waiter)
-			{
-				tracing::debug!(route = %origin.absolute(&suffix), "announce after hold-down");
-				self.start(stream, suffix, hops, cost)?;
-				continue;
-			}
+			// Queued updates come first, so a held route that was withdrawn while the
+			// writer was blocked is dropped rather than advertised.
 			let Poll::Ready(next) = announced.poll_next(waiter) else {
+				if let Some(hold) = &mut self.hold
+					&& let Poll::Ready((suffix, hops, cost)) = hold.poll_due(waiter)
+				{
+					tracing::debug!(route = %origin.absolute(&suffix), "announce after hold-down");
+					self.start(stream, suffix, hops, cost)?;
+					continue;
+				}
 				return Poll::Pending;
 			};
 
@@ -2126,6 +2128,8 @@ mod announce_test {
 		best: Option<crate::model::AnnounceProducer>,
 		fallback: Option<crate::model::AnnounceProducer>,
 		wire: Wire,
+		/// Whether the peer accepts writes.
+		open: kio::Producer<bool>,
 		task: tokio::task::JoinHandle<Result<(), Error>>,
 	}
 
@@ -2138,8 +2142,9 @@ mod announce_test {
 			let log = Log::default();
 			let writes = log.writes.clone();
 			let consumer = origin.consume();
+			let open = kio::Producer::new(true);
 			let mut stream = Stream::<SinkSession, Version> {
-				writer: Writer::new(SinkSend::new(log), VERSION),
+				writer: Writer::new(SinkSend::gated(log, open.consume()), VERSION),
 				reader: Reader::new(PendingRecv, VERSION),
 			};
 			let task = tokio::spawn(async move {
@@ -2158,8 +2163,17 @@ mod announce_test {
 				best: Some(best),
 				fallback: Some(fallback),
 				wire,
+				open,
 				task,
 			}
+		}
+
+		/// Let the peer accept writes, or block it.
+		fn set_open(&self, open: bool) {
+			let Ok(mut gate) = self.open.write() else {
+				panic!("gate closed")
+			};
+			*gate = open;
 		}
 
 		fn assert_idle(&self) {
@@ -2213,6 +2227,26 @@ mod announce_test {
 			[lite::AnnounceBroadcast::Active { .. }] => {}
 			other => panic!("expected the new route, got {other:?}"),
 		}
+	}
+
+	/// A replacement withdrawn while the peer was blocked is dropped, not sent once
+	/// the hold-down passes: the withdrawal queued behind it is applied first.
+	#[tokio::test(start_paused = true)]
+	async fn replacement_withdrawn_while_blocked_is_never_sent() {
+		let mut h = Held::new().await;
+		h.set_open(false);
+		h.best = None;
+		settle().await;
+		h.fallback = None;
+		tokio::time::sleep(HOLD_DOWN * 2).await;
+
+		h.set_open(true);
+		settle().await;
+		match h.wire.take_announces().as_slice() {
+			[lite::AnnounceBroadcast::EndedId { id: 0 }] => {}
+			other => panic!("expected only the retraction, got {other:?}"),
+		}
+		h.assert_idle();
 	}
 
 	/// A better route while the advertised one still stands restarts at once:
