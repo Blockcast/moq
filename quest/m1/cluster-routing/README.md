@@ -39,9 +39,9 @@ link-state and existence-split design planned earlier that day:
   path vector with hop lists stays loop-free, path hunting is confined to the
   cores, liveness flooding (the simulator's dominant link-state cost) is never
   paid, and failure detection sets the outage window either way. The parked
-  implementation is #4631. If stale paths remain on the tiered layout, the
-  fix is [Path hunting](/quest/m0/path-hunting.md), promoted to m0: a hold-down
-  on route updates, with no wire change.
+  implementation is #4631. Stale paths on any layout are held down: a relay
+  advertises a withdrawn route's replacement to its peers only after 1 s,
+  with no wire change.
 - The line lands on `main`: its children are additive. The two breaking
   changes left it for `dev` on their own:
   [Remove `--hop`](/quest/m1/hop-removal.md) and

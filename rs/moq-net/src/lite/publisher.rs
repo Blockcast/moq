@@ -45,8 +45,11 @@ pub(super) struct PublisherConfig<S: crate::transport::poll::Session> {
 }
 
 /// How long a peer relay waits for the replacement when the route we advertised
-/// is withdrawn. A withdrawal crosses the mesh within this, so a replacement
-/// derived from the withdrawn announcement is gone before it would spread.
+/// is withdrawn. A withdrawal must cross the mesh within this, so a replacement
+/// derived from the withdrawn announcement is gone before it would spread: on
+/// moq.pro's live graph that takes about 300 ms (`tests/mesh_withdraw.rs`), and
+/// 1 s still holds at four times its estimated link latencies. It is also what a
+/// genuine failover costs a peer left with no other path.
 const HOLD_DOWN: Duration = Duration::from_secs(1);
 
 /// Context shared by every control-stream child.

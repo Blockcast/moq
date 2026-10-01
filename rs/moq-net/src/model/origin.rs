@@ -3829,7 +3829,7 @@ impl Consumer {
 
 	/// Whether a live route this consumer sees still covers `path` along exactly `hops`.
 	pub(crate) fn carries(&self, path: impl AsPath, hops: &Hops) -> bool {
-		let named = self.root.join(&path.as_path()).to_owned();
+		let named = self.root.join(path.as_path()).to_owned();
 		let Some(absolute) = self.scope.resolve(&named) else {
 			return false;
 		};
