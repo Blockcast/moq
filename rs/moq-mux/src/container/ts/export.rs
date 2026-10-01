@@ -205,9 +205,30 @@ struct Track {
 	/// Decode-clock reserve: how far ahead of its PTS each frame decodes. Only video sizes it;
 	/// every other kind holds [`DEFAULT_DTS_RESERVE`].
 	reserve: Reserve,
+	/// How long a receiver takes to pass one of its packets on ([`drain`]), so its last
+	/// packet has to arrive that long before it decodes.
+	drain: Duration,
 }
 
 impl Track {
+	/// A track reading `source`, its PID filled in by the catalog.
+	fn new(source: ExportSource, kind: Kind) -> Self {
+		Self {
+			source,
+			pending: None,
+			empty: web_async::time::Instant::now(),
+			discontinuity: 0,
+			finished: false,
+			pid: 0,
+			kind,
+			descriptors: Vec::new(),
+			clock: DecodeClock::default(),
+			timeline: None,
+			reserve: Reserve::default(),
+			drain: Duration::ZERO,
+		}
+	}
+
 	/// Author the frame's decode time and queue it in the jitter buffer.
 	///
 	/// The decode clock runs here, as frames are read, because the deadline is
@@ -871,7 +892,10 @@ impl<E: catalog::Catalog> Export<E> {
 			self.last_timestamp = Some(ready.item.frame.timestamp);
 			let decode = ready.item.decode.as_nanos();
 			self.mux(&name, ready.item)?;
-			self.lay(Some(schedule::due(decode)))?;
+			// A later frame decodes no earlier, so it can be due no earlier than this,
+			// less the longest drain of any track.
+			let drain = self.tracks.values().map(|track| track.drain).max().unwrap_or_default();
+			self.lay(Some(schedule::slot(decode.saturating_sub(drain.as_nanos()))))?;
 		}
 
 		// 5. Once every track has drained, nothing more can ride the slots still open, so
@@ -1137,47 +1161,33 @@ impl<E: catalog::Catalog> Export<E> {
 		let mut old = std::mem::take(&mut self.tracks);
 		for (name, config) in catalog.video.renditions.iter() {
 			let kind = video_kind(config, name)?;
-			let descriptors = track_descriptors(&mpegts, name);
-			let pid = pids[name];
-			match old.remove(name) {
-				Some(mut track) => {
-					track.pid = pid;
-					track.kind = kind;
-					track.descriptors = descriptors;
-					track.reserve.configure(config, name);
-					self.tracks.insert(name.clone(), track);
-				}
-				None => {
-					let Some(source) = ExportSource::for_video(&self.source, name, config, self.delay)? else {
-						continue;
-					};
-					let mut reserve = Reserve::default();
-					reserve.configure(config, name);
-					self.insert_track(name, source, pid, kind, descriptors, reserve);
-				}
-			}
+			let mut track = match old.remove(name) {
+				Some(track) => track,
+				None => match ExportSource::for_video(&self.source, name, config, self.delay)? {
+					Some(source) => Track::new(source, kind.clone()),
+					None => continue,
+				},
+			};
+			track.kind = kind;
+			track.drain = drain(video_rate(config, name));
+			track.reserve.configure(config, name);
+			self.refresh(name, track, pids[name], track_descriptors(&mpegts, name));
 		}
 		for (name, config) in catalog.audio.renditions.iter() {
 			let kind = audio_kind(config, name)?;
-			let descriptors = track_descriptors(&mpegts, name);
-			let pid = pids[name];
-			match old.remove(name) {
-				Some(mut track) => {
-					track.pid = pid;
-					track.kind = kind;
-					track.descriptors = descriptors;
-					self.tracks.insert(name.clone(), track);
-				}
-				None => {
-					let Some(source) = ExportSource::for_audio(&self.source, name, config, self.delay)? else {
-						continue;
-					};
-					self.insert_track(name, source, pid, kind, descriptors, Reserve::default());
-				}
-			}
+			let mut track = match old.remove(name) {
+				Some(track) => track,
+				None => match ExportSource::for_audio(&self.source, name, config, self.delay)? {
+					Some(source) => Track::new(source, kind.clone()),
+					None => continue,
+				},
+			};
+			track.kind = kind;
+			track.drain = drain(audio_rate(config));
+			self.refresh(name, track, pids[name], track_descriptors(&mpegts, name));
 		}
-		for (name, track) in mpegts.tracks.iter() {
-			let Some(verbatim) = &track.verbatim else {
+		for (name, entry) in mpegts.tracks.iter() {
+			let Some(verbatim) = &entry.verbatim else {
 				continue;
 			};
 			let kind = Kind::Verbatim {
@@ -1185,22 +1195,21 @@ impl<E: catalog::Catalog> Export<E> {
 				framing: verbatim.framing,
 				stream_id: verbatim.stream_id,
 			};
-			let descriptors = track.descriptors.clone();
-			let pid = pids[name];
-			match old.remove(name) {
-				Some(mut existing) => {
-					existing.pid = pid;
-					existing.kind = kind;
-					existing.descriptors = descriptors;
-					self.tracks.insert(name.clone(), existing);
-				}
-				None => {
-					let source = ExportSource::for_stream(&self.source, name, self.delay)?;
-					self.insert_track(name, source, pid, kind, descriptors, Reserve::default());
-				}
-			}
+			let mut track = match old.remove(name) {
+				Some(track) => track,
+				None => Track::new(ExportSource::for_stream(&self.source, name, self.delay)?, kind.clone()),
+			};
+			track.kind = kind;
+			self.refresh(name, track, pids[name], entry.descriptors.clone());
 		}
 		Ok(())
+	}
+
+	/// Keep `track` under `name` with this snapshot's PID and descriptors.
+	fn refresh(&mut self, name: &str, mut track: Track, pid: u16, descriptors: Vec<catalog::Descriptor>) {
+		track.pid = pid;
+		track.descriptors = descriptors;
+		self.tracks.insert(name.to_string(), track);
 	}
 
 	/// Point each stale track this snapshot lists at the returned broadcast.
@@ -1230,34 +1239,6 @@ impl<E: catalog::Catalog> Export<E> {
 			track.empty = web_async::time::Instant::now();
 		}
 		Ok(())
-	}
-
-	/// Insert a freshly created export track.
-	fn insert_track(
-		&mut self,
-		name: &str,
-		source: ExportSource,
-		pid: u16,
-		kind: Kind,
-		descriptors: Vec<catalog::Descriptor>,
-		reserve: Reserve,
-	) {
-		self.tracks.insert(
-			name.to_string(),
-			Track {
-				source,
-				pending: None,
-				empty: web_async::time::Instant::now(),
-				discontinuity: 0,
-				finished: false,
-				pid,
-				kind,
-				descriptors,
-				clock: DecodeClock::default(),
-				timeline: None,
-				reserve,
-			},
-		);
 	}
 
 	/// How many frames were dropped for missing their deadline.
@@ -1641,7 +1622,9 @@ impl<E: catalog::Catalog> Export<E> {
 				self.write_pes(&mut out, &unit, &es_payload)?;
 			}
 		}
-		self.schedule.push(decode.as_nanos(), out, keyframe);
+		let drain = self.tracks.get(name).map_or(Duration::ZERO, |track| track.drain);
+		self.schedule
+			.push(decode.as_nanos().saturating_sub(drain.as_nanos()), out, keyframe);
 		Ok(())
 	}
 
@@ -1700,7 +1683,7 @@ impl<E: catalog::Catalog> Export<E> {
 	/// The clock packet for grid slot `index`.
 	///
 	/// The value runs one slot behind the boundary, so the bytes of slot `index` are timed
-	/// up to its boundary: a unit due in that slot decodes no earlier ([`schedule::due`]).
+	/// up to its boundary: a unit due in that slot decodes no earlier ([`schedule::slot`]).
 	/// Back off through the 33-bit wrap rather than saturating: a timeline that starts in
 	/// its first slot would otherwise clamp to zero and break the uniform step. The wire
 	/// field is a circular clock, so the masked wrapped value is the correct mod-2^33
@@ -2015,6 +1998,94 @@ fn video_kind(config: &VideoConfig, name: &str) -> anyhow::Result<Kind> {
 		VideoCodec::H264(_) => Ok(Kind::Video(StreamType::H264)),
 		VideoCodec::H265(_) => Ok(Kind::Video(StreamType::H265)),
 		other => anyhow::bail!("TS export does not support video codec {other:?} (track '{name}')"),
+	}
+}
+
+/// How long a receiver takes to pass one transport packet on at `rate` bits per second.
+///
+/// A packet's bytes reach a decoder buffer only once it has drained through the T-STD
+/// buffers ahead of it (ISO 13818-1 2.4.2), so a unit's last packet has to arrive at least
+/// this long before its decode time. Without it a unit whose DTS sits on a PCR slot
+/// boundary, as a source's own 25 fps timestamps put every fifth frame, arrives complete
+/// only after it decodes.
+fn drain(rate: u64) -> Duration {
+	Duration::from_nanos(TsPacket::SIZE as u64 * 8 * 1_000_000_000 / rate.max(1))
+}
+
+/// The slowest rate on a video stream's T-STD path, in bits per second: the MB to EB leak,
+/// Rbx = CpbBrNalFactor * MaxBR for its level (H.222.0 2.14.3.1, 2.17.2; H.264 Table A-1,
+/// H.265 Table A.8). The transport buffer's Rx is never slower. A level the tables don't list
+/// takes the lowest, which only sends its units earlier.
+fn video_rate(config: &VideoConfig, name: &str) -> u64 {
+	let rate = match &config.codec {
+		VideoCodec::H264(h264) => {
+			// level_idc 11 with constraint_set3_flag is level 1b for Baseline, Main and Extended.
+			let level_1b = h264.level == 11 && h264.constraints & 0x10 != 0 && matches!(h264.profile, 66 | 77 | 88);
+			let max_br = match h264.level {
+				_ if level_1b => Some(128),
+				9 => Some(128),
+				10 => Some(64),
+				11 => Some(192),
+				12 => Some(384),
+				13 => Some(768),
+				20 => Some(2_000),
+				21 | 22 => Some(4_000),
+				30 => Some(10_000),
+				31 => Some(14_000),
+				32 | 40 => Some(20_000),
+				41 | 42 => Some(50_000),
+				50 => Some(135_000),
+				51 | 52 | 60 => Some(240_000),
+				61 => Some(480_000),
+				62 => Some(800_000),
+				_ => None,
+			};
+			max_br.map(|max_br| 1_200 * max_br)
+		}
+		VideoCodec::H265(h265) => {
+			let max_br = match (h265.level_idc, h265.tier_flag) {
+				(30, false) => Some(128),
+				(60, false) => Some(1_500),
+				(63, false) => Some(3_000),
+				(90, false) => Some(6_000),
+				(93, false) => Some(10_000),
+				(120, false) => Some(12_000),
+				(120, true) => Some(30_000),
+				(123, false) => Some(20_000),
+				(123, true) => Some(50_000),
+				(150, false) => Some(25_000),
+				(150, true) => Some(100_000),
+				(153, false) => Some(40_000),
+				(153, true) => Some(160_000),
+				(156 | 180, false) => Some(60_000),
+				(156 | 180, true) => Some(240_000),
+				(183, false) => Some(120_000),
+				(183, true) => Some(480_000),
+				(186, false) => Some(240_000),
+				(186, true) => Some(800_000),
+				_ => None,
+			};
+			max_br.map(|max_br| 1_100 * max_br)
+		}
+		_ => None,
+	};
+	rate.unwrap_or_else(|| {
+		tracing::warn!(track = %name, codec = %config.codec, "no T-STD rate for this level; sending its units early");
+		1_200 * 64
+	})
+}
+
+/// The rate an audio stream's transport buffer drains at, in bits per second (H.222.0
+/// 2.4.2.3): by channel count for ADTS AAC, 2 Mb/s for every other audio.
+fn audio_rate(config: &AudioConfig) -> u64 {
+	if !matches!(config.codec, AudioCodec::AAC(_)) {
+		return 2_000_000;
+	}
+	match config.channel_count {
+		0..=2 => 2_000_000,
+		3..=8 => 5_529_600,
+		9..=12 => 8_294_400,
+		_ => 33_177_600,
 	}
 }
 

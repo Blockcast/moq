@@ -4695,6 +4695,115 @@ async fn export_cbr_video() -> Vec<Frame> {
 	drain_frames(&mut exporter).await
 }
 
+/// A frame whose DTS sits on a PCR slot boundary still arrives in time to decode. A source
+/// publishing its own 25 fps timestamps puts every fifth frame there, and an unpadded slot's
+/// last packet is timed right up to the boundary. A receiver still has to drain that packet
+/// into the decoder buffer, at the level's Rbx (16.8 Mb/s for level 3.1), so the frame has to
+/// finish one packet's drain before it decodes.
+#[tokio::test(start_paused = true)]
+async fn a_frame_on_a_slot_boundary_finishes_before_it_decodes() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let track = broadcast
+		.create_track(
+			broadcast.unique_name(".h264"),
+			hang::container::track_info(hang::catalog::PRIORITY.video),
+		)
+		.unwrap();
+	{
+		let mut cfg = VideoConfig::new(H264 {
+			profile: 0x42,
+			constraints: 0xc0,
+			level: 0x1f,
+			inline: true,
+		});
+		cfg.container = Container::Legacy;
+		// A whole number of frames of reserve, so each DTS is an earlier frame's PTS.
+		cfg.jitter = Some(Duration::from_millis(80));
+		catalog
+			.modify()
+			.unwrap()
+			.video
+			.renditions
+			.insert(track.name().to_string(), cfg);
+	}
+	let mut video = Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data));
+	for i in 0..50u64 {
+		let keyframe = i % 25 == 0;
+		let mut nal = vec![if keyframe { 0x65u8 } else { 0x41 }];
+		nal.extend(std::iter::repeat_n(0xAB, 2_000));
+		if keyframe && i > 0 {
+			video.cut(None).unwrap();
+		}
+		video
+			.write(Frame {
+				// ffmpeg's 1.4 s start, on a slot boundary like every fifth frame after it.
+				timestamp: Timestamp::from_micros(1_400_000 + i * 40_000).unwrap(),
+				duration: None,
+				payload: if keyframe {
+					annexb(&[SPS, PPS, &nal])
+				} else {
+					annexb(&[&nal])
+				},
+				keyframe,
+			})
+			.unwrap();
+	}
+	video.finish().unwrap();
+
+	let mut exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
+	let frames = drain_frames(&mut exporter).await;
+	let ts: Vec<u8> = frames.iter().flat_map(|f| f.payload.iter().copied()).collect();
+	let packets: Vec<&[u8]> = ts.chunks(188).collect();
+	let pcrs: Vec<(usize, f64)> = collect_pcrs(&frames)
+		.into_iter()
+		.map(|(at, base, _)| (at, base as f64))
+		.collect();
+	// The time a receiver assigns the start of packet `at`, interpolated between PCRs.
+	let time = |at: usize| {
+		let k = pcrs.partition_point(|&(index, _)| index <= at).checked_sub(1)?;
+		let (&(a, ta), &(b, tb)) = (pcrs.get(k)?, pcrs.get(k + 1)?);
+		Some(ta + (tb - ta) * (at - a) as f64 / (b - a) as f64)
+	};
+
+	// Each video PES: its DTS (else PTS), and the packet it ends on.
+	let mut units: Vec<(u64, usize)> = Vec::new();
+	let mut video_pid = None;
+	let mut reader = TsPacketReader::new(Cursor::new(ts.clone()));
+	let mut at = 0;
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		let pid = packet.header.pid.as_u16();
+		match packet.payload {
+			Some(TsPayload::Pmt(pmt)) => video_pid = pmt.es_info.first().map(|es| es.elementary_pid.as_u16()),
+			Some(TsPayload::PesStart(pes)) if Some(pid) == video_pid => {
+				let decode = pes.header.dts.or(pes.header.pts).unwrap().as_u64();
+				units.push((decode, at));
+			}
+			Some(TsPayload::PesContinuation(_)) if Some(pid) == video_pid => units.last_mut().unwrap().1 = at,
+			_ => {}
+		}
+		at += 1;
+	}
+	assert_eq!(packets.len(), at);
+
+	// One packet at 16.8 Mb/s is 89.5 us, a little over 8 ticks of 90 kHz.
+	let drain = 188.0 * 8.0 / 16_800_000.0 * 90_000.0;
+	let mut on_boundary = 0;
+	for &(decode, last) in &units {
+		let Some(end) = time(last + 1) else { continue };
+		on_boundary += usize::from(decode % 2_250 == 0);
+		assert!(
+			decode as f64 - end >= drain,
+			"the unit decoding at {decode} finishes at {end:.1}, less than a packet's drain before it"
+		);
+	}
+	assert!(
+		on_boundary >= 5,
+		"too few units on a slot boundary to judge: {on_boundary}"
+	);
+}
+
 /// #3334: the clock a receiver recovers from *byte position* has to agree with the
 /// values, because a byte stream carries no other timing. Emitting each media frame
 /// whole put every PCR between two frames instead of among the bytes it labels, so

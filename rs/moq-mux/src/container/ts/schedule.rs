@@ -23,19 +23,9 @@ const PACKET: u64 = TsPacket::SIZE as u64 * 8 * SLOTS_PER_SECOND;
 /// a span that carried no bytes only stalls anything pacing on the asserted values.
 const BACKFILL: u128 = 40;
 
-/// How long before its decode time a unit's last packet has to arrive. A receiver still
-/// moves that packet through its transport and multiplex buffers, which drain no slower
-/// than 2 Mb/s (ISO 13818-1 2.4.2.3), so 0.75 ms a packet.
-const DRAIN: Duration = Duration::from_millis(1);
-
-/// The grid slot a unit decoding at `nanos` must be sent by: its bytes are timed up to the
-/// slot's boundary, which has to fall a [`DRAIN`] before the decode time.
-pub(super) fn due(nanos: u128) -> u128 {
-	slot(nanos.saturating_sub(DRAIN.as_nanos()))
-}
-
-/// The grid slot `nanos` falls in.
-fn slot(nanos: u128) -> u128 {
+/// The grid slot a unit whose last byte has to arrive by `nanos` must be sent by: the
+/// slot's bytes are timed up to its boundary.
+pub(super) fn slot(nanos: u128) -> u128 {
 	nanos / PCR_INTERVAL.as_nanos()
 }
 
@@ -188,14 +178,15 @@ impl Schedule {
 		}
 	}
 
-	/// Queue an access unit (whole TS packets) that decodes at `decode` nanoseconds.
+	/// Queue an access unit (whole TS packets) whose last byte has to arrive by `by`
+	/// nanoseconds: its decode time, less what the receiver needs to pass the last packet on.
 	///
 	/// Units go out in the order they are pushed, which keeps the program tables ahead of
 	/// what they describe. The jitter buffer hands them over in decode order; a unit that
 	/// decodes before one pushed ahead of it (frames read in arrival order under a zero
 	/// delay) is due with it.
-	pub fn push(&mut self, decode: u128, packets: Vec<u8>, keyframe: bool) {
-		let due = due(decode);
+	pub fn push(&mut self, by: u128, packets: Vec<u8>, keyframe: bool) {
+		let due = slot(by);
 		for unit in self.units.iter_mut().rev() {
 			if unit.due <= due {
 				break;
@@ -345,11 +336,6 @@ mod tests {
 		ms * 1_000_000
 	}
 
-	/// A decode time `ms` in, with the drain on top, so the unit is due in `ms`'s slot.
-	fn at(ms: u128) -> u128 {
-		self::ms(ms) + DRAIN.as_nanos()
-	}
-
 	/// 40 packets per slot, the clock packet included.
 	const RATE: u64 = 40 * PACKET;
 
@@ -357,7 +343,7 @@ mod tests {
 	fn a_unit_goes_out_in_its_due_slot() {
 		let mut schedule = Schedule::new(Duration::from_millis(100));
 		schedule.set_rate(Some(RATE));
-		schedule.push(at(1_000), unit(1, 3), true);
+		schedule.push(ms(1_000), unit(1, 3), true);
 		// Nothing past the window is settled until a later unit shows up.
 		let mut slots = Vec::new();
 		while let Some(slot) = schedule.next(Some(slot(ms(1_200)))).unwrap() {
@@ -385,7 +371,7 @@ mod tests {
 	fn a_burst_spreads_over_the_slots_before_it() {
 		let mut schedule = Schedule::new(Duration::from_millis(100));
 		schedule.set_rate(Some(RATE));
-		schedule.push(at(1_000), unit(1, 100), true);
+		schedule.push(ms(1_000), unit(1, 100), true);
 		let mut sent = Vec::new();
 		while let Some(slot) = schedule.next(None).unwrap() {
 			sent.push((slot.index, slot.packets.len() / TsPacket::SIZE));
@@ -398,7 +384,7 @@ mod tests {
 	fn a_burst_too_big_for_the_window_fails() {
 		let mut schedule = Schedule::new(Duration::from_millis(50));
 		schedule.set_rate(Some(RATE));
-		schedule.push(at(1_000), unit(1, 200), true);
+		schedule.push(ms(1_000), unit(1, 200), true);
 		let err = std::iter::from_fn(|| schedule.next(None).transpose()).find_map(Result::err);
 		assert!(err.is_some(), "a burst past the window must fail the export");
 	}
@@ -408,17 +394,17 @@ mod tests {
 	#[test]
 	fn a_late_rate_overruns_for_one_window() {
 		let mut schedule = Schedule::new(Duration::from_millis(100));
-		schedule.push(at(1_000), unit(1, 4), true);
+		schedule.push(ms(1_000), unit(1, 4), true);
 		while schedule.next(Some(slot(ms(1_050)))).unwrap().is_some() {}
 		schedule.set_rate(Some(RATE));
-		schedule.push(at(1_100), unit(1, 150), true);
+		schedule.push(ms(1_100), unit(1, 150), true);
 		let mut sent = Vec::new();
 		while let Some(slot) = schedule.next(None).unwrap() {
 			sent.push((slot.index, slot.packets.len() / TsPacket::SIZE, slot.nulls));
 		}
 		assert_eq!(sent, [(42, 72, 0), (43, 39, 0), (44, 39, 0)]);
 
-		schedule.push(at(3_000), unit(1, 2_000), true);
+		schedule.push(ms(3_000), unit(1, 2_000), true);
 		let err = std::iter::from_fn(|| schedule.next(None).transpose()).find_map(Result::err);
 		assert!(err.is_some(), "past the window, a burst that does not fit fails");
 	}
@@ -426,8 +412,8 @@ mod tests {
 	#[test]
 	fn unpadded_units_spread_up_to_their_decode_time() {
 		let mut schedule = Schedule::new(Duration::ZERO);
-		schedule.push(at(1_000), unit(1, 4), true);
-		schedule.push(at(1_100), unit(1, 4), false);
+		schedule.push(ms(1_000), unit(1, 4), true);
+		schedule.push(ms(1_100), unit(1, 4), false);
 		let mut sent = Vec::new();
 		while let Some(slot) = schedule.next(None).unwrap() {
 			sent.push((slot.index, slot.packets.len() / TsPacket::SIZE, slot.nulls));
