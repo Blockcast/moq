@@ -16,11 +16,14 @@ Padding, pacing, and muxing all assume a fixed delay, so the export gets one
 first. t0ms is testing whether T-STD compliance is feasible at all; record
 the result here. If it isn't, re-plan this line.
 
-Measured (2026-09-30, #4645): with the fixed-delay jitter buffer and the
-constant-rate schedule, a clean-path round trip of the generated clip passes
-the strict T-STD check at 10 Mb/s and at 2 Mb/s, where every keyframe outgrows
-a PCR interval. A burst that does not fit the delay fails the export rather
-than overrun the rate.
+Measured (2026-10-01, #4645): with the fixed-delay jitter buffer, per-PID
+admission against each PID's T-STD buffers, and PCRs at their byte position, a
+clean-path round trip passes the strict T-STD check and TSDuck's ±500 ns
+pcrverify at the default 500 ms delay, for the generated clip at 10 Mb/s and
+2 Mb/s and for a 1080p encode filling a 9 Mbit CPB (`just test ts --hrd`, after
+t0ms's recipe). A unit that cannot arrive by its DTS fails the export rather
+than arrive late. t0ms's broadcast capture (PAFF H.264, MP2, AC-3, teletext)
+is still to be re-graded on this head.
 
 This README owns the end-to-end proof: the #4613 netem rig (10% loss, a real
 ~10 Mb/s broadcast TS) passes the strict T-STD check, and the recipe runs
