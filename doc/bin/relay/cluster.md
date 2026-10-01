@@ -30,8 +30,8 @@ peers at once and advertises the replacement one second later, if the
 replacement still stands; anything it hears for that broadcast in the meantime
 waits too. A stale path is withdrawn within that second and never spreads, so an
 ended broadcast is retracted once per link instead of hunting through the mesh.
-New broadcasts, better routes, and retractions go out at once. The cost is a
-genuine failover: a peer left with no other path sees the broadcast return
+New broadcasts, retractions, and a better route while the advertised one still
+stands go out at once. The cost is a genuine failover: a peer left with no other path sees the broadcast return
 about a second after a link fails. Requests and subscriptions follow the
 current best route immediately; only the announcement waits. Clients are never
 held down.
