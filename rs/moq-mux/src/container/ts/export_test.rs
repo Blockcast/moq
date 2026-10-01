@@ -1885,9 +1885,9 @@ async fn scte35_fixtures_survive_roundtrip() {
 }
 
 /// Build a well-formed long-form section: the full generic header (extension,
-/// current version, `number` of `last`), then `body` and a CRC placeholder
-/// (capture is verbatim, nothing checks it). The SI store buffers a sub-table
-/// until its generation completes, so the header fields must be coherent.
+/// current version, `number` of `last`), then `body` and a valid CRC-32/MPEG-2.
+/// The SI store buffers a sub-table until its generation completes, so the header
+/// fields must be coherent.
 fn make_long_section(table_id: u8, ext: u16, version: u8, number: u8, last: u8, body: &[u8]) -> Vec<u8> {
 	let section_length = 5 + body.len() + 4;
 	let mut s = vec![
@@ -1901,7 +1901,8 @@ fn make_long_section(table_id: u8, ext: u16, version: u8, number: u8, last: u8, 
 		last,
 	];
 	s.extend_from_slice(body);
-	s.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+	let crc = crc::Crc::<u32>::new(&crc::CRC_32_MPEG_2).checksum(&s);
+	s.extend_from_slice(&crc.to_be_bytes());
 	s
 }
 
@@ -3033,6 +3034,357 @@ async fn eit_now_next_and_schedule_are_captured() {
 		read_si_sections(&rig.consumer, &sched.track).await,
 		vec![Bytes::from(sc0), Bytes::from(sc8)],
 		"the sparse schedule committed on cycle wrap"
+	);
+}
+
+/// [`si_rig`] importing only `program`.
+fn si_rig_selecting(program: u16) -> SiRig {
+	let SiRig {
+		import,
+		catalog,
+		consumer,
+	} = si_rig();
+	SiRig {
+		import: import.with_program(program),
+		catalog,
+		consumer,
+	}
+}
+
+/// An SDT service loop entry for `service`, running, with a service_descriptor naming it.
+fn sdt_service_entry(service: u16, name: &[u8]) -> Vec<u8> {
+	let mut descriptor = vec![0x48, 0, 0x01, 1, b'P', name.len() as u8];
+	descriptor.extend_from_slice(name);
+	descriptor[1] = (descriptor.len() - 2) as u8;
+	let mut entry = service.to_be_bytes().to_vec();
+	entry.push(0xfd);
+	entry.extend_from_slice(&[0x80, descriptor.len() as u8]);
+	entry.extend_from_slice(&descriptor);
+	entry
+}
+
+/// SDT actual section `number` of `last` for TSID 1 on ONID 2, listing `services`.
+fn sdt_actual(version: u8, number: u8, last: u8, services: &[(u16, &[u8])]) -> Vec<u8> {
+	let mut body = vec![0x00, 0x02, 0xff];
+	for &(service, name) in services {
+		body.extend(sdt_service_entry(service, name));
+	}
+	make_long_section(0x42, 1, version, number, last, &body)
+}
+
+/// EIT present/following actual section `number` of 1 for `service` on TSID 1, ONID 2.
+fn eit_pf(service: u16, number: u8) -> Bytes {
+	let body = [0x00, 0x01, 0x00, 0x02, 0x01, 0x4E, service as u8, number];
+	Bytes::from(make_long_section(0x4E, service, 0, number, 1, &body))
+}
+
+fn nit() -> Bytes {
+	Bytes::from(make_long_section(0x40, 1, 0, 0, 0, &[0xbb; 4]))
+}
+
+/// SI for services 1 and 2: an SDT listing service 1 in section 0 and service 2 in
+/// section 1, EIT present/following for each, and a NIT.
+fn two_service_si() -> Vec<u8> {
+	let mut out = si_packet(0x0011, &sdt_actual(0, 0, 1, &[(1, b"One")]));
+	out.extend(si_packet_cc(0x0011, &sdt_actual(0, 1, 1, &[(2, b"Two")]), 1));
+	for (cc, section) in [eit_pf(1, 0), eit_pf(1, 1), eit_pf(2, 0), eit_pf(2, 1)]
+		.iter()
+		.enumerate()
+	{
+		out.extend(si_packet_cc(0x0012, section, cc as u8));
+	}
+	out.extend(si_packet(0x0010, &nit()));
+	out
+}
+
+/// `section` is one whole SDT actual for TSID 1 on ONID 2 at `version`, listing only
+/// `service` named `name`, under a valid CRC.
+fn assert_sdt_lists_only(section: &[u8], version: u8, service: u16, name: &[u8]) {
+	let crc = crc::Crc::<u32>::new(&crc::CRC_32_MPEG_2);
+	assert_eq!(crc.checksum(section), 0, "a valid CRC-32/MPEG-2");
+	let section_length = (usize::from(section[1] & 0x0f) << 8) | usize::from(section[2]);
+	assert_eq!(section.len(), 3 + section_length, "section_length covers the section");
+	assert_eq!(section[0], 0x42, "SDT actual");
+	assert_eq!(
+		u16::from_be_bytes([section[3], section[4]]),
+		1,
+		"transport_stream_id kept"
+	);
+	assert_eq!((section[5] >> 1) & 0x1f, version, "version_number kept");
+	assert_eq!((section[6], section[7]), (0, 0), "section 0 of 0");
+	assert_eq!(
+		u16::from_be_bytes([section[8], section[9]]),
+		2,
+		"original_network_id kept"
+	);
+	assert_eq!(
+		&section[11..section.len() - 4],
+		&sdt_service_entry(service, name)[..],
+		"the service loop holds the selected service alone"
+	);
+}
+
+/// A selected program's SI describes its own service alone: one SDT actual section
+/// listing it, wherever it sat in the source, and only its own EIT. Network-wide
+/// tables pass through.
+#[tokio::test(start_paused = true)]
+async fn a_selected_program_carries_only_its_own_si() {
+	for (program, name) in [(1u16, &b"One"[..]), (2, b"Two")] {
+		let mut input = crate::container::ts::import::test::two_programs();
+		input.extend(two_service_si());
+		let mut rig = si_rig_selecting(program);
+		rig.import.decode(&BytesMut::from(&input[..])).unwrap();
+		rig.import.finish().unwrap();
+
+		let si = rig.catalog.snapshot().ext.mpegts.si.clone();
+		let sdt = read_si_sections(&rig.consumer, &si[&0x0011][&0x42].track).await;
+		assert_eq!(sdt.len(), 1, "program {program}: one SDT actual section");
+		assert_sdt_lists_only(&sdt[0], 0, program, name);
+		assert_eq!(
+			read_si_sections(&rig.consumer, &si[&0x0012][&0x4E].track).await,
+			vec![eit_pf(program, 0), eit_pf(program, 1)],
+			"program {program}: only its own EIT"
+		);
+		assert_eq!(
+			read_si_sections(&rig.consumer, &si[&0x0010][&0x40].track).await,
+			vec![nit()],
+			"the NIT passes through"
+		);
+	}
+}
+
+/// Without a selection nothing is filtered by program: every section is kept verbatim.
+#[tokio::test(start_paused = true)]
+async fn an_unselected_import_keeps_every_service() {
+	let mut rig = si_rig();
+	rig.import.decode(&BytesMut::from(&two_service_si()[..])).unwrap();
+	rig.import.finish().unwrap();
+
+	let si = rig.catalog.snapshot().ext.mpegts.si.clone();
+	assert_eq!(
+		read_si_sections(&rig.consumer, &si[&0x0011][&0x42].track).await,
+		vec![
+			Bytes::from(sdt_actual(0, 0, 1, &[(1, b"One")])),
+			Bytes::from(sdt_actual(0, 1, 1, &[(2, b"Two")])),
+		],
+		"the SDT verbatim"
+	);
+	assert_eq!(
+		read_si_sections(&rig.consumer, &si[&0x0012][&0x4E].track).await,
+		vec![eit_pf(1, 0), eit_pf(1, 1), eit_pf(2, 0), eit_pf(2, 1)],
+		"every service's EIT"
+	);
+}
+
+/// A selected service the SDT does not list gets no SDT actual rather than a
+/// fabricated one, and a table filtered to nothing gets no catalog entry.
+#[tokio::test(start_paused = true)]
+async fn a_selection_missing_from_the_sdt_carries_none() {
+	let mut rig = si_rig_selecting(3);
+	rig.import.decode(&BytesMut::from(&two_service_si()[..])).unwrap();
+	rig.import.finish().unwrap();
+
+	let si = rig.catalog.snapshot().ext.mpegts.si.clone();
+	assert!(si.contains_key(&0x0010), "the NIT was captured (control)");
+	assert!(!si.contains_key(&0x0011), "no SDT entry: {si:?}");
+	assert!(!si.contains_key(&0x0012), "no EIT entry: {si:?}");
+}
+
+/// An SDT revision that drops the selected service retires the SDT captured before
+/// it, catalog entry and all; a later revision listing it again is captured normally.
+/// Driven on the capture itself so each revision cuts without waiting out the debounce.
+#[tokio::test(start_paused = true)]
+async fn an_sdt_revision_dropping_the_service_retires_it() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
+	let mut capture = crate::container::ts::si::Capture::new(broadcast, catalog.clone());
+	capture.select(1);
+	let mut revise = |version: u8, services: &[(u16, &[u8])]| {
+		capture.section(0x0011, sdt_actual(version, 0, 0, services)).unwrap();
+		capture.flush(Timestamp::ZERO, true).unwrap();
+		catalog
+			.snapshot()
+			.ext
+			.mpegts
+			.si
+			.get(&0x0011)
+			.map(|tables| tables[&0x42].track.clone())
+	};
+
+	let track = revise(0, &[(1, b"One"), (2, b"Two")]).expect("the SDT is advertised");
+	assert_eq!(revise(1, &[(2, b"Two")]), None, "the revision retired the SDT entry");
+	assert_eq!(
+		revise(2, &[(1, b"One"), (2, b"Two")]),
+		Some(track.clone()),
+		"listed again, on the same track"
+	);
+	capture.finish(Timestamp::ZERO).unwrap();
+
+	let groups = read_si_groups(&consumer, &track).await;
+	assert_eq!(groups.len(), 3, "one snapshot per revision");
+	assert_sdt_lists_only(&groups[0][0], 0, 1, b"One");
+	assert!(groups[1].is_empty(), "the retiring snapshot carries no SDT");
+	assert_sdt_lists_only(&groups[2][0], 2, 1, b"One");
+}
+
+/// A corrupted SDT actual is not rebuilt under a fresh, valid CRC: the section is
+/// dropped and the last good snapshot stays in force, rather than the corruption
+/// reading as a revision (or as the service leaving). An intact revision after it
+/// is captured normally.
+#[tokio::test(start_paused = true)]
+async fn a_corrupt_sdt_keeps_the_last_good_snapshot() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
+	let mut capture = crate::container::ts::si::Capture::new(broadcast, catalog.clone());
+	capture.select(1);
+	let mut feed = |section: Vec<u8>| {
+		capture.section(0x0011, section).unwrap();
+		capture.flush(Timestamp::ZERO, true).unwrap();
+		catalog
+			.snapshot()
+			.ext
+			.mpegts
+			.si
+			.get(&0x0011)
+			.map(|tables| tables[&0x42].track.clone())
+	};
+
+	let track = feed(sdt_actual(0, 0, 0, &[(1, b"One")])).expect("the SDT is advertised");
+	// One unflagged bit flip turns the service name "One" into "Nne" under the source CRC.
+	let mut corrupt = sdt_actual(1, 0, 0, &[(1, b"One")]);
+	let name = corrupt.len() - 4 - 3;
+	corrupt[name] ^= 0x01;
+	assert_eq!(feed(corrupt), Some(track.clone()), "the corrupt revision kept the SDT");
+	assert_eq!(feed(sdt_actual(2, 0, 0, &[(1, b"Uno")])), Some(track.clone()));
+	capture.finish(Timestamp::ZERO).unwrap();
+
+	let groups = read_si_groups(&consumer, &track).await;
+	assert_eq!(groups.len(), 2, "no snapshot for the corrupt revision");
+	assert_sdt_lists_only(&groups[0][0], 0, 1, b"One");
+	assert_sdt_lists_only(&groups[1][0], 2, 1, b"Uno");
+}
+
+/// A multi-section SDT revision with the selected service's section corrupt does not
+/// commit as complete-as-observed when the other section repeats: that would read as
+/// the service leaving. The revision commits once the section arrives intact.
+#[tokio::test(start_paused = true)]
+async fn a_partial_sdt_revision_keeps_the_last_good_snapshot() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
+	let mut capture = crate::container::ts::si::Capture::new(broadcast, catalog.clone());
+	capture.select(1);
+	let mut feed = |section: Vec<u8>| {
+		capture.section(0x0011, section).unwrap();
+		capture.flush(Timestamp::ZERO, true).unwrap();
+		catalog
+			.snapshot()
+			.ext
+			.mpegts
+			.si
+			.get(&0x0011)
+			.map(|tables| tables[&0x42].track.clone())
+	};
+
+	feed(sdt_actual(0, 0, 1, &[(1, b"One")]));
+	let track = feed(sdt_actual(0, 1, 1, &[(2, b"Two")])).expect("the SDT is advertised");
+	let mut corrupt = sdt_actual(1, 0, 1, &[(1, b"One")]);
+	let name = corrupt.len() - 4 - 3;
+	corrupt[name] ^= 0x01;
+	assert_eq!(feed(corrupt), Some(track.clone()));
+	assert_eq!(feed(sdt_actual(1, 1, 1, &[(2, b"Two")])), Some(track.clone()));
+	assert_eq!(
+		feed(sdt_actual(1, 1, 1, &[(2, b"Two")])),
+		Some(track.clone()),
+		"the repeated section did not commit the partial revision"
+	);
+	assert_eq!(feed(sdt_actual(1, 0, 1, &[(1, b"Uno")])), Some(track.clone()));
+	capture.finish(Timestamp::ZERO).unwrap();
+
+	let groups = read_si_groups(&consumer, &track).await;
+	assert_eq!(groups.len(), 2, "no snapshot for the partial revision");
+	assert_sdt_lists_only(&groups[0][0], 0, 1, b"One");
+	assert_sdt_lists_only(&groups[1][0], 1, 1, b"Uno");
+}
+
+/// A selection filters EIT schedule actual (0x50..=0x5F) by service, as it does
+/// present/following.
+#[tokio::test(start_paused = true)]
+async fn a_selection_filters_eit_schedule() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
+	let mut capture = crate::container::ts::si::Capture::new(broadcast, catalog.clone());
+	capture.select(1);
+	let schedule = |service: u16| {
+		let body = [0x00, 0x01, 0x00, 0x02, 0x00, 0x50, service as u8];
+		make_long_section(0x50, service, 0, 0, 0, &body)
+	};
+	for service in [1, 2] {
+		capture.section(0x0012, schedule(service)).unwrap();
+	}
+	capture.finish(Timestamp::ZERO).unwrap();
+
+	let si = catalog.snapshot().ext.mpegts.si.clone();
+	assert_eq!(
+		read_si_sections(&consumer, &si[&0x0012][&0x50].track).await,
+		vec![Bytes::from(schedule(1))],
+		"only the selected service's schedule"
+	);
+}
+
+/// A selected program's reduced SI survives export: the TS parses, and importing it
+/// again finds the same single-service SDT and the same EIT.
+#[tokio::test(start_paused = true)]
+async fn a_selected_programs_si_survives_export() {
+	let mut input = crate::container::ts::import::test::two_programs();
+	input.extend(two_service_si());
+	let mut rig = si_rig_selecting(2);
+	rig.import.decode(&BytesMut::from(&input[..])).unwrap();
+	rig.import.finish().unwrap();
+
+	let ts = drain_with(
+		Export::with_ts(
+			crate::source::announced(&rig.consumer),
+			crate::catalog::CatalogFormat::Hang,
+		)
+		.await
+		.unwrap(),
+	)
+	.await;
+	assert_packet_aligned(&ts);
+	let mut reader = TsPacketReader::new(Cursor::new(ts.as_ref()));
+	while reader.read_ts_packet().unwrap().is_some() {}
+
+	let mut again = si_rig();
+	again.import.decode(&BytesMut::from(ts.as_ref())).unwrap();
+	again.import.finish().unwrap();
+	let si = again.catalog.snapshot().ext.mpegts.si.clone();
+	let sdt = read_si_sections(&again.consumer, &si[&0x0011][&0x42].track).await;
+	assert_eq!(sdt.len(), 1, "one SDT actual section");
+	assert_sdt_lists_only(&sdt[0], 0, 2, b"Two");
+	assert_eq!(
+		read_si_sections(&again.consumer, &si[&0x0012][&0x4E].track).await,
+		vec![eit_pf(2, 0), eit_pf(2, 1)],
+		"only program 2's EIT"
 	);
 }
 
