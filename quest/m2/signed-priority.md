@@ -4,7 +4,7 @@
 
 Every priority in the API is an `i8`, higher first, with 0 as the unset
 midpoint: `track::Info`, `Subscription`, and `group::Fetch` in Rust, their
-JS counterparts, moq-ffi, libmoq, and every wrapper. Nobody has to know that
+JS counterparts, moq-ffi, moq-c, and every wrapper. Nobody has to know that
 127 is the middle of a `u8`, the default the moxygen line ships. The wire
 stays a byte.
 
@@ -26,7 +26,7 @@ Decided with the maintainer:
 - hang's built-in priorities move above 0, so hang media outranks a track that
   never set one. Something like catalog 40, text 30, audio 20, video 10; the
   spacing is the implementer's call. Rust and JS keep matching values.
-- A zeroed libmoq `moq_track_info` then means the default, which retires the
+- A zeroed moq-c `moq_track_info` then means the default, which retires the
   need for a `priority_present` flag.
 
 Changing published `u8` fields to `i8` is an API break in every language, so

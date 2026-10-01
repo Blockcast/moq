@@ -34,7 +34,10 @@ let session = try await client.connect(to: "https://relay.example.com")
 // auto-created one. The duplex no-config path (the typical client) shares one
 // origin between both sides.
 let announced = try session.consume.announced(prefix: "demos/", filter: "*/camera")
-for try await announcement in announced {
+for try await event in announced {
+    // `.live` follows the routes live at subscribe time; `.update` and
+    // `.end` report later changes.
+    guard case .start(let announcement) = event else { continue }
     // Prefix stays origin-relative; captures reports what * matched.
     print("got broadcast \(announcement.prefix)")
     print("captures \(announcement.captures ?? [])")
@@ -46,7 +49,7 @@ for try await announcement in announced {
     }
 }
 
-session.shutdown()
+try await session.shutdown()
 ```
 
 To publish through the auto-created origin:
@@ -57,7 +60,7 @@ let broadcast = try session.publish.createBroadcast(path: "my-stream")
 try broadcast.announce() // unannounced broadcasts are invisible
 ```
 
-Cancelling the surrounding Swift `Task` propagates through to the underlying `cancel()` calls on each consumer. `session.shutdown()` is an alias for `cancel(code: 0)` (code 0 means "no error").
+Cancelling the surrounding Swift `Task` propagates through to the underlying `cancel()` calls on each consumer. `try await session.shutdown()` drains finished tracks within one second and throws on delivery failure. `cancel(code: 0)` remains immediate.
 
 A note on enum casing: `MoqError` keeps Rust's PascalCase variants, each carrying `message: String` (e.g. `MoqError.Closed(message: "...")`); plain enums round-trip to lowerCamelCase (`AudioSampleFormat.s16`). Audio codecs are objects with constructors (`AudioCodec.opus()`).
 
