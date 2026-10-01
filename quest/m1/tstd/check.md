@@ -21,5 +21,5 @@ a deliberately bursty one fails. Where TSDuck or another maintained tool
 already implements T-STD, prefer it over hand-rolled math.
 
 Gate: strict `tstd` in the TS recipe for export output. Until
-[fixed-delay release](/quest/m1/tstd/delay.md) lands, the check will likely
+fixed-delay release (`moq export ts --delay`) lands, the check will likely
 fail, so land it report-only and flip the gate in that PR.

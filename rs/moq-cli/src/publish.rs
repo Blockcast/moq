@@ -632,7 +632,9 @@ mod tests {
 	/// `next()` blocks, surfaced here as a timeout once the buffered frames are gone.
 	async fn drain(mut exporter: Export<tscat::Ext>) -> Vec<u8> {
 		let mut out = Vec::new();
-		while let Ok(res) = tokio::time::timeout(Duration::from_millis(500), exporter.next()).await {
+		// Past the export's release delay, so the first frame goes out before it ends.
+		let wait = RECORDING_MAX_AGE + Duration::from_secs(1);
+		while let Ok(res) = tokio::time::timeout(wait, exporter.next()).await {
 			match res.expect("exporter error") {
 				Some(frame) => out.extend_from_slice(&frame.payload),
 				None => break,
@@ -729,7 +731,7 @@ mod tests {
 			Export::with_ts(moq_mux::Source::new(origin.consume(), "cli"), CatalogFormat::Hang)
 				.await
 				.unwrap()
-				.with_max_age(RECORDING_MAX_AGE),
+				.with_delay(RECORDING_MAX_AGE),
 		)
 		.await
 	}
@@ -783,7 +785,7 @@ mod tests {
 			Export::with_ts(moq_mux::Source::new(origin.consume(), "cli"), format)
 				.await
 				.unwrap()
-				.with_max_age(RECORDING_MAX_AGE),
+				.with_delay(RECORDING_MAX_AGE),
 		)
 		.await;
 

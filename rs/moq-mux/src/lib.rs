@@ -36,6 +36,7 @@ pub mod import;
 pub mod json;
 mod pace;
 pub mod rate;
+mod release;
 pub mod select;
 mod source;
 pub mod timeline;

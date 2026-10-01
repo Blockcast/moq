@@ -6293,16 +6293,16 @@ pub(super) mod test {
 		import.finish().unwrap();
 
 		// `import` and `catalog` stay alive so the exporter can subscribe to the finished,
-		// retained tracks. A generous max age, since the default of zero would shed the
-		// earlier groups and the boundary with them.
+		// retained tracks. A generous delay, since the default of zero would shed the
+		// earlier groups and the boundary with them. The paused clock runs out the
+		// delay and every gap in the media without a real wait.
+		let delay = std::time::Duration::from_secs(3600);
 		let mut exporter = crate::container::ts::Export::new(crate::source::announced(&consumer))
 			.await
 			.unwrap()
-			.with_max_age(std::time::Duration::from_secs(3600));
+			.with_delay(delay);
 		let mut flagged = 0;
-		while let Ok(Ok(Some(frame))) =
-			tokio::time::timeout(std::time::Duration::from_millis(100), exporter.next()).await
-		{
+		while let Ok(Ok(Some(frame))) = tokio::time::timeout(2 * delay, exporter.next()).await {
 			flagged += frame
 				.payload
 				.as_chunks::<188>()

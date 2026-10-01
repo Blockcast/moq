@@ -18,7 +18,7 @@ UDP sink is out of scope; delivery stays with an external tool.
   spread over the slots before its DTS instead of landing between two PCRs.
 - That makes the mux run ahead of decode by a buffer delay. Decided
   (2026-09-30): the delay is the fixed `--delay` from
-  [fixed-delay release](/quest/m1/tstd/delay.md), not one that grows
+  release (`moq export ts --delay`, `ts::Export::with_delay`), not one that grows
   to fit bursts. Say what happens when a burst does not fit the delay (fail
   loud, or drop to VBR with a warning) and record the choice here.
 - The CLI `Delivery` pacer releases one slice per PCR interval; confirm it
@@ -29,7 +29,3 @@ UDP sink is out of scope; delivery stays with an external tool.
   a PCR slot; the generated clip mostly pads and passes already.
 - `doc/bin/cli.md`: say that export pads to `mpegts.muxRate` on a constant-rate
   schedule and what latency that adds.
-
-## Required
-
-- [Fixed-delay release](/quest/m1/tstd/delay.md) - the delay this schedule paces against

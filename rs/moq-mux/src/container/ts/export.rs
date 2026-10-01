@@ -9,6 +9,10 @@
 //! position agrees with the values, and a pacing caller releases each slot at
 //! the instant it asserts. Video is carried as Annex-B, audio as ADTS AAC.
 //!
+//! Every frame is muxed a fixed delay after its decode time ([`Export::with_delay`]),
+//! so tracks interleave in `(DTS, PID)` order whatever the arrival skew between them,
+//! and the output keeps the source's pace.
+//!
 //! Video flows through [`ExportSource`], which normalizes every H.264/H.265
 //! source to length-prefixed NALU plus a resolved avcC/hvcC (parsing in-band
 //! avc3/hev1 parameter sets out of the bitstream, or taking the catalog
@@ -17,7 +21,6 @@
 //! inline NALs on every keyframe. CMAF tracks are rejected with a clear error.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::pin::Pin;
 use std::task::Poll;
 use std::time::Duration;
 
@@ -40,6 +43,7 @@ use crate::catalog::{CatalogFormat, Stream};
 use crate::codec::video::Reorder;
 use crate::codec::{aac, annexb};
 use crate::container::{ExportSource, Frame};
+use crate::release::{Arrival, Push, Release, Released};
 
 use super::adts;
 use super::catalog;
@@ -117,7 +121,14 @@ pub struct Export<E: catalog::Catalog = ()> {
 	/// Tracks [`Self::resume`] left on the ended broadcast, resubscribed as the
 	/// returned catalog lists them.
 	stale: HashSet<String>,
-	max_age: Duration,
+	/// How long after its decode time each frame goes out, and each source's staleness budget.
+	delay: Duration,
+	/// Holds every track's frames until `delay` past their decode time, keyed by PID.
+	release: Release<u16, Queued>,
+	/// A released frame waiting for the tail of the generation before it to go out.
+	held: Option<Released<u16, Queued>>,
+	/// Release generation of the program being muxed; a newer one rewinds it.
+	generation: u64,
 
 	tracks: HashMap<String, Track>,
 	/// Continuity counter per PID (PAT, PMT, and each elementary stream).
@@ -173,12 +184,6 @@ pub struct Export<E: catalog::Catalog = ()> {
 	/// step backwards all the time, so a span closes on a timestamp passing this
 	/// high-water mark rather than on every frame.
 	watermark: Option<Timestamp>,
-	/// When the interleave started waiting on a lagging track: the arrival of the
-	/// first leading frame it held. Cleared once every track has caught up, or by
-	/// [`Self::resume`], but not by a rewind ([`Self::pick_next_track`]).
-	stall: Option<web_async::time::Instant>,
-	/// Wakes [`Self::pick_next_track`] once the stall has lasted `max_age`.
-	hold: Option<Pin<Box<web_async::time::Sleep>>>,
 	/// The rate to pad the output to with null packets, in bits per second: the
 	/// builder override when set, else the catalog's recorded multiplex rate, else
 	/// none and the output is unpadded ([`Self::stuff`]).
@@ -199,21 +204,28 @@ pub struct Export<E: catalog::Catalog = ()> {
 	video_start: Option<Timestamp>,
 }
 
+/// A frame read before the program tables are built.
 struct Pending {
 	frame: Frame,
 	discontinuity: u64,
-	/// When the frame was pulled from its source: the start of a stall it leads
-	/// ([`Export::pick_next_track`]).
 	arrived: web_async::time::Instant,
+}
+
+/// A frame waiting in the [`Release`] stage, with what it needs from the moment it was read.
+struct Queued {
+	frame: Frame,
+	/// Authored decode timestamp, as [`PesUnit::dts`].
+	dts: Option<u64>,
+	/// The avcC/hvcC the frame was read under, for video.
+	description: Option<Bytes>,
 }
 
 struct Track {
 	source: ExportSource,
+	/// The first frame, held until the program tables are built.
 	pending: Option<Pending>,
-	/// Last consumed boundary count from this source. Never compared with peers.
+	/// The source's discontinuity counter the decode clock (`last_dts`, `timeline`) runs under.
 	discontinuity: u64,
-	/// Program generation this rendition has joined. Older generations are discarded.
-	epoch: u64,
 	finished: bool,
 	pid: u16,
 	kind: Kind,
@@ -223,8 +235,8 @@ struct Track {
 	/// Last decode timestamp (continuous 90 kHz ticks) authored for this track, keeping the
 	/// decode clock monotonic across reordered (B-frame) video. Only video uses it.
 	last_dts: Option<u64>,
-	/// High-water mark of the timestamps muxed within this rendition, independent of
-	/// cross-track skew. Bounds where its next frame can land ([`Track::shown`]).
+	/// High-water mark of the timestamps read within this rendition, which sizes the
+	/// video [`Reserve`] from how far a reordered frame lands below it.
 	timeline: Option<Timestamp>,
 	/// Decode-clock reserve: how far ahead of its PTS each frame decodes. Only video sizes it;
 	/// every other kind holds [`DEFAULT_DTS_RESERVE`].
@@ -232,28 +244,61 @@ struct Track {
 }
 
 impl Track {
-	/// Admit any frame that belongs to the current program generation.
-	fn admit(&mut self, pending: Pending, epoch: u64) -> Option<Pending> {
-		(self.epoch == epoch).then_some(pending)
-	}
-
-	/// Whether this track's next frame is known to sort after `(timestamp, pid)`: it
-	/// holds one, it has finished, or the frames it already muxed bound the next one
-	/// from below. Video is emitted in decode order, so a B-frame can land up to the
-	/// reorder depth (the decode-clock reserve) below the high-water mark.
-	fn shown(&self, timestamp: Timestamp, pid: u16) -> bool {
-		if self.pending.is_some() || self.finished {
-			return true;
+	/// Author the frame's decode time and queue it for release.
+	///
+	/// The decode clock runs here, as frames are read, because the release deadline is
+	/// on decode time: reordered video arrives in decode order with PTS 0, 120, 40, 80,
+	/// so a PTS deadline would strand a B-frame behind its reference or send it first.
+	fn queue(&mut self, name: &str, pending: Pending, release: &mut Release<u16, Queued>) {
+		let Pending {
+			frame,
+			discontinuity,
+			arrived,
+		} = pending;
+		if discontinuity != self.discontinuity {
+			// The source may have restarted its timeline, so the decode clock restarts too.
+			self.discontinuity = discontinuity;
+			self.last_dts = None;
+			self.timeline = None;
 		}
-		let Some(timeline) = self.timeline else {
-			return false;
+
+		let (dts, sync, description) = match self.kind {
+			Kind::Video(stream_type) => {
+				if frame.keyframe {
+					self.reserve.describe(stream_type, self.source.description(), name);
+				}
+				if let Some(timeline) = self.timeline
+					&& frame.timestamp < timeline
+				{
+					let gap = to_ticks(timeline) - to_ticks(frame.timestamp);
+					self.reserve.observe(gap, name);
+				} else {
+					self.reserve.peak();
+				}
+				let dts = author_dts(to_ticks(frame.timestamp), self.reserve.ticks, &mut self.last_dts);
+				(dts, frame.keyframe, self.source.description().cloned())
+			}
+			_ => (None, true, None),
 		};
-		let reorder = match self.kind {
-			Kind::Video(_) => u128::from(self.reserve.ticks) * 1_000_000_000 / 90_000,
-			_ => 0,
+		self.timeline = Some(self.timeline.map_or(frame.timestamp, |last| last.max(frame.timestamp)));
+
+		let decode = dts
+			.and_then(|ticks| Timestamp::from_scale(ticks, 90_000).ok())
+			.unwrap_or(frame.timestamp);
+		let arrival = Arrival {
+			arrived,
+			decode,
+			discontinuity,
+			sync,
+			item: Queued {
+				frame,
+				dts,
+				description,
+			},
 		};
-		let floor = timeline.as_nanos().saturating_sub(reorder);
-		(floor, self.pid) > (timestamp.as_nanos(), pid)
+		if release.push(self.pid, arrival) == Push::Late {
+			tracing::warn!(track = %name, dropped = release.dropped(), "frame missed its release deadline; dropped");
+		}
 	}
 }
 
@@ -669,7 +714,10 @@ impl<E: catalog::Catalog> Export<E> {
 			catalog: Some(catalog),
 			catalog_format,
 			stale: HashSet::new(),
-			max_age: Duration::ZERO,
+			delay: Duration::ZERO,
+			release: Release::new(Duration::ZERO),
+			held: None,
+			generation: 0,
 			tracks: HashMap::new(),
 			counters: HashMap::new(),
 			span_counters: None,
@@ -692,8 +740,6 @@ impl<E: catalog::Catalog> Export<E> {
 			clock: None,
 			low: None,
 			watermark: None,
-			stall: None,
-			hold: None,
 			video_start: None,
 			mux_rate: None,
 			mux_rate_override: None,
@@ -716,15 +762,17 @@ impl<E: catalog::Catalog> Export<E> {
 		self
 	}
 
-	/// Set the max age for each per-track source, which also bounds how long the
-	/// interleave holds a leading track for a lagging one.
+	/// Mux each frame this long after its decode time, like an SRT receiver's TSBPD.
 	///
-	/// See [`Consumer`](crate::container::Consumer) for the per-track skip behavior.
-	/// Frames are muxed in media-time order across every track, waiting up to this
-	/// long for a track that has not yet shown where its next frame lands. Defaults
-	/// to [`Duration::ZERO`] (skip aggressively, and mux in arrival order).
-	pub fn with_max_age(mut self, max_age: Duration) -> Self {
-		self.max_age = max_age;
+	/// The clock starts at the first frame's arrival, so the output keeps the source's
+	/// pace and interleaves every track in `(DTS, PID)` order whatever the arrival skew
+	/// between them. A frame that arrives after its deadline is dropped, and a video
+	/// track that dropped one resumes at its next keyframe. The delay is also each
+	/// source's staleness budget (see [`Consumer`](crate::container::Consumer)).
+	/// Defaults to [`Duration::ZERO`].
+	pub fn with_delay(mut self, delay: Duration) -> Self {
+		self.delay = delay;
+		self.release = Release::new(delay);
 		self
 	}
 
@@ -769,7 +817,8 @@ impl<E: catalog::Catalog> Export<E> {
 			si.poll(waiter);
 		}
 
-		// 2. Pull a frame into every idle track.
+		// 2. Read every frame the sources have: into the release stage, or before the
+		// program tables are built, one per track.
 		self.fill(waiter)?;
 
 		// 3. Build the program tables once the layout is resolved and every
@@ -807,12 +856,24 @@ impl<E: catalog::Catalog> Export<E> {
 						track.pending = None;
 					}
 				}
-				// Show where the dropped tracks resume, or the interleave waits on them.
-				self.fill(waiter)?;
 			}
+			// Hand the held frames to the release stage in arrival order, so the
+			// earliest anchors its clock, then read on.
+			let mut held: Vec<(web_async::time::Instant, String)> = self
+				.tracks
+				.iter()
+				.filter_map(|(name, t)| t.pending.as_ref().map(|p| (p.arrived, name.clone())))
+				.collect();
+			held.sort();
+			for (_, name) in held {
+				let track = self.tracks.get_mut(&name).unwrap();
+				let pending = track.pending.take().unwrap();
+				track.queue(&name, pending, &mut self.release);
+			}
+			self.fill(waiter)?;
 		}
 
-		// 4. Mux the smallest-timestamp pending frame into the open span (the first
+		// 4. Mux each frame the release stage lets go into the open span (the first
 		// one carries the buffered PAT/PMT). Nothing goes out until a later
 		// timestamp measures that span: only then is it known how many bytes it
 		// carried, which is what puts the clock packets at the byte position their
@@ -823,58 +884,44 @@ impl<E: catalog::Catalog> Export<E> {
 				self.emitted_epoch = self.epoch;
 				return Poll::Ready(Ok(Some(out)));
 			}
-			let Some(name) = self.pick_next_track(waiter) else {
-				break;
+			let released = match self.held.take() {
+				Some(released) => released,
+				None => match self.release.poll_next(waiter) {
+					Poll::Ready(released) => released,
+					Poll::Pending => break,
+				},
 			};
-			let pending = self.tracks.get_mut(&name).unwrap().pending.take().unwrap();
-			let changed = pending.discontinuity != self.tracks[&name].discontinuity;
-			if changed {
-				let joined = self.tracks[&name].epoch == self.epoch;
-				if joined {
-					if !self.pending.is_empty() {
-						// A boundary ends valid media rather than reneging it.
-						// Return that tail under the old generation before adopting the new one.
-						self.emit(None)?;
-						self.tracks.get_mut(&name).unwrap().pending = Some(pending);
-						continue;
-					}
-					self.rewind();
+			if released.generation > self.generation {
+				if !self.pending.is_empty() {
+					// A boundary ends valid media rather than reneging it.
+					// Return that tail under the old generation before adopting the new one.
+					self.emit(None)?;
+					self.held = Some(released);
+					continue;
 				}
-				let track = self.tracks.get_mut(&name).unwrap();
-				track.discontinuity = pending.discontinuity;
-				track.epoch = self.epoch;
-				track.last_dts = None;
-				track.timeline = None;
+				self.rewind();
+				self.generation = released.generation;
 			}
-			let frame = pending.frame;
-			let track = self.tracks.get_mut(&name).unwrap();
-			if let Kind::Video(stream_type) = track.kind {
-				if frame.keyframe {
-					track.reserve.describe(stream_type, track.source.description(), &name);
-				}
-				if let Some(timeline) = track.timeline
-					&& frame.timestamp < timeline
-				{
-					let gap = to_ticks(timeline) - to_ticks(frame.timestamp);
-					track.reserve.observe(gap, &name);
-				} else {
-					track.reserve.peak();
-				}
-			}
-			track.timeline = Some(track.timeline.map_or(frame.timestamp, |last| last.max(frame.timestamp)));
-			self.last_timestamp = Some(frame.timestamp);
-			self.advance(frame.timestamp)?;
-			self.mux(&name, frame)?;
-			// Refill the track we just drained: the next span is measured by its
-			// successor, and without the refill nothing would be polling for it.
-			self.fill(waiter)?;
+			let name = self
+				.tracks
+				.iter()
+				.find(|(_, t)| t.pid == released.track)
+				.map(|(name, _)| name.clone())
+				.context("released frame for an unknown PID")?;
+			let timestamp = released.item.frame.timestamp;
+			self.last_timestamp = Some(timestamp);
+			self.advance(timestamp)?;
+			self.mux(&name, released.item)?;
 		}
 
 		// 5. Once every track has drained, no later timestamp is coming to measure
 		// the open span, so its bytes go out whole. That's independent of the
 		// catalog: a retained track finishes while the broadcast stays live, and
 		// holding its tail until the catalog closed would strand it indefinitely.
-		let drained = !self.tracks.is_empty() && self.tracks.values().all(|t| t.finished);
+		let drained = !self.tracks.is_empty()
+			&& self.tracks.values().all(|t| t.finished)
+			&& self.release.is_empty()
+			&& self.held.is_none();
 		if drained {
 			self.emit(None)?;
 			if let Some(out) = self.queue.pop_front() {
@@ -930,17 +977,17 @@ impl<E: catalog::Catalog> Export<E> {
 		}))
 	}
 
-	/// Pull a frame into every idle track.
+	/// Read every frame the sources have ready.
 	///
-	/// [`ExportSource`] has already transformed Annex-B avc3/hev1 into
-	/// length-prefixed form and resolved the avcC/hvcC. Before the program tables
-	/// are written, drop slices that arrive before their codec config resolves: a
-	/// receiver joining mid-GOP can't use them, and parking them would stop us
-	/// polling for the keyframe that carries the parameter sets.
+	/// Before the program tables are built, each track holds its first frame instead,
+	/// and slices that arrive before their codec config resolves are dropped: a receiver
+	/// joining mid-GOP can't use them, and parking them would stop us polling for the
+	/// keyframe that carries the parameter sets. [`ExportSource`] has already transformed
+	/// Annex-B avc3/hev1 into length-prefixed form and resolved the avcC/hvcC.
 	fn fill(&mut self, waiter: &kio::Waiter) -> crate::Result<()> {
 		let waiting_for_header = self.psi.is_none();
 		let video_start = self.video_start;
-		for track in self.tracks.values_mut() {
+		for (name, track) in self.tracks.iter_mut() {
 			if track.pending.is_some() || track.finished {
 				continue;
 			}
@@ -956,19 +1003,18 @@ impl<E: catalog::Catalog> Export<E> {
 							discontinuity: track.source.discontinuity(),
 							arrived: web_async::time::Instant::now(),
 						};
-						let Some(pending) = track.admit(pending, self.epoch) else {
-							continue;
-						};
-						let changed = pending.discontinuity != track.discontinuity;
 						// A new timeline must reach the reset before tune-in alignment can drop it.
 						if let Some(start) = video_start
-							&& !is_video && !changed
+							&& !is_video && pending.discontinuity == track.discontinuity
 							&& pending.frame.timestamp < start
 						{
 							continue;
 						}
-						track.pending = Some(pending);
-						break;
+						if waiting_for_header {
+							track.pending = Some(pending);
+							break;
+						}
+						track.queue(name, pending, &mut self.release);
 					}
 					Poll::Ready(None) => {
 						track.finished = true;
@@ -980,6 +1026,7 @@ impl<E: catalog::Catalog> Export<E> {
 		}
 		Ok(())
 	}
+
 	fn update_catalog(&mut self, mut catalog: Catalog<E>) -> anyhow::Result<()> {
 		self.source.retain_valid(&mut catalog);
 
@@ -1020,7 +1067,7 @@ impl<E: catalog::Catalog> Export<E> {
 					// staying attached would repeat its stale sections forever. The last
 					// snapshot carries across so emission never goes dark mid-swap.
 					Some(existing) if existing.track != entry.track => {
-						let mut replacement = SiTrack::new(&self.source, entry, self.max_age);
+						let mut replacement = SiTrack::new(&self.source, entry, self.delay);
 						// An inline entry already holds its snapshot; only a track entry
 						// has nothing to emit until its first group lands.
 						if replacement.active.is_empty() {
@@ -1046,7 +1093,7 @@ impl<E: catalog::Catalog> Export<E> {
 					}
 					None => {
 						self.si
-							.insert((*pid, *table_id), SiTrack::new(&self.source, entry, self.max_age));
+							.insert((*pid, *table_id), SiTrack::new(&self.source, entry, self.delay));
 					}
 				}
 			}
@@ -1139,7 +1186,7 @@ impl<E: catalog::Catalog> Export<E> {
 					self.tracks.insert(name.clone(), track);
 				}
 				None => {
-					let Some(source) = ExportSource::for_video(&self.source, name, config, self.max_age)? else {
+					let Some(source) = ExportSource::for_video(&self.source, name, config, self.delay)? else {
 						continue;
 					};
 					let mut reserve = Reserve::default();
@@ -1160,7 +1207,7 @@ impl<E: catalog::Catalog> Export<E> {
 					self.tracks.insert(name.clone(), track);
 				}
 				None => {
-					let Some(source) = ExportSource::for_audio(&self.source, name, config, self.max_age)? else {
+					let Some(source) = ExportSource::for_audio(&self.source, name, config, self.delay)? else {
 						continue;
 					};
 					self.insert_track(name, source, pid, kind, descriptors, Reserve::default());
@@ -1186,7 +1233,7 @@ impl<E: catalog::Catalog> Export<E> {
 					self.tracks.insert(name.clone(), existing);
 				}
 				None => {
-					let source = ExportSource::for_stream(&self.source, name, self.max_age)?;
+					let source = ExportSource::for_stream(&self.source, name, self.delay)?;
 					self.insert_track(name, source, pid, kind, descriptors, Reserve::default());
 				}
 			}
@@ -1204,11 +1251,11 @@ impl<E: catalog::Catalog> Export<E> {
 				continue;
 			}
 			let source = if let Some(config) = catalog.video.renditions.get(name) {
-				ExportSource::for_video(&self.source, name, config, self.max_age)?
+				ExportSource::for_video(&self.source, name, config, self.delay)?
 			} else if let Some(config) = catalog.audio.renditions.get(name) {
-				ExportSource::for_audio(&self.source, name, config, self.max_age)?
+				ExportSource::for_audio(&self.source, name, config, self.delay)?
 			} else if mpegts.tracks.get(name).is_some_and(|t| t.verbatim.is_some()) {
-				Some(ExportSource::for_stream(&self.source, name, self.max_age)?)
+				Some(ExportSource::for_stream(&self.source, name, self.delay)?)
 			} else {
 				None
 			};
@@ -1238,7 +1285,6 @@ impl<E: catalog::Catalog> Export<E> {
 				source,
 				pending: None,
 				discontinuity: 0,
-				epoch: self.epoch,
 				finished: false,
 				pid,
 				kind,
@@ -1248,6 +1294,18 @@ impl<E: catalog::Catalog> Export<E> {
 				reserve,
 			},
 		);
+	}
+
+	/// How many frames were dropped for missing their release deadline.
+	#[cfg(test)]
+	pub(super) fn dropped(&self) -> u64 {
+		self.release.dropped()
+	}
+
+	/// When the next queued frame is due for release.
+	#[cfg(test)]
+	pub(super) fn next_release(&self) -> Option<web_async::time::Instant> {
+		self.release.next_deadline()
 	}
 
 	/// The discontinuity counter of the most recently returned output frame.
@@ -1282,18 +1340,21 @@ impl<E: catalog::Catalog> Export<E> {
 			track.finished = true;
 			track.pending = None;
 			track.discontinuity = 0;
+			track.last_dts = None;
+			track.timeline = None;
 			self.stale.insert(name.clone());
 		}
-		// A replacement broadcast gets its own budget: only a rewind within one broadcast
-		// carries a stall across.
-		self.stall = None;
-		self.hold = None;
+		// The replacement's clock starts afresh at its own first frame.
+		self.release.clear();
+		self.held = None;
+		self.generation = 0;
 		self.rewind();
 		Ok(())
 	}
 
 	/// Discard uncommitted bytes and restart the program clock. Every rendition
-	/// joins the new generation: no track is fenced across a declared marker.
+	/// joins the new generation: no track is fenced across a declared marker, since a
+	/// latency skip on one track says nothing about another's timeline.
 	fn rewind(&mut self) {
 		self.epoch += 1;
 		if let Some(counters) = self.span_counters.take() {
@@ -1303,8 +1364,6 @@ impl<E: catalog::Catalog> Export<E> {
 		self.keyframes.clear();
 		self.queue.clear();
 		self.watermark = None;
-		// The stall carries across with its budget, and so does a held frame's
-		// `arrived` ([`Self::pick_next_track`]).
 		self.clock = None;
 		self.low = None;
 		self.last_pcr = None;
@@ -1315,17 +1374,6 @@ impl<E: catalog::Catalog> Export<E> {
 		self.video_start = None;
 		self.pcr_discontinuity = true;
 		self.stuffing = Stuffing::default();
-		for track in self.tracks.values_mut() {
-			track.last_dts = None;
-			track.timeline = None;
-			track.epoch = self.epoch;
-			if let Some(pending) = track.pending.as_ref() {
-				track.discontinuity = pending.discontinuity;
-			}
-			if let Some(pending) = track.pending.take() {
-				track.pending = track.admit(pending, self.epoch);
-			}
-		}
 	}
 
 	/// Header is ready when every track's [`ExportSource`] has resolved its
@@ -1508,53 +1556,18 @@ impl<E: catalog::Catalog> Export<E> {
 		Ok(())
 	}
 
-	/// The track whose pending frame goes next, in `(timestamp, pid)` order across
-	/// every track rather than only those whose frame has arrived.
-	///
-	/// The earliest pending frame waits until every other track has shown it cannot
-	/// be preceded ([`Track::shown`]), so the interleave is a function of the media
-	/// and two exporters of one broadcast render it in one order whatever the arrival
-	/// skew between tracks. Once that wait has lasted `max_age`, the same budget the
-	/// sources give a stalled group, output goes around the lagging track until it
-	/// catches up; zero keeps arrival order. The stall is timed from its first held
-	/// frame rather than per frame: a frame's successor is only pulled once it goes
-	/// out, so a per-frame wait would release one frame per `max_age`. A rewind does
-	/// not restart it either: a source's latency skip is a rewind, and a hold renewed
-	/// at each one delays every source by the budget they skip on, so under loss the
-	/// feed collapses into alternating holds and skips. [`Self::resume`] does, since a
-	/// replacement broadcast owes nothing to the one it replaced. No track is fenced,
-	/// so a boundary does not jump the queue.
-	fn pick_next_track(&mut self, waiter: &kio::Waiter) -> Option<String> {
-		let (timestamp, pid, name, arrived) = self
-			.tracks
-			.iter()
-			.filter_map(|(n, t)| t.pending.as_ref().map(|p| (p.frame.timestamp, t.pid, n, p.arrived)))
-			.min_by_key(|(timestamp, pid, name, _)| (*timestamp, *pid, *name))?;
-		let name = name.clone();
-		if self.max_age.is_zero() {
-			return Some(name);
-		}
-		if self.tracks.values().all(|t| t.shown(timestamp, pid)) {
-			self.stall = None;
-			return Some(name);
-		}
-		let deadline = *self.stall.get_or_insert(arrived) + self.max_age;
-		let hold = self
-			.hold
-			.get_or_insert_with(|| Box::pin(web_async::time::sleep_until(deadline)));
-		if hold.deadline() != deadline {
-			hold.as_mut().reset(deadline);
-		}
-		waiter.poll_future(hold.as_mut()).is_ready().then_some(name)
-	}
-
 	/// Packetize one media frame into the open span, re-emitting PAT/PMT before
 	/// video keyframes (and periodically) so receivers can tune in mid-stream.
 	///
 	/// The bytes are buffered rather than returned: which grid slots they belong
 	/// to isn't known until a later timestamp measures the span (see
 	/// [`Self::advance`]).
-	fn mux(&mut self, name: &str, frame: Frame) -> anyhow::Result<()> {
+	fn mux(&mut self, name: &str, queued: Queued) -> anyhow::Result<()> {
+		let Queued {
+			frame,
+			dts,
+			description,
+		} = queued;
 		if self.span_counters.is_none() {
 			self.span_counters = Some(self.counters.clone());
 		}
@@ -1572,7 +1585,7 @@ impl<E: catalog::Catalog> Export<E> {
 		// resolved avcC/hvcC to rewrite length-prefixed NALs as Annex-B. Section-framed
 		// verbatim streams carry no PES payload; the section is written separately below.
 		let es_payload = match &kind {
-			Kind::Video(stream_type) => Some(video_es_payload(*stream_type, track.source.description(), &frame)?),
+			Kind::Video(stream_type) => Some(video_es_payload(*stream_type, description.as_ref(), &frame)?),
 			Kind::Aac(aac) => {
 				let pce = aac.program_config.as_deref().unwrap_or_default();
 				let raw_len = pce.len() + frame.payload.len();
@@ -1596,16 +1609,6 @@ impl<E: catalog::Catalog> Export<E> {
 				framing: catalog::Framing::Section,
 				..
 			} => None,
-		};
-
-		// Author a monotonic decode timeline for reordered video (B-frames). Other kinds
-		// never reorder, so DTS == PTS and the PES stays PTS-only.
-		let dts = if is_video {
-			let pts = to_ticks(frame.timestamp);
-			let track = self.tracks.get_mut(name).context("missing track")?;
-			author_dts(pts, track.reserve.ticks, &mut track.last_dts)
-		} else {
-			None
 		};
 
 		let mut out = Vec::with_capacity(TsPacket::SIZE);
@@ -1761,7 +1764,7 @@ impl<E: catalog::Catalog> Export<E> {
 		//
 		// The clock only ever moves forward. A track skewed far enough behind that it
 		// decodes before the clock already reached it can't be placed ahead of its own
-		// decode time, and `with_latency` owns that skew, so its bytes go out at the
+		// decode time, and [`Self::with_delay`] owns that skew, so its bytes go out at the
 		// clock rather than dragging it backwards.
 		let start = match self.clock {
 			Some(clock) => clock.as_nanos(),

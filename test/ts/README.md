@@ -156,7 +156,7 @@ the total and reports the rate over the tail of the sample beside it. A sender
 that buffers builds a standing lag once and then runs at the media rate: the lag
 is a constant offset no receiver can see, and it cannot grow past the latency
 budget the sender is allowed to hold, so set `--drift-ms` to that budget
-(`export ts --max-age`, 500 ms by default). A pipe that is not running at the
+(`export ts --delay`, 500 ms by default). A pipe that is not running at the
 media rate never stops accumulating and so breaches any fixed bound given a long
 enough sample. The tail rate is what tells the two apart, and it needs a sample
 longer than the lag takes to build: measured against the grid-sliced exporter,

@@ -136,7 +136,8 @@ pub struct SubscribeArgs {
 	/// The format to write to stdout.
 	pub format: SubscribeFormat,
 
-	/// How far playback may drift from the live edge before skipping groups.
+	/// How far playback may drift from the live edge before skipping groups. TS also
+	/// holds every frame this long after its decode time (`--delay`).
 	pub max_age: Duration,
 
 	/// How long to wait for the broadcast to come back after it ends (TS only).
@@ -307,7 +308,7 @@ impl Subscribe {
 		let mut broadcast = source.broadcast().await?;
 		let mut ts = moq_mux::container::ts::Export::with_ts(self.source, self.catalog)
 			.await?
-			.with_max_age(self.args.max_age);
+			.with_delay(self.args.max_age);
 		if let Some(mux_rate) = self.args.mux_rate {
 			ts = ts.with_mux_rate(mux_rate);
 		}
@@ -439,7 +440,7 @@ async fn resume_within(
 /// gone out any earlier. What that gives up is a producer running faster than real
 /// time indefinitely: the sink keeps pace with it and falls further behind live
 /// without the budget noticing. Bounding *that* is the export's own
-/// `--max-age`, which sheds media rather than compressing the clock.
+/// `--delay`, which sheds media rather than compressing the clock.
 ///
 /// The budget is the lead plus whatever standing lag the pacer has absorbed
 /// ([`Pacer::slack`](moq_mux::Pacer::slack)), which is a distance it is holding on
@@ -583,7 +584,7 @@ mod tests {
 	/// media rate instead of being shed, because it is indistinguishable from the
 	/// TS export's own mux buffer from here: both hand over a frame that is ready
 	/// and ahead of the schedule. The size of such a backlog is bounded by the
-	/// export's `--max-age`, which is where it belongs.
+	/// export's `--delay`, which is where it belongs.
 	#[tokio::test(start_paused = true)]
 	async fn a_sink_that_cannot_keep_up_sheds_the_lag() {
 		let mut delivery = Delivery::new(Duration::from_millis(500));

@@ -69,6 +69,9 @@ fn length_prefixed(nals: &[&[u8]]) -> Bytes {
 /// exporter's default [`Duration::ZERO`] collapses to the
 /// live edge: completeness has to be asked for, exactly as a real recorder does.
 const RECORDING_MAX_AGE: Duration = Duration::from_secs(30);
+/// How long a drain waits for the next frame: past the recording delay, so the first
+/// frame goes out, and then until output stops.
+const DRAIN: std::time::Duration = RECORDING_MAX_AGE.saturating_add(std::time::Duration::from_secs(1));
 
 async fn drain(consumer: moq_net::broadcast::Consumer) -> BytesMut {
 	drain_with(Export::new(crate::source::announced(&consumer)).await.unwrap()).await
@@ -76,10 +79,10 @@ async fn drain(consumer: moq_net::broadcast::Consumer) -> BytesMut {
 
 /// `drain` for an exporter built with an explicit catalog extension.
 async fn drain_with<E: tscat::Catalog>(exporter: Export<E>) -> BytesMut {
-	let mut exporter = exporter.with_max_age(RECORDING_MAX_AGE);
+	let mut exporter = exporter.with_delay(RECORDING_MAX_AGE);
 	let mut out = BytesMut::new();
 	// `while let Ok` stops on the first timeout (`Pending`: no more output).
-	while let Ok(res) = tokio::time::timeout(Duration::from_secs(1), exporter.next()).await {
+	while let Ok(res) = tokio::time::timeout(DRAIN, exporter.next()).await {
 		let Some(frame) = res.expect("exporter error") else {
 			break;
 		};
@@ -778,7 +781,7 @@ async fn export_pcr_wraps_below_the_reserve_at_start() {
 	let mut exporter = Export::new(crate::source::announced(&consumer))
 		.await
 		.unwrap()
-		.with_max_age(RECORDING_MAX_AGE);
+		.with_delay(RECORDING_MAX_AGE);
 	let frames = drain_frames(&mut exporter).await;
 
 	// A slot's clock packets lead the frame carrying that slot's bytes, and the
@@ -1254,7 +1257,7 @@ async fn scte35_without_video_export_is_rejected() {
 		.await
 		.unwrap();
 	let err = loop {
-		match tokio::time::timeout(Duration::from_secs(1), exporter.next()).await {
+		match tokio::time::timeout(DRAIN, exporter.next()).await {
 			Ok(Ok(Some(_))) => continue,
 			Ok(Ok(None)) => panic!("export completed; a cue program without video must be rejected"),
 			Ok(Err(e)) => break e,
@@ -1558,7 +1561,7 @@ async fn aac_export_refuses_what_adts_cannot_label() {
 
 		let mut exporter = Export::new(crate::source::announced(&consumer)).await.unwrap();
 		let err = loop {
-			match tokio::time::timeout(Duration::from_secs(1), exporter.next()).await {
+			match tokio::time::timeout(DRAIN, exporter.next()).await {
 				Ok(Ok(Some(_))) => continue,
 				Ok(Ok(None)) => panic!("export completed; expected a refusal naming {refusal}"),
 				Ok(Err(e)) => break e,
@@ -2430,7 +2433,7 @@ async fn export_rejects_si_pid_on_the_pmt() {
 	let mut exporter = Export::with_ts(crate::source::announced(&consumer), crate::catalog::CatalogFormat::Hang)
 		.await
 		.unwrap()
-		.with_max_age(RECORDING_MAX_AGE);
+		.with_delay(RECORDING_MAX_AGE);
 	let err = exporter
 		.next()
 		.await
@@ -2479,7 +2482,7 @@ async fn export_rejects_si_pid_on_an_elementary_stream() {
 	let mut exporter = Export::with_ts(crate::source::announced(&consumer), crate::catalog::CatalogFormat::Hang)
 		.await
 		.unwrap()
-		.with_max_age(RECORDING_MAX_AGE);
+		.with_delay(RECORDING_MAX_AGE);
 	let err = exporter
 		.next()
 		.await
@@ -2495,7 +2498,7 @@ async fn export_of(consumer: &moq_net::broadcast::Consumer) -> Export<tscat::Ext
 	Export::with_ts(crate::source::announced(consumer), crate::catalog::CatalogFormat::Hang)
 		.await
 		.unwrap()
-		.with_max_age(RECORDING_MAX_AGE)
+		.with_delay(RECORDING_MAX_AGE)
 }
 
 fn publish_sdt(
@@ -2704,13 +2707,10 @@ async fn reordered_video_keeps_the_table_cadence() {
 	assert_eq!(export.discontinuity(), 0, "a reorder is not a rewind");
 	assert_eq!(count_pid(&out, 0x0000), 10, "PAT once per 500ms slot, not per reorder");
 	assert_eq!(count_pid(&out, 0x0011), 3, "SDT once per 2s slot, not per reorder");
-	// The SPS declares no reorder depth, so the first B-frame grows the reserve once, after
-	// the first PCR: that one step back is a new time base, the reorders after it are not.
-	assert_eq!(
-		count_discontinuity(&out),
-		1,
-		"only the reserve's growth restarts the clock"
-	);
+	// The SPS declares no reorder depth, so the first B-frame grows the reserve. It is read
+	// a delay ahead of the first PCR, so the clock starts on the grown reserve and never
+	// steps back.
+	assert_eq!(count_discontinuity(&out), 0, "a reorder does not restart the clock");
 }
 
 /// A program with more than one track marks the break once, not once per track. A
@@ -3242,7 +3242,7 @@ async fn stale_si_entry_does_not_block_output() {
 		.unwrap();
 	// The timeout distinguishes "produced output promptly" from "held dark";
 	// under paused time a wedged exporter would hit it instantly.
-	let frame = tokio::time::timeout(Duration::from_secs(1), exporter.next())
+	let frame = tokio::time::timeout(DRAIN, exporter.next())
 		.await
 		.expect("a stale SI entry must not hold output dark")
 		.unwrap()
@@ -3568,10 +3568,20 @@ async fn export_twice(with_video: bool) -> (Vec<Frame>, Vec<Frame>) {
 /// whole (this compares them one by one, not as one byte stream).
 async fn drain_frames<E: tscat::Catalog>(export: &mut Export<E>) -> Vec<Frame> {
 	let mut out = Vec::new();
-	while let Ok(res) = tokio::time::timeout(Duration::from_secs(1), export.next()).await {
-		match res.expect("exporter error") {
-			Some(frame) => out.push(frame),
-			None => break,
+	loop {
+		out.extend(poll_frames(export));
+		// Run the paused clock only as far as the next release, so a test that writes
+		// more afterwards is still on time for it.
+		if let Some(deadline) = export.next_release() {
+			tokio::time::sleep_until(deadline).await;
+			continue;
+		}
+		match tokio::time::timeout(Duration::from_millis(10), export.next()).await {
+			Ok(Ok(Some(frame))) => out.push(frame),
+			Ok(Ok(None)) => break,
+			Err(_) if export.next_release().is_none() => break,
+			Err(_) => {}
+			Ok(Err(err)) => panic!("exporter error: {err}"),
 		}
 	}
 	out
@@ -3646,9 +3656,9 @@ async fn late_join_matches_a_running_exporter_without_video() {
 	assert_only_continuity_differs(&a, &b, from);
 }
 
-// The interleave is a function of the media, not of arrival (moq-dev/moq#2829): the
-// earliest pending frame waits for every track to show it cannot be preceded, bounded
-// by the exporter's `max_age`.
+// The interleave is a function of the media, not of arrival (moq-dev/moq#2829): each frame
+// goes out a fixed delay after its decode time, in `(DTS, PID)` order, and one that arrives
+// past that deadline is dropped.
 
 /// A video and an audio rendition written frame by frame, on the late-join fixture's
 /// cadence, so a test decides exactly what each exporter has seen when it polls.
@@ -3660,6 +3670,8 @@ struct Interleave {
 	source: crate::Source,
 	/// The next audio frame to write.
 	audio_index: u64,
+	/// The paused clock's instant at media time zero, set by the first [`Self::at`].
+	start: Option<tokio::time::Instant>,
 }
 
 impl Interleave {
@@ -3714,14 +3726,21 @@ impl Interleave {
 			video,
 			audio,
 			audio_index: 0,
+			start: None,
 		}
 	}
 
 	/// An exporter with its subscriptions resolved, so later polls need no runtime.
-	async fn export(&self, max_age: Duration) -> Export {
-		let mut export = Export::new(self.source.clone()).await.unwrap().with_max_age(max_age);
+	async fn export(&self, delay: Duration) -> Export {
+		let mut export = Export::new(self.source.clone()).await.unwrap().with_delay(delay);
 		assert!(drain_frames(&mut export).await.is_empty());
 		export
+	}
+
+	/// Run the paused clock to `micros` of media time, as a live source would.
+	async fn at(&mut self, micros: u64) {
+		let start = *self.start.get_or_insert_with(tokio::time::Instant::now);
+		tokio::time::sleep_until(start + Duration::from_micros(micros)).await;
 	}
 
 	fn video(&mut self, tick: u64) {
@@ -3765,8 +3784,7 @@ impl Interleave {
 	}
 }
 
-/// Pull every frame an exporter can render without letting time pass, so a `max_age`
-/// wait lapses only where a test advances the clock itself.
+/// Pull every frame an exporter can render without letting time pass.
 fn poll_frames<E: tscat::Catalog>(export: &mut Export<E>) -> Vec<Frame> {
 	let waiter = kio::Waiter::noop();
 	let mut out = Vec::new();
@@ -3779,8 +3797,9 @@ fn poll_frames<E: tscat::Catalog>(export: &mut Export<E>) -> Vec<Frame> {
 	out
 }
 
-/// Every PES start's PTS in the order the stream carries them, across PIDs.
-fn pes_pts_in_order(frames: &[Frame]) -> Vec<u64> {
+/// Every PES start's decode time (its DTS, else its PTS) in the order the stream carries
+/// them, across PIDs.
+fn pes_decode_in_order(frames: &[Frame]) -> Vec<u64> {
 	let bytes: Vec<u8> = frames.iter().flat_map(|f| f.payload.iter().copied()).collect();
 	let mut reader = TsPacketReader::new(Cursor::new(bytes));
 	let mut out = Vec::new();
@@ -3788,55 +3807,61 @@ fn pes_pts_in_order(frames: &[Frame]) -> Vec<u64> {
 		if let Some(TsPayload::PesStart(pes)) = packet.payload
 			&& let Some(pts) = pes.header.pts
 		{
-			out.push(pts.as_u64());
+			out.push(pes.header.dts.unwrap_or(pts).as_u64());
 		}
 	}
 	out
 }
 
-/// Audio lagging video by a frame: each video frame lands before the audio that
-/// precedes it. Returns the PTS order the exporter emitted.
-async fn lagging_audio(max_age: Duration) -> Vec<u64> {
+/// Audio lagging video by up to a frame, on a live clock: each video frame lands before
+/// the audio that precedes it. Returns the decode order the exporter emitted.
+async fn lagging_audio(delay: Duration) -> Vec<u64> {
 	let mut rig = Interleave::new();
-	let mut export = rig.export(max_age).await;
+	let mut export = rig.export(delay).await;
 	let mut out = Vec::new();
 	for tick in 0..TICKS / 2 {
+		rig.at(tick * VIDEO_US).await;
 		rig.video(tick);
 		out.extend(poll_frames(&mut export));
 		rig.audio_until(tick * VIDEO_US, &mut export, &mut out);
 	}
 	rig.finish();
 	out.extend(drain_frames(&mut export).await);
-	pes_pts_in_order(&out)
+	assert_eq!(export.dropped(), 0, "every frame arrived inside its deadline");
+	pes_decode_in_order(&out)
 }
 
 #[tokio::test(start_paused = true)]
 async fn late_audio_still_leads_the_interleave() {
-	let pts = lagging_audio(Duration::from_millis(500)).await;
-	assert!(pts.len() > 100, "too little output to judge: {}", pts.len());
-	assert!(pts.is_sorted(), "a frame went out ahead of an earlier one: {pts:?}");
+	let decode = lagging_audio(Duration::from_millis(500)).await;
+	assert!(decode.len() > 100, "too little output to judge: {}", decode.len());
+	assert!(
+		decode.is_sorted(),
+		"a frame went out ahead of an earlier one: {decode:?}"
+	);
 }
 
-/// Zero `max_age` waits for nothing, so the interleave stays in arrival order.
+/// A zero delay holds nothing, so the interleave stays in arrival order.
 #[tokio::test(start_paused = true)]
-async fn zero_max_age_keeps_arrival_order() {
-	let pts = lagging_audio(Duration::ZERO).await;
+async fn zero_delay_keeps_arrival_order() {
+	let decode = lagging_audio(Duration::ZERO).await;
 	assert!(
-		!pts.is_sorted(),
+		!decode.is_sorted(),
 		"video should have led the audio that arrived after it"
 	);
 }
 
-/// Two exporters that see the same frames arrive in different orders render the same
-/// bytes: one polls after every frame (video ahead of its audio), the other only once
-/// each tick's frames have all landed.
+/// Two exporters that see the same frames arrive with different skew, every frame inside
+/// its deadline in both, render the same bytes: one polls after every frame (video ahead
+/// of its audio), the other only once each tick's frames have all landed.
 #[tokio::test(start_paused = true)]
 async fn arrival_order_does_not_change_the_output() {
 	let mut rig = Interleave::new();
-	let max_age = Duration::from_millis(500);
-	let (mut eager, mut batched) = (rig.export(max_age).await, rig.export(max_age).await);
+	let delay = Duration::from_millis(500);
+	let (mut eager, mut batched) = (rig.export(delay).await, rig.export(delay).await);
 	let (mut out_eager, mut out_batched) = (Vec::new(), Vec::new());
 	for tick in 0..TICKS / 2 {
+		rig.at(tick * VIDEO_US).await;
 		rig.video(tick);
 		out_eager.extend(poll_frames(&mut eager));
 		rig.audio_until(tick * VIDEO_US, &mut eager, &mut out_eager);
@@ -3852,183 +3877,56 @@ async fn arrival_order_does_not_change_the_output() {
 	assert!(eager == batched, "arrival order changed the rendering");
 }
 
-/// A track quiet past `max_age` is emitted around, and once it catches up the
-/// interleave waits for it again.
+/// Audio that arrives past its deadline is dropped and counted, and everything else still
+/// goes out in decode order.
 #[tokio::test(start_paused = true)]
-async fn quiet_track_is_emitted_around_then_rejoins() {
-	let max_age = Duration::from_millis(500);
+async fn a_late_frame_is_dropped_and_the_rest_keep_their_order() {
+	let delay = Duration::from_millis(100);
 	let mut rig = Interleave::new();
-	let mut export = rig.export(max_age).await;
+	let mut export = rig.export(delay).await;
 	let mut out = Vec::new();
-
-	rig.video(0);
-	rig.audio_until(1, &mut export, &mut out);
-
-	// Audio goes quiet while video runs on. Video waits for it, then goes around it.
-	for tick in 1..=10 {
-		rig.video(tick);
-	}
-	assert!(poll_frames(&mut export).is_empty(), "video waits for the quiet audio");
-	tokio::time::advance(max_age).await;
-	out.extend(poll_frames(&mut export));
-	assert!(
-		pes_pts_in_order(&out)
-			.iter()
-			.any(|&pts| pts >= 9 * VIDEO_US * 90 / 1_000),
-		"video went out around the quiet audio"
-	);
-
-	// Audio catches up with its backlog, then keeps lagging by a frame: the order
-	// resumes without the clock moving.
-	rig.audio_until(10 * VIDEO_US, &mut export, &mut out);
-	for tick in 11..TICKS / 2 {
+	for tick in 0..TICKS / 2 {
+		rig.at(tick * VIDEO_US).await;
 		rig.video(tick);
 		out.extend(poll_frames(&mut export));
-		rig.audio_until(tick * VIDEO_US, &mut export, &mut out);
+		// Audio stalls for 400ms, then its backlog lands at once.
+		if !(20..30).contains(&tick) {
+			rig.audio_until(tick * VIDEO_US, &mut export, &mut out);
+		}
 	}
 	rig.finish();
 	out.extend(drain_frames(&mut export).await);
 
-	// Everything from the first frame written after the catch-up on is in order.
-	let mut pts = pes_pts_in_order(&out);
-	let resumed = pts.iter().position(|&pts| pts >= 11 * VIDEO_US * 90 / 1_000).unwrap();
-	let pts = pts.split_off(resumed);
-	assert!(pts.len() > 100, "too little output to judge: {}", pts.len());
-	assert!(pts.is_sorted(), "the interleave did not resume: {pts:?}");
+	let written = rig.audio_index + TICKS / 2;
+	let decode = pes_decode_in_order(&out);
+	assert!(export.dropped() > 0, "the stalled audio missed its deadline");
+	assert_eq!(
+		decode.len() as u64,
+		written - export.dropped(),
+		"only the late frames were dropped"
+	);
+	assert!(
+		decode.is_sorted(),
+		"a frame went out ahead of an earlier one: {decode:?}"
+	);
 }
 
-/// Audio dropped for leading the first keyframe does not stall the interleave: the
-/// audio already cached past the keyframe shows where the track resumes.
+/// Audio dropped for leading the first keyframe does not stall the interleave.
 #[tokio::test(start_paused = true)]
 async fn tune_in_does_not_wait_on_dropped_audio() {
+	let delay = Duration::from_millis(500);
 	let mut rig = Interleave::new();
-	let mut export = rig.export(Duration::from_millis(500)).await;
+	let mut export = rig.export(delay).await;
 	let mut out = Vec::new();
 	rig.audio_until(3 * GOP * VIDEO_US, &mut export, &mut out);
 	for tick in GOP..2 * GOP {
 		rig.video(tick);
 	}
 	out.extend(poll_frames(&mut export));
+	// Past the keyframe's deadline, and far enough on that a later frame closes its span.
+	tokio::time::advance(delay + Duration::from_micros(4 * VIDEO_US)).await;
+	out.extend(poll_frames(&mut export));
 	assert!(!out.is_empty(), "the tune-in waited on audio it had dropped");
-}
-
-/// A rewind taken while going around a quiet track keeps going around it: the
-/// expired hold carries into the new generation rather than starting afresh.
-#[tokio::test(start_paused = true)]
-async fn rewind_keeps_an_expired_stall() {
-	let max_age = Duration::from_millis(500);
-	let mut rig = Interleave::new();
-	let mut export = rig.export(max_age).await;
-	let mut out = Vec::new();
-
-	rig.video(0);
-	rig.audio_until(1, &mut export, &mut out);
-	for tick in 1..=5 {
-		rig.video(tick);
-	}
-	assert!(poll_frames(&mut export).is_empty(), "video waits for the quiet audio");
-	tokio::time::advance(max_age).await;
-	out.extend(poll_frames(&mut export));
-	assert!(!out.is_empty(), "video went out around the quiet audio");
-
-	rig.video.discontinuity().unwrap();
-	for tick in 0..=5 {
-		rig.video(GOP + tick);
-	}
-	out.extend(poll_frames(&mut export));
-	let after = pes_pts_in_order(&out)
-		.into_iter()
-		.filter(|&pts| pts >= GOP * VIDEO_US * 90 / 1_000)
-		.count();
-	assert!(after > 0, "the new generation waited on the audio again");
-	assert_eq!(export.discontinuity(), 1);
-}
-
-/// A frame held across a rewind keeps the wait it has already served.
-#[tokio::test(start_paused = true)]
-async fn rewind_keeps_a_held_frame_waiting_time() {
-	let max_age = Duration::from_millis(500);
-	let mut rig = Interleave::new();
-	let mut export = rig.export(max_age).await;
-	let mut out = Vec::new();
-
-	rig.video(0);
-	rig.audio_until(1, &mut export, &mut out);
-	for tick in 1..=5 {
-		rig.video(tick);
-	}
-	// Audio jumps past the coming break, so it is held waiting on the video.
-	rig.audio_index = (GOP + 3) * VIDEO_US / AUDIO_US;
-	rig.audio_until(rig.audio_index * AUDIO_US + 1, &mut export, &mut out);
-	tokio::time::advance(max_age).await;
-
-	rig.video.discontinuity().unwrap();
-	rig.video(GOP);
-	out.extend(poll_frames(&mut export));
-	assert_eq!(export.discontinuity(), 1, "the held audio waited a second budget");
-}
-
-/// A rewind part way through a hold neither ends it nor renews it: the new generation
-/// waits out only what is left of the budget.
-#[tokio::test(start_paused = true)]
-async fn rewind_keeps_a_partial_stall() {
-	let max_age = Duration::from_millis(500);
-	let mut rig = Interleave::new();
-	let mut export = rig.export(max_age).await;
-	let mut out = Vec::new();
-
-	rig.video(0);
-	rig.audio_until(1, &mut export, &mut out);
-	for tick in 1..=5 {
-		rig.video(tick);
-	}
-	assert!(poll_frames(&mut export).is_empty(), "video waits for the quiet audio");
-	tokio::time::advance(max_age / 2).await;
-	assert!(poll_frames(&mut export).is_empty(), "the hold lapsed early");
-
-	rig.video.discontinuity().unwrap();
-	for tick in 0..=5 {
-		rig.video(GOP + tick);
-	}
-	assert!(poll_frames(&mut export).is_empty(), "the rewind ended the hold");
-
-	tokio::time::advance(max_age / 2).await;
-	assert!(!poll_frames(&mut export).is_empty(), "the rewind renewed the hold");
-	assert_eq!(export.discontinuity(), 1);
-}
-
-/// Under loss every source skip is a rewind. However many arrive while a sparse
-/// track stays quiet, the interleave holds for one budget, not one per rewind:
-/// renewing it at each would delay every source by the budget they skip on,
-/// and the feed would collapse into alternating holds and skips.
-#[tokio::test(start_paused = true)]
-async fn repeated_rewinds_hold_once() {
-	let max_age = Duration::from_millis(500);
-	let mut rig = Interleave::new();
-	let mut export = rig.export(max_age).await;
-	let mut out = Vec::new();
-
-	rig.video(0);
-	rig.audio_until(1, &mut export, &mut out);
-	for tick in 1..=5 {
-		rig.video(tick);
-	}
-	assert!(poll_frames(&mut export).is_empty(), "video waits for the quiet audio");
-	tokio::time::advance(max_age).await;
-	out.extend(poll_frames(&mut export));
-
-	for generation in 1..=8 {
-		rig.video.discontinuity().unwrap();
-		for tick in 0..=5 {
-			rig.video(generation * GOP + tick);
-		}
-		out.extend(poll_frames(&mut export));
-		assert_eq!(
-			export.discontinuity(),
-			generation,
-			"rewind {generation} held the feed for a fresh budget"
-		);
-	}
 }
 
 /// A section lost before the cycle wraps commits an observed subset; the next
@@ -4137,7 +4035,7 @@ async fn repointed_si_entry_resubscribes() {
 	let mut exporter = Export::with_ts(crate::source::announced(&consumer), crate::catalog::CatalogFormat::Hang)
 		.await
 		.unwrap()
-		.with_max_age(RECORDING_MAX_AGE);
+		.with_delay(RECORDING_MAX_AGE);
 	let mut before = BytesMut::new();
 	write_key(&mut producer, 0);
 	write_key(&mut producer, 1);
@@ -4168,7 +4066,7 @@ async fn repointed_si_entry_resubscribes() {
 	// that should carry the new sections, or the exporter drains them all first.
 	let mut after = BytesMut::new();
 	write_key(&mut producer, 2);
-	let frame = tokio::time::timeout(Duration::from_secs(1), exporter.next())
+	let frame = tokio::time::timeout(DRAIN, exporter.next())
 		.await
 		.expect("a frame after the switch")
 		.unwrap()
@@ -4180,7 +4078,7 @@ async fn repointed_si_entry_resubscribes() {
 	write_key(&mut producer, 3);
 	write_key(&mut producer, 4);
 	producer.finish().unwrap();
-	while let Ok(res) = tokio::time::timeout(Duration::from_secs(1), exporter.next()).await {
+	while let Ok(res) = tokio::time::timeout(DRAIN, exporter.next()).await {
 		let Some(frame) = res.unwrap() else { break };
 		after.extend_from_slice(&frame.payload);
 	}
@@ -4264,7 +4162,7 @@ async fn si_revision_after_final_media_frame_is_flushed() {
 		.await
 		.unwrap();
 	let first = loop {
-		let frame = tokio::time::timeout(Duration::from_secs(1), exporter.next())
+		let frame = tokio::time::timeout(DRAIN, exporter.next())
 			.await
 			.expect("the only media frame")
 			.unwrap()
@@ -4283,7 +4181,7 @@ async fn si_revision_after_final_media_frame_is_flushed() {
 		.unwrap();
 	catalog.finish().unwrap();
 
-	let tail = tokio::time::timeout(Duration::from_secs(1), exporter.next())
+	let tail = tokio::time::timeout(DRAIN, exporter.next())
 		.await
 		.expect("a trailing SI frame rather than an immediate end")
 		.unwrap()
@@ -4293,7 +4191,7 @@ async fn si_revision_after_final_media_frame_is_flushed() {
 		contains(&tail.payload, &sdt_v2),
 		"the trailing flush carries the revision"
 	);
-	let end = tokio::time::timeout(Duration::from_secs(1), exporter.next())
+	let end = tokio::time::timeout(DRAIN, exporter.next())
 		.await
 		.expect("the stream ends after the flush")
 		.unwrap();
@@ -4770,7 +4668,7 @@ async fn export_cbr_video() -> Vec<Frame> {
 	let mut exporter = Export::new(crate::source::announced(&consumer))
 		.await
 		.unwrap()
-		.with_max_age(RECORDING_MAX_AGE);
+		.with_delay(RECORDING_MAX_AGE);
 	drain_frames(&mut exporter).await
 }
 
@@ -4852,7 +4750,7 @@ async fn pcr_stays_among_the_bytes_across_reordered_tracks() {
 	let mut exporter = Export::new(crate::source::announced(&consumer))
 		.await
 		.unwrap()
-		.with_max_age(RECORDING_MAX_AGE);
+		.with_delay(RECORDING_MAX_AGE);
 	let frames = drain_frames(&mut exporter).await;
 	let pcrs = collect_pcrs(&frames);
 	assert!(pcrs.len() > 50, "expected the full feed, got {} PCRs", pcrs.len());
@@ -5232,7 +5130,7 @@ impl Reordered {
 
 	/// An exporter with its subscriptions resolved, so later polls need no runtime.
 	async fn export(&self, max_age: Duration) -> Export {
-		let mut export = Export::new(self.source.clone()).await.unwrap().with_max_age(max_age);
+		let mut export = Export::new(self.source.clone()).await.unwrap().with_delay(max_age);
 		assert!(drain_frames(&mut export).await.is_empty());
 		export
 	}
@@ -5437,6 +5335,45 @@ async fn declared_reorder_sizes_the_decode_clock_from_the_first_frame() {
 	assert_decodes_after_the_clock(&out_late);
 }
 
+/// Reordered video (each pyramid in decode order: PTS 0, 160, 80, 40, 120 ms) loses nothing on
+/// a clean path. The release deadline is on decode time, so no B-frame is stranded behind its
+/// reference or sent ahead of it, and every track interleaves in decode order.
+#[tokio::test(start_paused = true)]
+async fn reordered_video_loses_nothing_on_a_clean_path() {
+	let delay = Duration::from_millis(500);
+	let mut rig = Reordered::new(SPS, PPS, &[0, 1, 2, 3, 4]);
+	let mut export = rig.export(delay).await;
+	let start = tokio::time::Instant::now();
+	let mut out = Vec::new();
+	for tick in 0..TICKS / 2 {
+		tokio::time::sleep_until(start + Duration::from_micros(tick * VIDEO_US)).await;
+		rig.video(tick);
+		while rig.audio_before(tick + 1) {}
+		out.extend(poll_frames(&mut export));
+	}
+	rig.finish();
+	out.extend(drain_frames(&mut export).await);
+
+	assert_eq!(export.dropped(), 0, "a clean path drops nothing");
+	assert_eq!(
+		video_timing(&out, ..).len() as u64,
+		TICKS / 2,
+		"every video frame went out"
+	);
+	// The SPS declares no reorder depth, but the first pyramid is read a delay ahead of
+	// the first PCR, so the reserve it grows never steps the clock back.
+	assert_eq!(
+		count_discontinuity(&out),
+		0,
+		"the reserve settled before the clock started"
+	);
+	let decode = pes_decode_in_order(&out);
+	assert!(
+		decode.is_sorted(),
+		"a frame went out ahead of an earlier one: {decode:?}"
+	);
+}
+
 /// With nothing declared, the reserve grows to the deepest reordering muxed so far. This is the
 /// one path where it depends on when an exporter joined: a joiner that has muxed only shallow
 /// groups runs a shallower clock than a runner that saw a deep one before the join, until the
@@ -5564,7 +5501,7 @@ async fn a_track_leaving_the_catalog_is_read_to_its_end() {
 	let mut export = Export::new(crate::source::announced(&consumer))
 		.await
 		.unwrap()
-		.with_max_age(RECORDING_MAX_AGE);
+		.with_delay(RECORDING_MAX_AGE);
 	for ms in (0..200).step_by(20) {
 		write_aac(&mut kept, ms);
 		write_aac(&mut leaving, ms);
@@ -5606,10 +5543,7 @@ async fn resume_after(finish: bool) {
 	let (mut broadcast, mut catalog) = publish();
 	let mut track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
 	let ended = source.broadcast().await.unwrap();
-	let mut export = Export::new(source.clone())
-		.await
-		.unwrap()
-		.with_max_age(RECORDING_MAX_AGE);
+	let mut export = Export::new(source.clone()).await.unwrap().with_delay(RECORDING_MAX_AGE);
 	for ms in (0..200).step_by(20) {
 		write_aac(&mut track, ms);
 	}
@@ -5647,66 +5581,6 @@ async fn resume_after(finish: bool) {
 	assert_eq!(count_discontinuity(&after), 1, "the break is flagged once");
 	assert!(count_pid(&after, 0x0000) >= 1, "PAT re-emitted after the return");
 	assert_eq!(pes_count(&after), 10, "the returned broadcast's frames all went out");
-}
-
-/// A replacement broadcast gets a fresh interleave budget: a hold that expired on the
-/// broadcast before it doesn't let the new one go around a track still within its own.
-#[tokio::test(start_paused = true)]
-async fn resume_does_not_inherit_an_expired_stall() {
-	let max_age = Duration::from_secs(2);
-	let origin = crate::source::produce_origin();
-	let source = crate::Source::new(origin.consume(), "live");
-	let publish = || {
-		let mut broadcast = origin.publish("live", Default::default()).unwrap();
-		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
-		(broadcast, catalog)
-	};
-	// Output that needs no more than a tenth of the budget to pass.
-	async fn quick(export: &mut Export, max_age: Duration) -> Vec<Frame> {
-		let mut out = Vec::new();
-		while let Ok(frame) = tokio::time::timeout(max_age / 10, export.next()).await {
-			out.extend(frame.expect("exporter error"));
-		}
-		out
-	}
-
-	let (mut broadcast, mut catalog) = publish();
-	let mut leading = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
-	let mut quiet = aac_rendition(&mut broadcast, &mut catalog, "b.aac");
-	let ended = source.broadcast().await.unwrap();
-	let mut export = Export::new(source.clone()).await.unwrap().with_max_age(max_age);
-	write_aac(&mut quiet, 0);
-	for ms in (0..200).step_by(20) {
-		write_aac(&mut leading, ms);
-	}
-	quick(&mut export, max_age).await;
-	tokio::time::advance(max_age).await;
-	assert!(
-		!quick(&mut export, max_age).await.is_empty(),
-		"the leading track went around the quiet one"
-	);
-	drop((broadcast, catalog, leading, quiet));
-	let (_, end) = drain_to_end(&mut export).await;
-	assert!(end.is_err(), "a drop fails the export");
-
-	let (mut broadcast, mut catalog) = publish();
-	let mut leading = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
-	let mut quiet = aac_rendition(&mut broadcast, &mut catalog, "b.aac");
-	source.returned(&ended).await.unwrap();
-	export.resume().await.unwrap();
-	for ms in (0..200).step_by(20) {
-		write_aac(&mut leading, ms);
-	}
-	assert_eq!(
-		pes_count(&quick(&mut export, max_age).await),
-		0,
-		"the replacement went around its quiet track on the old broadcast's budget"
-	);
-	write_aac(&mut quiet, 200);
-	assert!(
-		!quick(&mut export, max_age).await.is_empty(),
-		"the replacement went out once both tracks showed"
-	);
 }
 
 #[tokio::test(start_paused = true)]

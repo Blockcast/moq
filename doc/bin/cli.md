@@ -323,11 +323,14 @@ See [Authentication](/bin/relay/auth).
 groups fetchable, which the [HLS gateway](/bin/hls) depends on. `export --max-age` (default 500 ms) is how long *this* consumer waits for a
 stalled group before skipping. Raising the first never delays playback.
 
-For `export ts`, `--max-age` also bounds how long the muxer holds a leading
-track for a lagging one. Frames go out in media-time order across all tracks,
-not arrival order, so two exporters of one broadcast emit them in one order. A
-track quiet for longer is muxed around until it catches up; a sparse track
-(SCTE-35) costs that wait once per cue. `--max-age 0` keeps arrival order.
+`export ts` takes `--delay` (default 500 ms) instead, and works like an SRT
+receiver's latency. Every frame is written that long after its decode time,
+with the clock started when the first frame arrived, so the output keeps the
+source's pace and interleaves all tracks in decode order whatever their arrival
+skew: two exporters of one broadcast emit them in one order. A frame that
+arrives later than its deadline is dropped, and video then resumes at its next
+keyframe. The delay is also how stale a group may get before it is skipped.
+`--delay 0` holds nothing and drops nothing, writing frames in arrival order.
 
 A stdout export ends with the broadcast. `export ts --linger 10s` waits that
 long for the broadcast to come back instead: a publisher that restarts within
