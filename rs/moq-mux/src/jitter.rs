@@ -13,7 +13,7 @@ use web_async::time::{Instant, Sleep};
 pub(crate) struct Arrival<T> {
 	/// When the frame was read from its source.
 	pub arrived: Instant,
-	/// When the frame decodes, nondecreasing within a track between discontinuities.
+	/// When the frame decodes, nondecreasing within a track.
 	pub decode: Timestamp,
 	/// The source's discontinuity counter when the frame was read.
 	pub discontinuity: u64,
@@ -25,8 +25,8 @@ pub(crate) struct Arrival<T> {
 /// A frame [`Buffer::poll_next`] let go.
 pub(crate) struct Ready<K, T> {
 	pub track: K,
-	/// Counts up each time a track's discontinuity started a new anchor. Tracks that
-	/// cross the same discontinuity share one.
+	/// Counts up each time a discontinuity moved the timeline, and the clock with it. Every
+	/// frame of one generation goes out before any frame of the next.
 	pub generation: u64,
 	pub item: T,
 }
@@ -42,37 +42,45 @@ pub(crate) enum Push {
 }
 
 /// Holds each track's frames until a fixed delay past their decode time, like an SRT
-/// receiver's TSBPD, in `(deadline, track)` order across tracks.
+/// receiver's TSBPD, in decode order across tracks.
 ///
-/// The clock is anchored at the first frame's arrival. Within one anchor the deadline
-/// order is the decode order, so two buffers that saw the same frames arrive with
+/// Every track runs on one clock, anchored at the first frame's arrival. Under it the
+/// deadline order is the decode order, so two buffers that saw the same frames arrive with
 /// different skew, each within its deadline, emit them in the same order. A frame that
 /// arrives past its deadline would break that order, so it is dropped and counted.
 ///
-/// A track whose source reports a discontinuity may have restarted its timeline, so it
-/// moves to a new generation with its own anchor: the newest one when another track got
-/// there first and the frame lands on its clock, otherwise one anchored at this frame,
-/// though never ahead of a deadline already given out. A backlog read in one go still
-/// releases each generation after the one before it, and a live stream keeps its delay.
+/// A source's discontinuity (a skipped group, a declared marker) may have moved its
+/// timeline, so once frames have gone out it opens a new generation with its own clock,
+/// anchored at that frame though never ahead of a deadline already given out. Every
+/// track's next frame runs on it: one crossing the same discontinuity joins it when the
+/// frame lands on its clock, neither late nor held more than a delay past everything
+/// queued, and opens another otherwise. Before anything has gone out there is nothing to
+/// keep in step with, so a discontinuity there (a consumer skipping a stale group at join)
+/// keeps the clock. No two tracks are ever on different clocks.
 ///
 /// A zero delay holds nothing and drops nothing: each frame goes out as soon as it is
 /// read, ordered only among the frames read together.
 pub(crate) struct Buffer<K, T> {
 	delay: Duration,
-	/// Each generation's anchor: the first frame's arrival and decode time.
-	anchors: BTreeMap<u64, (Instant, Timestamp)>,
+	/// The clock every frame is pushed under: its generation, and the arrival and decode
+	/// time of the frame that anchored it.
+	clock: Option<(u64, Instant, Timestamp)>,
 	tracks: BTreeMap<K, Track<T>>,
 	/// The latest deadline given out.
 	horizon: Option<Instant>,
+	/// Whether a frame has gone out since the clock started.
+	released: bool,
 	timer: Option<Pin<Box<Sleep>>>,
 	dropped: u64,
 }
 
 struct Track<T> {
-	/// Frames in arrival order, each with its deadline and generation.
-	queue: VecDeque<(Instant, u64, T)>,
-	generation: u64,
+	/// Frames in arrival order, each with its generation and deadline.
+	queue: VecDeque<(u64, Instant, T)>,
+	/// The source's discontinuity counter at the last frame.
 	discontinuity: u64,
+	/// The generation of the last frame.
+	generation: u64,
 	/// A frame was dropped, so later ones are too until the next sync frame.
 	waiting: bool,
 }
@@ -81,9 +89,10 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 	pub fn new(delay: Duration) -> Self {
 		Self {
 			delay,
-			anchors: BTreeMap::new(),
+			clock: None,
 			tracks: BTreeMap::new(),
 			horizon: None,
+			released: false,
 			timer: None,
 			dropped: 0,
 		}
@@ -91,36 +100,35 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 
 	/// Queue a frame, or drop it if it cannot make its deadline.
 	pub fn push(&mut self, key: K, arrival: Arrival<T>) -> Push {
-		// A new track counts from the start, as if it had always been there.
-		let (mut generation, discontinuity) = self
-			.tracks
-			.get(&key)
-			.map_or((0, 0), |track| (track.generation, track.discontinuity));
-		if discontinuity != arrival.discontinuity {
-			generation = self.rejoin(generation, &arrival);
-		}
-		let anchor = *self.anchors.entry(generation).or_insert_with(|| {
-			let after = self.horizon.and_then(|horizon| horizon.checked_sub(self.delay));
-			(
-				after.map_or(arrival.arrived, |after| after.max(arrival.arrived)),
-				arrival.decode,
-			)
+		let (mut generation, anchor, base) = *self.clock.get_or_insert((0, arrival.arrived, arrival.decode));
+		let mut deadline = self.deadline(anchor, base, arrival.decode);
+		// A track still on an older generation may be crossing the discontinuity another
+		// track opened the newest one for.
+		let jumped = self.tracks.get(&key).is_some_and(|track| {
+			track.discontinuity != arrival.discontinuity
+				&& (track.generation == generation || !self.lands(deadline, arrival.arrived))
 		});
-		let deadline = self.deadline(anchor, arrival.decode);
+		if jumped && self.released {
+			generation += 1;
+			let after = self.horizon.and_then(|horizon| horizon.checked_sub(self.delay));
+			let anchor = after.map_or(arrival.arrived, |after| after.max(arrival.arrived));
+			self.clock = Some((generation, anchor, arrival.decode));
+			deadline = self.deadline(anchor, arrival.decode, arrival.decode);
+		}
 
 		let track = self.tracks.entry(key).or_insert_with(|| Track {
 			queue: VecDeque::new(),
+			discontinuity: arrival.discontinuity,
 			generation,
-			discontinuity: 0,
 			waiting: false,
 		});
-		track.generation = generation;
 		track.discontinuity = arrival.discontinuity;
+		track.generation = generation;
 		let push = match deadline {
 			_ if track.waiting && !arrival.sync => Push::Waiting,
 			Some(deadline) if arrival.arrived <= deadline || self.delay.is_zero() => {
 				track.waiting = false;
-				track.queue.push_back((deadline, generation, arrival.item));
+				track.queue.push_back((generation, deadline, arrival.item));
 				self.horizon = self.horizon.max(Some(deadline));
 				Push::Queued
 			}
@@ -133,36 +141,22 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		if push != Push::Queued {
 			self.dropped += 1;
 		}
-
-		// Generation 0 stays, since a track that has yet to show up starts there.
-		let oldest = self.tracks.values().map(|track| track.generation).min();
-		self.anchors
-			.retain(|generation, _| *generation == 0 || oldest.is_none_or(|oldest| *generation >= oldest));
 		push
 	}
 
-	/// The generation a track at `generation` moves to on a discontinuity: the newest, if
-	/// another track opened it and this frame lands on its clock, or else a new one.
-	///
-	/// Landing on the clock means the frame is neither late nor held past both an on-time
-	/// frame and everything already queued, which a different timeline would be.
-	fn rejoin(&self, generation: u64, arrival: &Arrival<T>) -> u64 {
-		let Some((&latest, &anchor)) = self.anchors.last_key_value() else {
-			return generation + 1;
-		};
-		let lands = self.deadline(anchor, arrival.decode).is_some_and(|deadline| {
-			let bound = (arrival.arrived + self.delay).max(self.horizon.unwrap_or(arrival.arrived));
-			arrival.arrived <= deadline && deadline <= bound
-		});
-		match latest > generation && lands {
-			true => latest,
-			false => latest.max(generation) + 1,
-		}
+	/// Whether a frame arriving at `arrived` and due at `deadline` is on the clock: not late,
+	/// and held no more than a delay past both its arrival and everything already queued.
+	fn lands(&self, deadline: Option<Instant>, arrived: Instant) -> bool {
+		deadline.is_some_and(|deadline| {
+			let bound = arrived.max(self.horizon.unwrap_or(arrived)) + self.delay;
+			arrived <= deadline && deadline <= bound
+		})
 	}
 
-	/// When a frame decoding at `decode` goes out under `anchor`, if any instant holds it.
-	fn deadline(&self, (anchor, base): (Instant, Timestamp), decode: Timestamp) -> Option<Instant> {
-		// Signed, since a frame can decode before the one that anchored its generation.
+	/// When a frame decoding at `decode` goes out on the clock anchored at `anchor` and
+	/// `base`, if any instant holds it.
+	fn deadline(&self, anchor: Instant, base: Timestamp, decode: Timestamp) -> Option<Instant> {
+		// Signed, since a frame can decode before the one that anchored the clock.
 		let offset = decode.as_nanos() as i128 - base.as_nanos() as i128 + self.delay.as_nanos() as i128;
 		let nanos = u64::try_from(offset.unsigned_abs()).ok()?;
 		match offset >= 0 {
@@ -171,17 +165,25 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		}
 	}
 
-	/// The next frame whose deadline has come, earliest deadline first, ties by track.
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Ready<K, T>> {
-		let Some((deadline, key)) = self
-			.tracks
+	/// The generation, deadline and track of the frame that goes out next: generation by
+	/// generation, earliest deadline first, ties by track.
+	fn front(&self) -> Option<(u64, Instant, &K)> {
+		self.tracks
 			.iter()
-			.filter_map(|(key, track)| track.queue.front().map(|(deadline, ..)| (*deadline, key)))
+			.filter_map(|(key, track)| {
+				let (generation, deadline, _) = track.queue.front()?;
+				Some((*generation, *deadline, key))
+			})
 			.min()
-		else {
+	}
+
+	/// The next frame whose deadline has come, in [`Self::front`] order.
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Ready<K, T>> {
+		let Some((_, deadline, key)) = self.front() else {
 			self.timer = None;
 			return Poll::Pending;
 		};
+		let key = key.clone();
 		if !self.delay.is_zero() && Instant::now() < deadline {
 			let timer = self
 				.timer
@@ -193,10 +195,10 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 				return Poll::Pending;
 			}
 		}
-		let track = key.clone();
-		let (_, generation, item) = self.tracks.get_mut(&track).and_then(|t| t.queue.pop_front()).unwrap();
+		let (generation, _, item) = self.tracks.get_mut(&key).and_then(|t| t.queue.pop_front()).unwrap();
+		self.released = true;
 		Poll::Ready(Ready {
-			track,
+			track: key,
 			generation,
 			item,
 		})
@@ -205,10 +207,7 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 	/// When the next queued frame is due.
 	#[cfg(test)]
 	pub fn next_deadline(&self) -> Option<Instant> {
-		self.tracks
-			.values()
-			.filter_map(|track| track.queue.front().map(|(deadline, ..)| *deadline))
-			.min()
+		self.front().map(|(_, deadline, _)| deadline)
 	}
 
 	/// Whether no frame is waiting.
@@ -221,11 +220,12 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		self.dropped
 	}
 
-	/// Drop every queued frame and anchor, so the next frame starts the clock afresh.
+	/// Drop every queued frame and the clock, so the next frame starts it afresh.
 	pub fn clear(&mut self) {
-		self.anchors.clear();
+		self.clock = None;
 		self.tracks.clear();
 		self.horizon = None;
+		self.released = false;
 		self.timer = None;
 	}
 }
@@ -250,14 +250,27 @@ mod tests {
 		}
 	}
 
-	/// Every frame due by now, in order.
-	fn due(buffer: &mut Buffer<u16, &'static str>) -> Vec<&'static str> {
+	/// The same frame, read after its source's discontinuity counter moved to `discontinuity`.
+	fn after(discontinuity: u64, arrival: Arrival<&'static str>) -> Arrival<&'static str> {
+		Arrival {
+			discontinuity,
+			..arrival
+		}
+	}
+
+	/// Every frame due by now, in order, with its generation.
+	fn released(buffer: &mut Buffer<u16, &'static str>) -> Vec<(&'static str, u64)> {
 		let waiter = kio::Waiter::noop();
 		let mut out = Vec::new();
 		while let Poll::Ready(ready) = buffer.poll_next(&waiter) {
-			out.push(ready.item);
+			out.push((ready.item, ready.generation));
 		}
 		out
+	}
+
+	/// Every frame due by now, in order.
+	fn due(buffer: &mut Buffer<u16, &'static str>) -> Vec<&'static str> {
+		released(buffer).into_iter().map(|(item, _)| item).collect()
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -339,49 +352,78 @@ mod tests {
 		assert_eq!(due(&mut buffer), ["v0", "a0", "a180", "v240"]);
 	}
 
-	/// A discontinuity re-anchors the track, and a track reaching the same discontinuity
-	/// later joins that anchor rather than making its own.
+	/// A consumer that skips a stale group at join counts a discontinuity before anything
+	/// went out. The skip keeps the clock, so the tracks stay on one.
 	#[tokio::test(start_paused = true)]
-	async fn a_discontinuity_re_anchors() {
+	async fn a_skip_before_the_first_release_keeps_one_clock() {
 		let start = Instant::now();
 		let mut buffer = Buffer::new(DELAY);
-		buffer.push(1, arrival(start, 5_000, "v5000"));
-		buffer.push(2, arrival(start, 5_000, "a5000"));
+		// The video's first group is stale and anchors the clock; the audio is live.
+		buffer.push(1, arrival(start, 0, "v0"));
+		buffer.push(2, arrival(start, 900, "a900"));
+		// The video consumer skips to the live group.
+		let skip = start + Duration::from_millis(5);
+		assert_eq!(buffer.push(1, after(1, arrival(skip, 900, "v900"))), Push::Queued);
+		assert_eq!(buffer.push(1, after(1, arrival(skip, 940, "v940"))), Push::Queued);
+		assert_eq!(buffer.push(2, arrival(skip, 940, "a940")), Push::Queued);
 
-		// The publisher restarts its timeline at zero, a second in.
-		let restart = start + Duration::from_secs(1);
-		let reset = |arrived, decode, item| Arrival {
-			discontinuity: 1,
-			..arrival(arrived, decode, item)
-		};
-		assert_eq!(buffer.push(1, reset(restart, 0, "v0")), Push::Queued);
-		// Audio still carries its old timeline for a moment, then restarts too.
-		assert_eq!(buffer.push(2, arrival(restart, 6_000, "a6000")), Push::Queued);
-		let later = restart + Duration::from_millis(10);
-		assert_eq!(buffer.push(2, reset(later, 0, "a0")), Push::Queued);
-
-		tokio::time::advance(Duration::from_secs(1) + DELAY).await;
-		assert_eq!(due(&mut buffer), ["v5000", "a5000", "v0", "a6000", "a0"]);
+		tokio::time::advance(Duration::from_secs(2)).await;
+		assert_eq!(
+			released(&mut buffer),
+			[("v0", 0), ("v900", 0), ("a900", 0), ("v940", 0), ("a940", 0)]
+		);
 	}
 
-	/// A backlog read in one go releases a new generation after the one before it.
+	/// A discontinuity after frames went out opens a new generation, and every track's next
+	/// frame runs on it, whether or not that track saw the discontinuity.
 	#[tokio::test(start_paused = true)]
-	async fn a_backlog_releases_generations_in_turn() {
+	async fn every_track_joins_a_new_generation_at_its_next_frame() {
 		let start = Instant::now();
 		let mut buffer = Buffer::new(DELAY);
-		buffer.push(1, arrival(start, 5_000, "v5000"));
-		buffer.push(1, arrival(start, 5_040, "v5040"));
-		let reset = Arrival {
-			discontinuity: 1,
-			..arrival(start, 0, "v0")
-		};
-		buffer.push(1, reset);
-		buffer.push(2, arrival(start, 5_020, "a5020"));
+		buffer.push(1, arrival(start, 0, "v0"));
+		buffer.push(2, arrival(start, 0, "a0"));
+		buffer.push(3, arrival(start, 0, "d0"));
+		tokio::time::advance(DELAY).await;
+		assert_eq!(due(&mut buffer), ["v0", "a0", "d0"]);
+
+		// The publisher resumes a second later with its timeline five seconds on.
+		let resume = start + Duration::from_secs(1);
+		tokio::time::advance(resume - Instant::now()).await;
+		assert_eq!(buffer.push(1, after(1, arrival(resume, 5_000, "v5000"))), Push::Queued);
+		// The audio crosses no discontinuity of its own; the data crosses the same one.
+		let late = resume + Duration::from_millis(10);
+		assert_eq!(buffer.push(2, arrival(late, 5_000, "a5000")), Push::Queued);
+		assert_eq!(buffer.push(3, after(1, arrival(late, 5_000, "d5000"))), Push::Queued);
+		assert_eq!(buffer.push(2, arrival(late, 5_020, "a5020")), Push::Queued);
 
 		tokio::time::advance(DELAY).await;
-		assert_eq!(due(&mut buffer), ["v5000"]);
-		tokio::time::advance(Duration::from_millis(40)).await;
-		assert_eq!(due(&mut buffer), ["a5020", "v5040", "v0"]);
+		assert_eq!(released(&mut buffer), [("v5000", 1), ("a5000", 1), ("d5000", 1)]);
+		tokio::time::advance(Duration::from_millis(20)).await;
+		assert_eq!(released(&mut buffer), [("a5020", 1)]);
+	}
+
+	/// Every frame of a generation goes out before the next generation's, even one the new
+	/// clock puts earlier.
+	#[tokio::test(start_paused = true)]
+	async fn generations_go_out_in_turn() {
+		let start = Instant::now();
+		let mut buffer = Buffer::new(DELAY);
+		buffer.push(1, arrival(start, 0, "v0"));
+		buffer.push(1, arrival(start, 40, "v40"));
+		buffer.push(2, arrival(start, 20, "a20"));
+		tokio::time::advance(DELAY).await;
+		assert_eq!(due(&mut buffer), ["v0"]);
+
+		// A backlog across a jump in the timeline, read in one go.
+		let now = Instant::now();
+		buffer.push(1, after(1, arrival(now, 5_000, "v5000")));
+		buffer.push(2, arrival(now, 4_900, "a4900"));
+		buffer.push(2, arrival(now, 5_020, "a5020"));
+		tokio::time::advance(Duration::from_secs(1)).await;
+		assert_eq!(
+			released(&mut buffer),
+			[("a20", 0), ("v40", 0), ("a4900", 1), ("v5000", 1), ("a5020", 1)]
+		);
 	}
 
 	/// Zero holds nothing: frames read together go out at once in decode order, and a
