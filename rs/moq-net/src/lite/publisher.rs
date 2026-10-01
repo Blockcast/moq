@@ -295,9 +295,11 @@ impl<S: crate::transport::poll::Session> Control<S> {
 						unreachable!()
 					};
 					self.state = match kind {
-						lite::ControlType::Announce => {
-							ControlState::Announce(AnnounceServe::new(self.shared.clone(), self.runtime.clone(), stream))
-						}
+						lite::ControlType::Announce => ControlState::Announce(AnnounceServe::new(
+							self.shared.clone(),
+							self.runtime.clone(),
+							stream,
+						)),
 						lite::ControlType::Subscribe => {
 							ControlState::Subscribe(SubscribeServe::new(self.shared.clone(), stream))
 						}
@@ -910,6 +912,13 @@ impl AnnounceRun {
 			if let Poll::Ready(res) = stream.reader.poll_closed(&mut cx) {
 				return Poll::Ready(res);
 			}
+			if let Some(hold) = &mut self.hold
+				&& let Poll::Ready((suffix, hops, cost)) = hold.poll_due(waiter)
+			{
+				tracing::debug!(route = %origin.absolute(&suffix), "announce after hold-down");
+				self.start(stream, suffix, hops, cost)?;
+				continue;
+			}
 			let Poll::Ready(next) = announced.poll_next(waiter) else {
 				return Poll::Pending;
 			};
@@ -925,47 +934,72 @@ impl AnnounceRun {
 			let absolute = origin.absolute(&update.prefix);
 			let suffix = update.prefix;
 
-			if !update.kind.is_active() {
+			let outgoing = match update.kind.is_active() {
+				true => self.outgoing(&update.route, &absolute),
+				false => None,
+			};
+			let Some((hops, cost)) = outgoing else {
+				// Retracted, or a chain that must not be forwarded (reflected, or
+				// full): drop any held replacement and retract what the peer holds.
+				if let Some(hold) = &mut self.hold {
+					hold.routes.remove(&suffix);
+				}
 				self.retract(stream, suffix, &absolute)?;
+				continue;
+			};
+
+			// A replacement already waiting out the hold-down takes the newest route.
+			if let Some(hold) = &mut self.hold
+				&& hold.routes.contains_key(&suffix)
+			{
+				hold.hold(suffix, hops, cost);
 				continue;
 			}
 
-			match self.outgoing(&update.route, &absolute) {
-				Some((hops, cost)) => match self.live.get_mut(&suffix) {
-					// The peer would decode what it already holds.
-					Some(advertised) if advertised.hops == hops && advertised.cost == cost => {}
-					// A metadata update on a live advertisement: restart it in
-					// place (lite-05 restarts via a duplicate ANNOUNCE).
-					Some(advertised) if lite::restart_supported(self.version) => {
-						tracing::debug!(route = %absolute, "reannounce");
-						advertised.hops = hops.clone();
-						advertised.cost = cost;
-						match advertised.id {
-							Some(id) => {
-								let hops = self.encoder.update(id, hops);
-								stream
-									.writer
-									.buffer(&lite::AnnounceBroadcast::Restart { id, hops, cost })?
-							}
-							// lite-05: a duplicate ANNOUNCE, which assigns no id.
-							None => stream.writer.buffer(&lite::AnnounceBroadcast::Active {
-								suffix: lite::PathRef::literal(suffix),
-								hops: lite::HopsRef::literal(hops),
-								cost,
-							})?,
+			match self.live.get_mut(&suffix) {
+				// The peer would decode what it already holds.
+				Some(advertised) if advertised.hops == hops && advertised.cost == cost => {}
+				// The route we advertised is gone and another took over: retract now,
+				// and advertise the replacement only if it survives the hold-down.
+				// A new chain from the same neighbor is that neighbor's own update,
+				// which it already held down if it had to.
+				Some(advertised)
+					if self.hold.is_some()
+						&& advertised.hops != hops
+						&& advertised.hops.as_slice().last() != hops.as_slice().last()
+						&& !origin.carries(&suffix, &advertised.hops) =>
+				{
+					self.retract(stream, suffix.clone(), &absolute)?;
+					self.hold.as_mut().expect("checked above").hold(suffix, hops, cost);
+				}
+				// A metadata update on a live advertisement: restart it in
+				// place (lite-05 restarts via a duplicate ANNOUNCE).
+				Some(advertised) if lite::restart_supported(self.version) => {
+					tracing::debug!(route = %absolute, "reannounce");
+					advertised.hops = hops.clone();
+					advertised.cost = cost;
+					match advertised.id {
+						Some(id) => {
+							let hops = self.encoder.update(id, hops);
+							stream
+								.writer
+								.buffer(&lite::AnnounceBroadcast::Restart { id, hops, cost })?
 						}
+						// lite-05: a duplicate ANNOUNCE, which assigns no id.
+						None => stream.writer.buffer(&lite::AnnounceBroadcast::Active {
+							suffix: lite::PathRef::literal(suffix),
+							hops: lite::HopsRef::literal(hops),
+							cost,
+						})?,
 					}
-					// Pre-restart versions have no way to update a live
-					// advertisement; the peer keeps the original chain.
-					Some(_) => {}
-					None => {
-						tracing::debug!(route = %absolute, "announce");
-						self.start(stream, suffix, hops, cost)?;
-					}
-				},
-				// The chain must not be forwarded (reflected, or full): retract
-				// whatever the peer holds.
-				None => self.retract(stream, suffix, &absolute)?,
+				}
+				// Pre-restart versions have no way to update a live
+				// advertisement; the peer keeps the original chain.
+				Some(_) => {}
+				None => {
+					tracing::debug!(route = %absolute, "announce");
+					self.start(stream, suffix, hops, cost)?;
+				}
 			}
 		}
 	}
@@ -2072,6 +2106,138 @@ mod announce_test {
 			}
 			other => panic!("expected a clamped restart, got {other:?}"),
 		}
+	}
+
+	fn chain(hops: &[u64]) -> Hops {
+		Hops::try_from(hops.iter().map(|id| Hop::new(*id).unwrap()).collect::<Vec<_>>()).unwrap()
+	}
+
+	fn route(hops: &[u64], cost: u64) -> crate::origin::Route {
+		crate::origin::Route::default().with_hops(chain(hops)).with_cost(cost)
+	}
+
+	/// An announce loop to a peer relay, which holds replacements down, over an
+	/// origin where "cam" is reached through relay 5 and, at a higher cost, relay 6.
+	struct Held {
+		origin: origin::Producer,
+		best: Option<crate::model::AnnounceProducer>,
+		fallback: Option<crate::model::AnnounceProducer>,
+		wire: Wire,
+		task: tokio::task::JoinHandle<Result<(), Error>>,
+	}
+
+	impl Held {
+		async fn new() -> Self {
+			let origin = Hop::new(1).unwrap().produce();
+			let best = origin.announce("cam", route(&[9, 5], 1)).unwrap();
+			let fallback = origin.announce("cam", route(&[9, 6], 2)).unwrap();
+
+			let log = Log::default();
+			let writes = log.writes.clone();
+			let consumer = origin.consume();
+			let mut stream = Stream::<SinkSession, Version> {
+				writer: Writer::new(SinkSend::new(log), VERSION),
+				reader: Reader::new(PendingRecv, VERSION),
+			};
+			let task = tokio::spawn(async move {
+				let mut announced = consumer.announced();
+				let mut run =
+					AnnounceRun::new(consumer.hop(), VERSION).with_hold(&crate::time::Clock::tokio(), HOLD_DOWN);
+				kio::wait(|waiter| run.poll(&mut stream, &consumer, &mut announced, waiter)).await
+			});
+			settle().await;
+
+			let mut wire = Wire { writes, cursor: 0 };
+			assert_eq!(wire.take_ok().active, 1);
+			assert_eq!(wire.take_announces().len(), 1, "expected the initial announce");
+			Self {
+				origin,
+				best: Some(best),
+				fallback: Some(fallback),
+				wire,
+				task,
+			}
+		}
+
+		fn assert_idle(&self) {
+			self.wire.assert_quiet();
+			assert!(!self.task.is_finished(), "the announce loop ended unexpectedly");
+		}
+	}
+
+	/// When the advertised route is withdrawn, the peer loses it at once and gets
+	/// the replacement only after the hold-down.
+	#[tokio::test(start_paused = true)]
+	async fn withdrawn_route_is_replaced_after_the_hold_down() {
+		let mut h = Held::new().await;
+		h.best = None;
+		settle().await;
+		match h.wire.take_announces().as_slice() {
+			[lite::AnnounceBroadcast::EndedId { id: 0 }] => {}
+			other => panic!("expected the retraction, got {other:?}"),
+		}
+
+		tokio::time::sleep(HOLD_DOWN - Duration::from_millis(2)).await;
+		h.assert_idle();
+		tokio::time::sleep(Duration::from_millis(2)).await;
+		match h.wire.take_announces().as_slice() {
+			[lite::AnnounceBroadcast::Active { hops, cost, .. }] => {
+				assert_eq!(hops, &lite::HopsRef::literal(chain(&[9, 6])));
+				assert_eq!(*cost, crate::origin::Cost::new(2));
+			}
+			other => panic!("expected the replacement, got {other:?}"),
+		}
+		h.assert_idle();
+	}
+
+	/// A replacement withdrawn during the hold-down never reaches the peer: the
+	/// withdrawal costs one retraction, not one per stale path.
+	#[tokio::test(start_paused = true)]
+	async fn replacement_withdrawn_during_the_hold_down_is_never_sent() {
+		let mut h = Held::new().await;
+		h.best = None;
+		settle().await;
+		assert_eq!(h.wire.take_announces().len(), 1, "expected the retraction");
+
+		h.fallback = None;
+		tokio::time::sleep(HOLD_DOWN * 2).await;
+		h.assert_idle();
+
+		// A later announcement is a new route, sent at once.
+		let _again = h.origin.announce("cam", route(&[9, 7], 1)).unwrap();
+		settle().await;
+		match h.wire.take_announces().as_slice() {
+			[lite::AnnounceBroadcast::Active { .. }] => {}
+			other => panic!("expected the new route, got {other:?}"),
+		}
+	}
+
+	/// A better route while the advertised one still stands restarts at once:
+	/// nothing about it can be stale.
+	#[tokio::test(start_paused = true)]
+	async fn better_route_restarts_at_once() {
+		let mut h = Held::new().await;
+		let _better = h.origin.announce("cam", route(&[9, 4], 0)).unwrap();
+		settle().await;
+		match h.wire.take_announces().as_slice() {
+			[lite::AnnounceBroadcast::Restart { id: 0, .. }] => {}
+			other => panic!("expected a restart, got {other:?}"),
+		}
+		h.assert_idle();
+	}
+
+	/// A new chain from the neighbor we already route through is that neighbor's own
+	/// update, which it held down itself if it had to: restart at once.
+	#[tokio::test(start_paused = true)]
+	async fn same_neighbor_update_restarts_at_once() {
+		let mut h = Held::new().await;
+		h.best.as_ref().unwrap().update(route(&[8, 5], 1)).unwrap();
+		settle().await;
+		match h.wire.take_announces().as_slice() {
+			[lite::AnnounceBroadcast::Restart { id: 0, .. }] => {}
+			other => panic!("expected a restart, got {other:?}"),
+		}
+		h.assert_idle();
 	}
 }
 
@@ -3680,6 +3846,7 @@ mod tests {
 			peer_setup,
 			goaway,
 			peer_hop: Some(assigned),
+			relay: false,
 		});
 
 		let serving = kio::wait(|waiter| publisher.shared.poll_serving_origin(waiter)).await;
@@ -3781,6 +3948,7 @@ mod tests {
 			peer_setup: crate::lite::PeerSetup::default(),
 			goaway,
 			peer_hop: None,
+			relay: false,
 		});
 		ProbeServe::new(publisher.shared.clone(), publisher.runtime.clone(), stream)
 	}
@@ -3928,6 +4096,7 @@ mod tests {
 			peer_setup,
 			goaway,
 			peer_hop: None,
+			relay: false,
 		});
 
 		let mut request = Vec::new();

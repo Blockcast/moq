@@ -22,6 +22,19 @@ relayed from what the peer just withdrew, rather than falling back to them one
 by one. During reconnect, another session from that peer can still advertise
 the broadcast; an old session's withdrawal does not invalidate that route.
 
+A relay two hops away hears only that its neighbor withdrew, and may still hold
+paths relayed from the same announcement through neighbors the withdrawal has
+not reached yet. So when the route a relay advertised to its cluster peers is
+withdrawn and another takes over, the relay withdraws the broadcast from its
+peers at once and advertises the replacement one second later, if the
+replacement still stands. A stale path is withdrawn within that second and never
+spreads, so an ended broadcast is retracted once per link instead of hunting
+through the mesh. New broadcasts, better routes, and retractions go out at once.
+The cost is a genuine failover: a peer left with no other path sees the
+broadcast return about a second after a link fails. Subscriptions already in
+flight keep flowing, since the relay itself fails over at once; only the
+advertisement waits. Clients are never held down.
+
 Failover routes must carry copies of the same broadcast. For each track, the
 relay requires matching timescale, retention window, publisher priority, and
 group ordering. A source with different properties is refused before its groups
