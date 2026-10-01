@@ -1,7 +1,7 @@
 //! Adapts the async transport interface to the poll one moq-net requires.
 //!
 //! moq-net only accepts the poll interface (`web_transport_trait::poll`).
-//! A backend that offers only the async interface (qmux, iroh, noq) is wrapped
+//! A backend that offers only the async interface (qmux, iroh, Quinn) is wrapped
 //! in [`Session`] here, at the edge where async already lives. The wrapping
 //! costs one allocation per operation and one copy per write, and its
 //! closed-watch emulation is weaker than a native implementation (see

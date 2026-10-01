@@ -21,7 +21,7 @@
 //! See `test/drill/README.md` for the recipe, the sensitivity proof that each
 //! drill fails when its recovery behavior is removed, and the loom/fuzz cases
 //! covering the primitives underneath.
-#![cfg(all(feature = "noq", feature = "websocket"))]
+#![cfg(feature = "websocket")]
 
 use std::time::Duration;
 

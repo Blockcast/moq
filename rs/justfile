@@ -153,10 +153,6 @@ wasm-fix *args:
 audit:
     cargo deny check --show-stats
 
-# Verify relay startup validation without a QUIC backend.
-relay-minimal:
-    cargo nextest run --locked -p moq-relay --no-default-features --lib -E 'test(workers_require_a_quic_backend)'
-
 # Outside nextest because the staticlib link alone outlasts its hang budget.
 
 # Compile and run moq-c's C fixtures, and the C doc samples, against libmoq.a. Must run on Unix.
@@ -171,9 +167,8 @@ c-tests:
 # Compile the workspace at the feature extremes.
 features:
     cargo check --locked --workspace {{ no_fuzz }} --all-targets --no-default-features
-    cargo hack check --locked -p moq-tokio --each-feature --exclude-features _transport --features aws-lc-rs
+    cargo hack check --locked -p moq-tokio --each-feature --features aws-lc-rs
     cargo check --locked -p moq-relay --no-default-features
-    just rs relay-minimal
     cargo check --locked -p moq-cli --no-default-features
     cargo check --locked -p moq-bench --no-default-features
     cargo check --locked -p moq-boy --no-default-features

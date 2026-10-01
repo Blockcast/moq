@@ -236,9 +236,7 @@ pub struct Resolved {
 	pub delay: time::Duration,
 }
 
-/// The fallback arm of the QUIC-vs-WebSocket race, so only compiled when there is a
-/// QUIC dial to race against. A WebSocket-only build calls [`connect`] directly.
-#[cfg(feature = "noq")]
+/// The fallback arm of the QUIC-vs-WebSocket race.
 pub(crate) async fn race_handle(
 	config: &Config,
 	tls: &rustls::ClientConfig,

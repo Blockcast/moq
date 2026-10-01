@@ -14,7 +14,7 @@ The reference implementation. Every crate is on
 | --- | --- |
 | [moq-net](/lib/rs/moq-net) | The pub/sub layer: sessions, origins, broadcasts, tracks, groups, frames. Transport-agnostic. |
 | [moq-pattern](https://docs.rs/moq-pattern) | Exact path patterns: grammar, matching, and set algebra. Re-exported by moq-net and moq-auth. |
-| [moq-tokio](https://docs.rs/moq-tokio) | Stands up QUIC with noq, TLS, WebSocket fallback, and iroh, from config or CLI flags. |
+| [moq-tokio](https://docs.rs/moq-tokio) | Stands up QUIC with Quinn, TLS, WebSocket fallback, and iroh, from config or CLI flags. |
 | [moq-sock](https://docs.rs/moq-sock) | Dual-stack socket binding, `SO_REUSEPORT` groups steered by QUIC connection ID, and CPU pinning for thread-per-core listeners. |
 | [moq-uring](https://docs.rs/moq-uring) | Experimental Linux io\_uring worker: one pinned thread per ring serving moq-lite over its own QUIC stack. |
 | [hang](/lib/rs/hang) | The media layer: catalog, containers, ordered frame delivery. |

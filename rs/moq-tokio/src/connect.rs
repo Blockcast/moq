@@ -341,7 +341,6 @@ pub enum ConnectError {
 impl ConnectError {
 	/// Only the transports that carry an HTTP status (WebTransport, WebSocket) can
 	/// classify one; qmux over tcp/unix has no such response.
-	#[cfg(any(feature = "noq", feature = "websocket"))]
 	pub(crate) fn from_status_u16(status: u16) -> Option<Self> {
 		match status {
 			401 => Some(Self::Unauthorized),
@@ -357,7 +356,7 @@ impl ConnectError {
 	}
 }
 
-#[cfg(all(test, any(feature = "noq", feature = "websocket")))]
+#[cfg(test)]
 mod tests {
 	use super::*;
 

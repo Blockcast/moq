@@ -134,8 +134,10 @@ Other changes to a deployment:
   frame. `moq auth serve --key` takes a file, not an https or JWKS URL.
   `moq auth sign --root` is the token root and JS `verify --root` the dialed
   path. `/.cluster*` roots are reserved. `--auth-public a,b` splits on commas.
-- **noq is the only QUIC stack** (#3811). The `quinn` and `quiche` cargo
-  features and the backend setting are gone.
+- **Quinn is the native QUIC stack**. Remove `noq` and `quinn` from Cargo feature
+  lists; QUIC is always available. The backend setting and `quiche` feature
+  remain removed. Other moq-tokio features remain optional. Iroh and the
+  experimental io\_uring runtime still use noq.
 - **Stats counters** are `*_started` / `*_ended` (`sessions_started`,
   `announces_ended`, ...). This release still writes the old `announced` /
   `*_closed` names beside them, so move consumers now.

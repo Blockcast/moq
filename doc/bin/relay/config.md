@@ -52,8 +52,8 @@ send_window = 33554432
 qlog = "/var/log/moq/qlog"           # Existing directory. Needs the `qlog` build feature.
 ```
 
-The native QUIC stack uses BBRv3 for delay-based congestion control. Iroh also
-uses noq and the same congestion controller.
+The native QUIC stack always uses Quinn, with BBRv1 for delay-based
+congestion control. Iroh and the experimental io\_uring runtime use noq and BBRv3.
 
 Raise the receive windows when a fat, long path idles below the link rate: a
 window under the bandwidth-delay product stalls the sender waiting for credit.
@@ -79,10 +79,7 @@ io_uring = false                     # Drive them with io_uring instead of tokio
 Packets are steered by connection ID, so a client that migrates stays with its
 worker. The group shares one port, including an ephemeral (zero) port, which is
 resolved once and joined by every worker. Use an explicit port unless
-something reads the bound address at startup. `workers` needs the `noq`
-feature and real certificate files rather than `tls.generate`. A build without
-QUIC rejects `workers` instead of
-ignoring it. An embedding process leaves this group inside `Relay::run`;
+something reads the bound address at startup. `workers` needs real certificate files rather than `tls.generate`. An embedding process leaves this group inside `Relay::run`;
 taking the sockets out and driving them yourself is how a later library
 update can drop QUIC while still compiling. `io_uring` additionally needs Linux 6.12+, the `io-uring` cargo
 feature, and exactly one certificate read at startup; it serves moq-lite only,

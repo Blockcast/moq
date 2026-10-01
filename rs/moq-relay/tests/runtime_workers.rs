@@ -4,7 +4,7 @@
 //! `SO_REUSEPORT`, and no other platform load-balances a unicast UDP port
 //! across the group. There is also nothing to serve without a QUIC backend, so
 //! a build without one refuses `runtime.workers` at load.
-#![cfg(all(target_os = "linux", feature = "_quic"))]
+#![cfg(target_os = "linux")]
 
 use std::time::Duration;
 

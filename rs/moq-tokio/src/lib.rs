@@ -11,18 +11,14 @@
 //! See [`Client`] for connecting to relays and [`Server`] for accepting
 //! connections. The `mdns` feature finds peers to connect to on the local network.
 //!
-//! With `default-features = false`, the `noq` backend must be paired
-//! with the `aws-lc-rs` or `ring` crypto-provider feature. Every other subset
-//! compiles, including no transport at all: such a build cannot connect to
-//! anything, though a crypto provider on its own is still enough to configure TLS
-//! and to build a plain-TLS listener's `rustls::ServerConfig` from
-//! [`tls::Listen::server_config`].
+//! Quinn handles native QUIC connections. A build with default features disabled
+//! must select either the `aws-lc-rs` or `ring` crypto provider.
 
 #![warn(missing_docs)]
 
 // The protocol crates need a compiled provider for reset and retry-token keys. A rustls provider
 // installed at runtime cannot supply constructors removed by their compile-time feature gates.
-#[cfg(all(feature = "noq", not(any(feature = "aws-lc-rs", feature = "ring"))))]
+#[cfg(not(any(feature = "aws-lc-rs", feature = "ring")))]
 compile_error!("a rustls QUIC backend requires a crypto provider: enable either the `aws-lc-rs` or `ring` feature");
 
 mod abort;
@@ -34,19 +30,17 @@ pub mod connect;
 pub mod connection;
 pub mod crypto;
 mod error;
-#[cfg(any(feature = "noq", feature = "tcp", feature = "websocket"))]
 pub mod failover;
 #[cfg(feature = "jemalloc")]
 pub mod jemalloc;
 pub mod listen;
 mod log;
-#[cfg(feature = "noq")]
-pub mod noq;
 pub mod origin;
 pub mod quic;
-#[cfg(any(feature = "noq", feature = "tcp", feature = "websocket"))]
+/// The Quinn QUIC backend for WebTransport and raw QUIC.
+pub mod quinn;
+
 mod resolve;
-#[cfg(feature = "_transport")]
 pub mod server;
 #[doc(hidden)]
 pub mod settings;
@@ -59,7 +53,6 @@ pub mod unix;
 pub mod worker;
 // Resolving a `host:port` bind string is a QUIC-listener concern; the stream
 // listeners take a `SocketAddr`/path straight from their config.
-#[cfg(feature = "noq")]
 mod util;
 #[cfg(feature = "watch")]
 pub mod watch;
@@ -73,7 +66,6 @@ pub use connect::{Addrs, ConnectError};
 pub use connection::{Backoff, Connection, Redirect, Status};
 pub use error::{Error, Result};
 pub use log::{Log, RedactedUrl};
-#[cfg(feature = "_transport")]
 pub use server::{Listener, Server};
 
 // Re-export these crates.

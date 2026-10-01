@@ -12,7 +12,7 @@ Tokio-based connection helpers for native [Media over QUIC](https://moq.dev) app
 
 Establishes MoQ connections over a few different transports, selectable via cargo features:
 
-- **WebTransport** (HTTP/3) via [noq](https://crates.io/crates/noq)
+- **WebTransport** (HTTP/3) via [Quinn](https://crates.io/crates/quinn)
 - **Raw QUIC** with ALPN negotiation
 - **WebSocket** as a fallback when QUIC isn't available
 - **Iroh** P2P (`iroh` feature)
@@ -41,3 +41,14 @@ including in one-shot mode. With mixed `Addrs`, the target that establishes the
 session determines its redirect policy; unused pinned fallbacks do not restrict it.
 To refresh DNS, resolve and apply your address policy again before creating a new
 connection. Address filtering belongs to the caller.
+
+## Latency benchmark
+
+Measure loopback group delivery over raw QUIC and WebTransport across payload sizes:
+
+```bash
+cargo bench -p moq-tokio --bench latency
+```
+
+Quinn is always enabled. Iroh and the experimental io\_uring runtime still use noq.
+Other transports and diagnostics retain their optional Cargo features.

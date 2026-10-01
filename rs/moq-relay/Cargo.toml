@@ -25,16 +25,11 @@ doc = false
 [features]
 # A programmatic relay fixture with generated TLS and ephemeral ports.
 test-support = []
-default = ["iroh", "cluster-lan", "noq", "websocket", "uds"]
+default = ["iroh", "cluster-lan", "websocket", "uds"]
 iroh = ["moq-tokio/iroh"]
 # Discover cluster peers on the LAN with mDNS (`--cluster-lan`).
 cluster-lan = ["moq-tokio/mdns"]
 jemalloc = ["moq-tokio/jemalloc"]
-noq = ["_quic", "moq-tokio/noq"]
-# The tokio QUIC listener, and the thread-per-core worker group behind
-# `runtime.workers`. Not one to enable on its own: it names no backend, so
-# moq-tokio would have nothing to bind a socket with.
-_quic = []
 # qlog trace capture (`--quic-qlog <DIR>`). Off by default: it compiles the
 # qlog machinery into the enabled backends and is only wanted for debugging or
 # congestion-control testing. Covers the io_uring workers too, so one feature

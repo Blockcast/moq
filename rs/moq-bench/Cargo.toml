@@ -35,9 +35,8 @@ required-features = ["uring"]
 doc = false
 
 [features]
-default = ["noq", "websocket"]
+default = ["websocket"]
 iroh = ["moq-tokio/iroh"]
-noq = ["moq-tokio/noq"]
 uring = ["dep:moq-uring"]
 websocket = ["moq-tokio/websocket"]
 

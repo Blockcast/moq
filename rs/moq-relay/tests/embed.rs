@@ -7,8 +7,6 @@
 //! live QUIC subscriber, then stops the owner through its shutdown trigger
 //! and proves `run` returned with its sockets closed.
 
-#![cfg(feature = "_quic")]
-
 use std::net::{SocketAddr, TcpListener};
 use std::time::Duration;
 

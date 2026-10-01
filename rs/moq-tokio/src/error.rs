@@ -5,8 +5,6 @@ use std::sync::Arc;
 /// Dependency errors are stored as messages so their crates stay out of this crate's public
 /// API. Several of them (reqwest above all) keep the useful detail in `source()`, which a
 /// plain `to_string()` would drop.
-// A build with no transport feature compiles no backend module, so nothing calls this.
-#[allow(dead_code)]
 pub(crate) fn message(err: impl std::error::Error) -> String {
 	use std::fmt::Write;
 
@@ -78,7 +76,7 @@ pub enum Error {
 	#[error("failed to initialize Android logcat layer")]
 	Logcat(#[source] Arc<std::io::Error>),
 
-	/// No backend feature is compiled in that can serve this URL. The string names the features to enable.
+	/// The requested listener is not configured.
 	#[error("{0}")]
 	NoBackend(&'static str),
 
@@ -200,11 +198,6 @@ pub enum Error {
 	#[error(transparent)]
 	Tls(Arc<crate::tls::Error>),
 
-	/// The noq backend failed.
-	#[cfg(feature = "noq")]
-	#[error(transparent)]
-	Noq(Arc<crate::noq::Error>),
-
 	/// The Iroh backend failed.
 	#[cfg(feature = "iroh")]
 	#[error(transparent)]
@@ -224,6 +217,10 @@ pub enum Error {
 	#[cfg(all(feature = "uds", unix))]
 	#[error(transparent)]
 	Unix(Arc<crate::unix::Error>),
+
+	/// The Quinn backend failed.
+	#[error(transparent)]
+	Quinn(Arc<crate::quinn::Error>),
 }
 
 impl Error {
@@ -234,8 +231,7 @@ impl Error {
 			Self::MoqNet(
 				moq_net::Error::Unauthorized | moq_net::Error::Session(moq_net::SessionError::Unauthorized),
 			) => Some(crate::ConnectError::Unauthorized),
-			#[cfg(feature = "noq")]
-			Self::Noq(err) => err.connect_error(),
+			Self::Quinn(err) => err.connect_error(),
 			#[cfg(feature = "websocket")]
 			Self::TransportRace { quic, websocket } => quic.connect_error().or_else(|| websocket.connect_error()),
 			#[cfg(feature = "websocket")]
@@ -268,8 +264,7 @@ impl Error {
 				_ => None,
 			},
 
-			#[cfg(feature = "noq")]
-			Self::Noq(err) => err.status(),
+			Self::Quinn(err) => err.status(),
 			#[cfg(feature = "websocket")]
 			Self::WebSocket(err) => err.status(),
 			_ => None,
@@ -298,14 +293,13 @@ impl From<crate::tls::Error> for Error {
 	}
 }
 
-#[cfg(feature = "noq")]
-impl From<crate::noq::Error> for Error {
-	fn from(err: crate::noq::Error) -> Self {
+impl From<crate::quinn::Error> for Error {
+	fn from(err: crate::quinn::Error) -> Self {
 		if let Some(err) = err.connect_error() {
 			return Self::Connect(err);
 		}
 
-		Self::Noq(Arc::new(err))
+		Self::Quinn(Arc::new(err))
 	}
 }
 

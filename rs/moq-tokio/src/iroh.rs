@@ -112,7 +112,7 @@ pub enum Error {
 	RecvRequest(String),
 
 	/// GSO is always on for iroh, so `--quic-gso=false` cannot be honored.
-	#[error("the iroh backend cannot disable GSO; drop --quic-gso=false or use the noq backend")]
+	#[error("the iroh backend cannot disable GSO; drop --quic-gso=false or use the Quinn backend")]
 	GsoUnsupported,
 }
 
@@ -516,7 +516,7 @@ mod tests {
 
 	/// Build a controller from each family's factory and downcast it to the
 	/// concrete implementation it must map to. iroh runs on noq, so this is the
-	/// same pairing as the noq backend.
+	/// pairing selected above.
 	#[test]
 	fn congestion_factory_maps_each_family() {
 		let now = std::time::Instant::now();

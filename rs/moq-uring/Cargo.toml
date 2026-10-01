@@ -53,7 +53,7 @@ tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
 io-uring = { workspace = true }
 libc = { workspace = true }
 moq-noq-udp = { workspace = true }
-moq-tokio = { path = "../moq-tokio", default-features = false, features = ["noq", "aws-lc-rs"] }
+moq-tokio = { path = "../moq-tokio", default-features = false, features = ["aws-lc-rs"] }
 nix = { workspace = true }
 rcgen = { version = "0.14", default-features = false, features = ["pem", "aws_lc_rs"] }
 rustls = "0.23"
@@ -62,7 +62,8 @@ rustls = "0.23"
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 tracing = "0.1"
-web-transport-moq = { workspace = true }
+# These test peers configure their own TLS instead of borrowing a tokio backend feature.
+web-transport-moq = { workspace = true, features = ["aws-lc-rs"] }
 
 [[bench]]
 name = "udp_tokio"

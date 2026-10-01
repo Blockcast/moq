@@ -93,7 +93,6 @@ pub struct Relay {
 	/// The thread-per-core QUIC workers, already bound and waiting to be split
 	/// and run. `None` unless `runtime.workers` is configured, in which case
 	/// `server` carries no QUIC listener of its own.
-	#[cfg(feature = "_quic")]
 	workers: Option<moq_tokio::worker::Workers>,
 	/// The io_uring QUIC workers, already bound and waiting for
 	/// [`serve`](crate::uring::Workers::serve). `None` unless both
@@ -158,15 +157,6 @@ impl Relay {
 			"runtime.io_uring needs moq-relay built with the `io-uring` feature"
 		);
 
-		// Refused rather than ignored: a group is the whole point of the setting, and
-		// silently serving from the shared runtime instead would look like it worked.
-		#[cfg(not(feature = "_quic"))]
-		anyhow::ensure!(
-			io_uring || config.runtime.workers().is_none(),
-			"runtime.workers needs moq-relay built with the `noq` feature"
-		);
-
-		#[cfg(feature = "_quic")]
 		let workers = match config.runtime.workers() {
 			Some(worker) if !io_uring => {
 				let mut server = moq_tokio::server::Config::default();
@@ -177,16 +167,10 @@ impl Relay {
 			_ => None,
 		};
 
-		// What the rest of setup reads off the group, so it has one shape whether or
-		// not a QUIC backend gave us one to read.
-		#[cfg(feature = "_quic")]
+		// Read the worker endpoint before moving the group into the serve loop.
 		let workers_addr = workers.as_ref().map(moq_tokio::worker::Workers::local_addr);
-		#[cfg(not(feature = "_quic"))]
-		let workers_addr: Option<std::net::SocketAddr> = None;
-		#[cfg(feature = "_quic")]
+
 		let workers_certificates = workers.as_ref().map(moq_tokio::worker::Workers::certificates);
-		#[cfg(not(feature = "_quic"))]
-		let workers_certificates: Option<moq_tokio::tls::Certificates> = None;
 
 		#[cfg(all(target_os = "linux", feature = "_uring"))]
 		let uring = match config.runtime.workers() {
@@ -326,7 +310,6 @@ impl Relay {
 			web_routes: None,
 			internal_routes: None,
 			sessions,
-			#[cfg(feature = "_quic")]
 			workers,
 			#[cfg(all(target_os = "linux", feature = "_uring"))]
 			uring,
@@ -482,7 +465,6 @@ impl Relay {
 			web_routes,
 			internal_routes,
 			sessions,
-			#[cfg(feature = "_quic")]
 			workers,
 			#[cfg(all(target_os = "linux", feature = "_uring"))]
 			uring,
@@ -548,13 +530,11 @@ impl Relay {
 		// reports the outcome. The group owns those threads and ends serving
 		// when the first member finishes, so it has to outlive the loop below
 		// and is torn down after it.
-		#[cfg(feature = "_quic")]
 		let mut workers = workers.map(|workers| workers.split());
 
 		// Pends forever with no workers, so it composes into the `select!` either
 		// way. A worker only stops on error or on shutdown, so the first one to
 		// finish ends the relay the same way the shared accept loop does.
-		#[cfg(feature = "_quic")]
 		let quic_workers = {
 			let mut running = futures::stream::FuturesUnordered::new();
 			if let Some(workers) = workers.as_mut() {
@@ -582,15 +562,7 @@ impl Relay {
 				}
 			}
 		};
-		// No group to run, so this leg never resolves and the shared accept loop
-		// below decides the `select!` on its own.
-		#[cfg(not(feature = "_quic"))]
-		let quic_workers = std::future::pending::<anyhow::Result<()>>();
-
-		#[cfg(feature = "_quic")]
 		let has_workers = workers.is_some();
-		#[cfg(not(feature = "_quic"))]
-		let has_workers = false;
 
 		// With the QUIC listener owned by a worker group, the shared server has
 		// only the `tcp`/`unix` stream listeners left, and a config with none
@@ -636,7 +608,6 @@ impl Relay {
 
 		// Explicitly, so the joins land on the blocking pool rather than on the
 		// executor thread this future happens to be running on.
-		#[cfg(feature = "_quic")]
 		if let Some(workers) = workers {
 			workers.shutdown().await;
 		}
@@ -704,7 +675,6 @@ async fn shutdown_signal() -> anyhow::Result<()> {
 ///
 /// The accept loop for a single [`moq_tokio::Server`]. [`Relay::run`] owns
 /// worker selection and shutdown for embedders.
-#[cfg(feature = "_quic")]
 async fn serve(
 	server: moq_tokio::Server,
 	cluster: cluster::Cluster,
@@ -739,21 +709,4 @@ async fn serve_listening(
 	}
 
 	anyhow::bail!("stopped accepting connections")
-}
-
-#[cfg(all(test, not(feature = "_quic")))]
-mod tests {
-	#[tokio::test]
-	async fn workers_require_a_quic_backend() {
-		let mut config = crate::Config::default();
-		config.runtime.workers = Some(1);
-		let error = match super::Relay::load(config).await {
-			Ok(_) => panic!("workers accepted without a QUIC backend"),
-			Err(error) => error,
-		};
-		assert_eq!(
-			error.to_string(),
-			"runtime.workers needs moq-relay built with the `noq` feature"
-		);
-	}
 }

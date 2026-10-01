@@ -25,7 +25,7 @@ above ([hang](/lib/rs/hang)); relays and CDNs implement only this.
 - **Routes** record the relay hops and a cost, which is what the relay [cluster](/bin/relay/cluster) routes on. A hop of 0 marks the chain anonymous: `Route::is_anonymous()` is true, and that route ranks below every fully identified one. `Route::source()` says where a delivered route entered: `Source::Local`, or `Source::Peer(hop)` when a handle marked `origin::Producer::peer()` announced it. `origin::Consumer::local()` sees only the local ones.
 - **Stats** counters per broadcast and session, drained by [`moq-stats`](https://docs.rs/moq-stats).
 
-It runs over anything implementing `web_transport_trait::poll::Session`: noq, the
+It runs over anything implementing `web_transport_trait::poll::Session`: Quinn, noq, the
 browser, iroh, or qmux over TCP, Unix sockets, and
 WebSockets. [`moq-tokio`](https://docs.rs/moq-tokio) wires those up.
 

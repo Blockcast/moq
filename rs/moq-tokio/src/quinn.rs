@@ -1,4 +1,4 @@
-//! The noq QUIC backend, used for both WebTransport (`https://`) and raw QUIC (`moqt://`, `moql://`).
+//! The quinn QUIC backend, used for both WebTransport (`https://`) and raw QUIC (`moqt://`, `moql://`).
 
 use crate::RedactedUrl;
 use crate::connect;
@@ -12,13 +12,15 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, RwLock};
 use std::task::{Context, Poll, Waker, ready};
 use std::time::Duration;
-use web_transport_moq::noq;
+pub(crate) use web_transport_quinn::Session;
+use web_transport_quinn::quinn;
 
-/// Attach a qlog factory writing into the configured directory, if any.
+/// Attach a qlog stream writing into `dir`, if one was configured.
 ///
-/// noq's factory opens one file per connection, named after its initial destination
-/// connection ID, so nothing needs to be unique per endpoint here.
-fn apply_qlog(transport: &mut noq::TransportConfig, quic: &Resolved, role: &str) -> Result<()> {
+/// quinn's [`quinn::QlogStream`] is a shared handle: every connection on the endpoint
+/// writes into it, tagged with its own qlog `group_id`. So this is one file per
+/// endpoint rather than per connection.
+fn apply_qlog(transport: &mut quinn::TransportConfig, quic: &Resolved, role: &str) -> Result<()> {
 	// `Client::validate` already rejected a directory this build can't honor, so the
 	// block below is only reached where capture actually works.
 	let Some(dir) = quic.qlog_dir() else {
@@ -27,8 +29,24 @@ fn apply_qlog(transport: &mut noq::TransportConfig, quic: &Resolved, role: &str)
 
 	#[cfg(feature = "qlog")]
 	{
-		transport.qlog_from_path(dir, &format!("moq-{role}"));
-		tracing::info!(dir = %dir.display(), "writing qlog");
+		// Workers create several endpoints in one process, so the pid alone
+		// cannot keep their traces separate. Refuse to overwrite any existing trace.
+		let path = dir.join(format!(
+			"moq-{role}-{}-{:032x}.sqlog",
+			std::process::id(),
+			rand::random::<u128>()
+		));
+		let file = std::fs::File::create_new(&path).map_err(Error::CreateQlog)?;
+
+		// Deliberately unbuffered: qlog's streamer only flushes on `finish_log`, which
+		// quinn never calls per event, so a BufWriter would hold every trace in memory
+		// until the endpoint drops and lose the lot if the process is killed. Killing a
+		// stuck process is exactly when these traces are worth having.
+		let mut config = quinn::QlogConfig::default();
+		config.writer(Box::new(file)).title(Some(format!("moq-tokio {role}")));
+
+		transport.qlog_stream(config.into_stream());
+		tracing::info!(path = %path.display(), "writing qlog");
 	}
 
 	#[cfg(not(feature = "qlog"))]
@@ -37,17 +55,17 @@ fn apply_qlog(transport: &mut noq::TransportConfig, quic: &Resolved, role: &str)
 	Ok(())
 }
 
-/// Apply the resolved quic knobs to a noq transport config.
-fn apply_transport(transport: &mut noq::TransportConfig, quic: &Resolved) {
+/// Apply the resolved quic knobs to a quinn transport config.
+fn apply_transport(transport: &mut quinn::TransportConfig, quic: &Resolved) {
 	transport.max_idle_timeout(Some(quic.idle_timeout.try_into().expect("idle timeout out of range")));
 	transport.keep_alive_interval(quic.keep_alive);
 
-	// noq enables MTU discovery by default; disable it unless asked.
+	// quinn enables MTU discovery by default; disable it unless asked.
 	if !quic.mtu_discovery {
 		transport.mtu_discovery_config(None);
 	}
 
-	let max_streams = noq::VarInt::from_u64(quic.max_streams).unwrap_or(noq::VarInt::MAX);
+	let max_streams = quinn::VarInt::from_u64(quic.max_streams).unwrap_or(quinn::VarInt::MAX);
 	transport.max_concurrent_bidi_streams(max_streams);
 	transport.max_concurrent_uni_streams(max_streams);
 
@@ -61,29 +79,29 @@ fn apply_transport(transport: &mut noq::TransportConfig, quic: &Resolved) {
 }
 
 /// Apply the flow-control windows, leaving each at the backend default when unset.
-fn apply_windows(transport: &mut noq::TransportConfig, quic: &Resolved) {
+fn apply_windows(transport: &mut quinn::TransportConfig, quic: &Resolved) {
 	// Saturating rather than erroring: `Config::validate` already rejects a window
 	// past the varint, so this only bites a `Resolved` built without it.
 	if let Some(window) = quic.receive_window {
-		transport.receive_window(noq::VarInt::from_u64(window).unwrap_or(noq::VarInt::MAX));
+		transport.receive_window(quinn::VarInt::from_u64(window).unwrap_or(quinn::VarInt::MAX));
 	}
 	if let Some(window) = quic.stream_receive_window {
-		transport.stream_receive_window(noq::VarInt::from_u64(window).unwrap_or(noq::VarInt::MAX));
+		transport.stream_receive_window(quinn::VarInt::from_u64(window).unwrap_or(quinn::VarInt::MAX));
 	}
 	if let Some(window) = quic.send_window {
 		transport.send_window(window);
 	}
 }
 
-/// The noq controller factory for a congestion control family. noq's BBR is v3.
-fn congestion_factory(family: CongestionControl) -> Arc<dyn noq::congestion::ControllerFactory + Send + Sync> {
+/// The quinn controller factory for a congestion control family. Quinn's BBR is v1.
+fn congestion_factory(family: CongestionControl) -> Arc<dyn quinn::congestion::ControllerFactory + Send + Sync> {
 	match family {
-		CongestionControl::Loss => Arc::new(noq::congestion::CubicConfig::default()),
-		CongestionControl::Delay => Arc::new(noq::congestion::Bbr3Config::default()),
+		CongestionControl::Loss => Arc::new(quinn::congestion::CubicConfig::default()),
+		CongestionControl::Delay => Arc::new(quinn::congestion::BbrConfig::default()),
 	}
 }
 
-/// Errors specific to the noq QUIC backend.
+/// Errors specific to the quinn QUIC backend.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -94,6 +112,10 @@ pub enum Error {
 	/// The QUIC endpoint could not be created around the bound socket.
 	#[error("failed to create QUIC endpoint")]
 	CreateEndpoint(#[source] std::io::Error),
+
+	/// The qlog trace file could not be created.
+	#[error("failed to create qlog file")]
+	CreateQlog(#[source] std::io::Error),
 
 	/// No async runtime was found. Construct the client or server from within a tokio runtime.
 	#[error("no async runtime")]
@@ -203,7 +225,7 @@ pub enum Error {
 		message: String,
 		/// The HTTP status the server answered the CONNECT with, when it answered with one.
 		///
-		/// Read at conversion time rather than kept as a `web-transport-moq` error, so the
+		/// Read at conversion time rather than kept as a `web-transport-quinn` error, so the
 		/// classification survives without that crate appearing in this crate's public API.
 		status: Option<u16>,
 	},
@@ -251,20 +273,20 @@ impl crate::failover::Aggregate for Error {
 }
 
 crate::error::from_message! {
-	noq::ConnectError => Connect,
-	noq::ConnectionError => Connection,
-	web_transport_moq::ServerError => Server,
+	quinn::ConnectError => Connect,
+	quinn::ConnectionError => Connection,
+	web_transport_quinn::ServerError => Server,
 	hex::FromHexError => InvalidFingerprint,
 }
 
-impl From<noq::crypto::rustls::NoInitialCipherSuite> for Error {
-	fn from(_: noq::crypto::rustls::NoInitialCipherSuite) -> Self {
+impl From<quinn::crypto::rustls::NoInitialCipherSuite> for Error {
+	fn from(_: quinn::crypto::rustls::NoInitialCipherSuite) -> Self {
 		Self::NoInitialCipherSuite
 	}
 }
 
-impl From<web_transport_moq::ClientError> for Error {
-	fn from(err: web_transport_moq::ClientError) -> Self {
+impl From<web_transport_quinn::ClientError> for Error {
+	fn from(err: web_transport_quinn::ClientError) -> Self {
 		Self::Client {
 			status: client_status(&err),
 			message: crate::error::message(err),
@@ -277,9 +299,9 @@ type Result<T> = std::result::Result<T, Error>;
 // ── Client ──────────────────────────────────────────────────────────
 
 #[derive(Clone)]
-pub(crate) struct NoqClient {
-	pub quic: noq::Endpoint,
-	pub transport: Arc<noq::TransportConfig>,
+pub(crate) struct Client {
+	pub quic: quinn::Endpoint,
+	pub transport: Arc<quinn::TransportConfig>,
 	/// Whether an `http://` URL may bootstrap a pin (see [crate::tls::Connect::allows_http_bootstrap]).
 	pub http_bootstrap: bool,
 	/// Optional TLS SNI / verification hostname override (from config).
@@ -295,24 +317,24 @@ pub(crate) struct NoqClient {
 	dual_stack: bool,
 }
 
-impl NoqClient {
+impl Client {
 	pub fn new(config: &connect::Config, quic: &crate::quic::Config) -> Result<Self> {
 		let resolved = config.resolve();
 		let socket = crate::bind::udp(crate::bind::Udp::new(resolved.bind)).map_err(Error::BindSocket)?;
 		let dual_stack = crate::bind::udp_is_dual_stack(&socket);
 
-		let mut transport = noq::TransportConfig::default();
+		let mut transport = quinn::TransportConfig::default();
 		let quic = quic.resolve();
 		apply_transport(&mut transport, &quic);
 		apply_qlog(&mut transport, &quic, "client")?;
 		let transport = Arc::new(transport);
 
 		// There's a bit more boilerplate to make a generic endpoint.
-		let runtime = noq::default_runtime().ok_or(Error::NoRuntime)?;
-		let endpoint_config = noq::EndpointConfig::default();
+		let runtime = quinn::default_runtime().ok_or(Error::NoRuntime)?;
+		let endpoint_config = quinn::EndpointConfig::default();
 
 		// Create the generic QUIC endpoint.
-		let quic = noq::Endpoint::new(endpoint_config, None, socket, runtime).map_err(Error::CreateEndpoint)?;
+		let quic = quinn::Endpoint::new(endpoint_config, None, socket, runtime).map_err(Error::CreateEndpoint)?;
 
 		Ok(Self {
 			quic,
@@ -327,10 +349,10 @@ impl NoqClient {
 
 	/// Close every connection, then wait until each has sent its close to the peer.
 	pub async fn close(self) {
-		self.quic.close(noq::VarInt::from_u32(0), b"client shutdown");
-		// Not `wait_idle`, which also sits out each connection's 3 PTO closing
-		// period: that only repeats the close to a peer that already has it.
-		self.quic.wait_all_draining().await;
+		self.quic.close(quinn::VarInt::from_u32(0), b"client shutdown");
+		// Quinn keeps driving the close through its closing period so a lost
+		// CONNECTION_CLOSE is retransmitted before the socket is released.
+		self.quic.wait_idle().await;
 	}
 
 	pub async fn connect(
@@ -338,7 +360,7 @@ impl NoqClient {
 		tls: &rustls::ClientConfig,
 		addr: crate::connect::Addr,
 		versions: &moq_net::Versions,
-	) -> Result<web_transport_moq::Session> {
+	) -> Result<web_transport_quinn::Session> {
 		let mut url = addr.url().clone();
 		let mut config = tls.clone();
 
@@ -397,7 +419,7 @@ impl NoqClient {
 		}
 
 		let alpns: Vec<Vec<u8>> = match url.scheme() {
-			"https" => vec![web_transport_moq::ALPN.as_bytes().to_vec()],
+			"https" => vec![web_transport_quinn::ALPN.as_bytes().to_vec()],
 			"moqt" | "moql" => versions.alpns().iter().map(|alpn| alpn.as_bytes().to_vec()).collect(),
 			_ => return Err(Error::InvalidScheme),
 		};
@@ -405,8 +427,8 @@ impl NoqClient {
 		config.alpn_protocols = alpns;
 		config.key_log = Arc::new(rustls::KeyLogFile::new());
 
-		let config: noq::crypto::rustls::QuicClientConfig = config.try_into()?;
-		let mut config = noq::ClientConfig::new(Arc::new(config));
+		let config: quinn::crypto::rustls::QuicClientConfig = config.try_into()?;
+		let mut config = quinn::ClientConfig::new(Arc::new(config));
 		config.transport_config(self.transport.clone());
 
 		tracing::debug!(peer = %crate::connect::Endpoint(&url), "connecting");
@@ -428,15 +450,15 @@ impl NoqClient {
 
 		let session = match url.scheme() {
 			"https" => {
-				let mut request = web_transport_moq::proto::ConnectRequest::new(url.clone());
+				let mut request = web_transport_quinn::proto::ConnectRequest::new(url.clone());
 				for alpn in versions.alpns() {
 					request = request.with_protocol(alpn.to_string());
 				}
-				web_transport_moq::Session::connect(connection, request)
+				web_transport_quinn::Session::connect(connection, request)
 					.await
 					.map_err(map_client_error)?
 			}
-			"moqt" | "moql" => web_transport_moq::Session::raw(connection),
+			"moqt" | "moql" => web_transport_quinn::Session::raw(connection),
 			_ => return Err(Error::UnsupportedScheme(url.scheme().to_string())),
 		};
 
@@ -482,7 +504,7 @@ impl Error {
 	}
 }
 
-fn map_client_error(err: web_transport_moq::ClientError) -> Error {
+fn map_client_error(err: web_transport_quinn::ClientError) -> Error {
 	match client_status(&err).and_then(crate::ConnectError::from_status_u16) {
 		Some(rejected) => rejected.into(),
 		None => err.into(),
@@ -496,49 +518,50 @@ fn map_client_error(err: web_transport_moq::ClientError) -> Error {
 /// [`crate::ConnectError`], and [`Error::status`] hands it to the caller, whose backoff consults
 /// the status. A `404` or `405` is the server's settled answer, so retrying
 /// it just burns the reconnect budget on a URL that will never work.
-fn client_status(err: &web_transport_moq::ClientError) -> Option<u16> {
+fn client_status(err: &web_transport_quinn::ClientError) -> Option<u16> {
 	match err {
-		web_transport_moq::ClientError::HttpError(err) => connect_status(err),
+		web_transport_quinn::ClientError::HttpError(err) => connect_status(err),
 		_ => None,
 	}
 }
 
-fn connect_status(err: &web_transport_moq::ConnectError) -> Option<u16> {
+fn connect_status(err: &web_transport_quinn::ConnectError) -> Option<u16> {
 	match err {
-		web_transport_moq::ConnectError::ErrorStatus(status) => Some(status.as_u16()),
-		web_transport_moq::ConnectError::ProtoError(err) => proto_status(err),
+		web_transport_quinn::ConnectError::ErrorStatus(status) => Some(status.as_u16()),
+		web_transport_quinn::ConnectError::ProtoError(err) => proto_status(err),
 		_ => None,
 	}
 }
 
-fn proto_status(err: &web_transport_moq::proto::ConnectError) -> Option<u16> {
+fn proto_status(err: &web_transport_quinn::proto::ConnectError) -> Option<u16> {
 	match err {
-		web_transport_moq::proto::ConnectError::ErrorStatus(status)
-		| web_transport_moq::proto::ConnectError::WrongStatus(Some(status)) => Some(status.as_u16()),
+		web_transport_quinn::proto::ConnectError::ErrorStatus(status)
+		| web_transport_quinn::proto::ConnectError::WrongStatus(Some(status)) => Some(status.as_u16()),
 		_ => None,
 	}
 }
 
 // ── Server ──────────────────────────────────────────────────────────
 
-pub(crate) struct NoqServer {
-	pub quic: noq::Endpoint,
+pub(crate) struct Server {
+	pub quic: quinn::Endpoint,
 	pub certs: Arc<ServeCerts>,
 	socket: Socket,
+	#[cfg(feature = "watch")]
 	_reload: crate::tls::Reload,
 }
 
-/// The server's UDP socket, which [`NoqServer::shutdown`] closes even while noq
+/// The server's UDP socket, which [`Server::shutdown`] closes even while quinn
 /// still holds references to it.
 ///
-/// noq gives each connection a sender sharing the socket, and a connection lives
+/// quinn gives each connection a sender sharing the socket, and a connection lives
 /// as long as anything holds its handle, so dropping the endpoint leaves the port
 /// bound until every accepted session is gone too. Taking the socket out of this
 /// slot closes it regardless.
 #[derive(Clone, Debug)]
 struct Socket {
 	io: Arc<RwLock<Option<Arc<tokio::net::UdpSocket>>>>,
-	state: Arc<noq::udp::UdpSocketState>,
+	state: Arc<quinn::udp::UdpSocketState>,
 	local: net::SocketAddr,
 	/// Wakes every sender blocked on a full send buffer from the socket's single
 	/// write-readiness registration.
@@ -547,7 +570,7 @@ struct Socket {
 
 impl Socket {
 	fn new(socket: std::net::UdpSocket) -> std::io::Result<Self> {
-		let state = noq::udp::UdpSocketState::new((&socket).into())?;
+		let state = quinn::udp::UdpSocketState::new((&socket).into())?;
 		let local = socket.local_addr()?;
 		let io = tokio::net::UdpSocket::from_std(socket)?;
 		Ok(Self {
@@ -569,16 +592,28 @@ impl Socket {
 	}
 }
 
-impl noq::AsyncUdpSocket for Socket {
-	fn create_sender(&self) -> Pin<Box<dyn noq::UdpSender>> {
-		Box::pin(self.clone())
+impl quinn::AsyncUdpSocket for Socket {
+	fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn quinn::UdpPoller>> {
+		Box::pin((*self).clone())
+	}
+
+	fn try_send(&self, transmit: &quinn::udp::Transmit<'_>) -> std::io::Result<()> {
+		let io = self.io.read().unwrap();
+		let Some(io) = io.as_deref() else {
+			return Ok(());
+		};
+		io.try_io(tokio::io::Interest::WRITABLE, || self.state.send(io.into(), transmit))
+	}
+
+	fn max_transmit_segments(&self) -> usize {
+		self.state.max_gso_segments()
 	}
 
 	fn poll_recv(
-		&mut self,
+		&self,
 		cx: &mut Context<'_>,
 		bufs: &mut [std::io::IoSliceMut<'_>],
-		meta: &mut [noq::udp::RecvMeta],
+		meta: &mut [quinn::udp::RecvMeta],
 	) -> Poll<std::io::Result<usize>> {
 		let io = self.io.read().unwrap();
 		// Released: nothing arrives again, and the endpoint stops through its close.
@@ -598,7 +633,7 @@ impl noq::AsyncUdpSocket for Socket {
 		Ok(self.local)
 	}
 
-	fn max_receive_segments(&self) -> std::num::NonZeroUsize {
+	fn max_receive_segments(&self) -> usize {
 		self.state.gro_segments()
 	}
 
@@ -607,32 +642,15 @@ impl noq::AsyncUdpSocket for Socket {
 	}
 }
 
-impl noq::UdpSender for Socket {
-	fn poll_send(
-		self: Pin<&mut Self>,
-		transmit: &noq::udp::Transmit<'_>,
-		cx: &mut Context<'_>,
-	) -> Poll<std::io::Result<()>> {
+impl quinn::UdpPoller for Socket {
+	fn poll_writable(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
 		let io = self.io.read().unwrap();
-		// Released: the datagram is lost, which UDP always allows.
 		let Some(io) = io.as_deref() else {
 			return Poll::Ready(Ok(()));
 		};
-		loop {
-			match io.try_io(tokio::io::Interest::WRITABLE, || self.state.send(io.into(), transmit)) {
-				Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
-				res => return Poll::Ready(res),
-			}
-			// Every connection sends from its own task, but tokio keeps one waker per
-			// direction, so register a fan-out to all of them instead of this task's.
-			self.blocked.push(cx.waker());
-			let waker = Waker::from(self.blocked.clone());
-			ready!(io.poll_send_ready(&mut Context::from_waker(&waker)))?;
-		}
-	}
-
-	fn max_transmit_segments(&self) -> std::num::NonZeroUsize {
-		self.state.max_gso_segments()
+		self.blocked.push(cx.waker());
+		let waker = Waker::from(self.blocked.clone());
+		io.poll_send_ready(&mut Context::from_waker(&waker))
 	}
 }
 
@@ -661,9 +679,9 @@ impl std::task::Wake for Blocked {
 	}
 }
 
-impl NoqServer {
+impl Server {
 	pub fn new(config: listen::Config, quic: &crate::quic::Config, member: Option<listen::Socket>) -> Result<Self> {
-		let mut transport = noq::TransportConfig::default();
+		let mut transport = quinn::TransportConfig::default();
 		let quic = quic.resolve();
 		apply_transport(&mut transport, &quic);
 		apply_qlog(&mut transport, &quic, "server")?;
@@ -693,18 +711,18 @@ impl NoqServer {
 			.iter()
 			.map(|alpn| alpn.as_bytes().to_vec())
 			.collect();
-		alpns.push(web_transport_moq::ALPN.as_bytes().to_vec());
+		alpns.push(web_transport_quinn::ALPN.as_bytes().to_vec());
 
 		tls.alpn_protocols = alpns;
 		tls.key_log = Arc::new(rustls::KeyLogFile::new());
 		config.tls.disable_resumption(&mut tls);
 
-		let tls: noq::crypto::rustls::QuicServerConfig = tls.try_into()?;
-		let mut tls = noq::ServerConfig::with_crypto(Arc::new(tls));
+		let tls: quinn::crypto::rustls::QuicServerConfig = tls.try_into()?;
+		let mut tls = quinn::ServerConfig::with_crypto(Arc::new(tls));
 		tls.transport_config(transport);
 
 		// Advertise the preferred_address transport parameter (RFC 9000 §9.6).
-		// noq allocates a fresh CID + reset token for the address during the handshake.
+		// quinn allocates a fresh CID + reset token for the address during the handshake.
 		if let Some(addr) = config.preferred_v4 {
 			tls.preferred_address_v4(Some(addr));
 		}
@@ -713,7 +731,7 @@ impl NoqServer {
 		}
 
 		// There's a bit more boilerplate to make a generic endpoint.
-		let runtime = noq::default_runtime().ok_or(Error::NoRuntime)?;
+		let runtime = quinn::default_runtime().ok_or(Error::NoRuntime)?;
 
 		let listen = config
 			.bind
@@ -725,7 +743,7 @@ impl NoqServer {
 		let load_balancer = config.load_balancer();
 
 		// Configure connection ID generator with server ID if provided
-		let mut endpoint_config = noq::EndpointConfig::default();
+		let mut endpoint_config = quinn::EndpointConfig::default();
 		if let Some(shard) = member.as_ref().map(listen::Socket::shard) {
 			if load_balancer.is_some() {
 				return Err(Error::ShardWithQuicLb);
@@ -735,7 +753,7 @@ impl NoqServer {
 				count = shard.count(),
 				"encoding the shard in connection IDs"
 			);
-			endpoint_config.cid_generator(Arc::new(move || Box::new(ShardIdGenerator::new(shard))));
+			endpoint_config.cid_generator(move || Box::new(ShardIdGenerator::new(shard)));
 		} else if let Some(load_balancer) = load_balancer {
 			let server_id = load_balancer.id;
 			let nonce_len = load_balancer.nonce;
@@ -753,9 +771,7 @@ impl NoqServer {
 				nonce_len,
 				"using QUIC-LB compatible connection ID generation"
 			);
-			endpoint_config.cid_generator(Arc::new(move || {
-				Box::new(ServerIdGenerator::new(server_id.clone(), nonce_len))
-			}));
+			endpoint_config.cid_generator(move || Box::new(ServerIdGenerator::new(server_id.clone(), nonce_len)));
 		}
 
 		// A group socket was released only after every member bound and the
@@ -768,22 +784,24 @@ impl NoqServer {
 		// Create the generic QUIC endpoint.
 		let socket = Socket::new(socket).map_err(Error::CreateEndpoint)?;
 		let quic =
-			noq::Endpoint::new_with_abstract_socket(endpoint_config, Some(tls), Box::new(socket.clone()), runtime)
+			quinn::Endpoint::new_with_abstract_socket(endpoint_config, Some(tls), Arc::new(socket.clone()), runtime)
 				.map_err(Error::CreateEndpoint)?;
 
 		// Spawn the cert reload watcher only after endpoint creation succeeds,
 		// so we don't leave a dangling watcher on failure.
+		#[cfg(feature = "watch")]
 		let _reload = crate::tls::Reload::spawn(certs.clone(), config.tls.clone());
 
 		Ok(Self {
 			quic,
 			certs,
 			socket,
+			#[cfg(feature = "watch")]
 			_reload,
 		})
 	}
 
-	pub fn accept(&self) -> impl std::future::Future<Output = Option<noq::Incoming>> + '_ {
+	pub fn accept(&self) -> impl std::future::Future<Output = Option<quinn::Incoming>> + '_ {
 		self.quic.accept()
 	}
 
@@ -796,16 +814,16 @@ impl NoqServer {
 	}
 
 	pub fn close(&self) {
-		self.quic.close(noq::VarInt::from_u32(0), b"server shutdown");
+		self.quic.close(quinn::VarInt::from_u32(0), b"server shutdown");
 	}
 
 	/// Close every connection, wait until each has sent its close to the peer,
 	/// then release the socket.
 	pub async fn shutdown(self) {
 		self.close();
-		// Not `wait_idle`, which also sits out each connection's 3 PTO closing
-		// period: that only repeats the close to a peer that already has it.
-		self.quic.wait_all_draining().await;
+		// Quinn keeps driving the close through its closing period so a lost
+		// CONNECTION_CLOSE is retransmitted before the socket is released.
+		self.quic.wait_idle().await;
 		self.socket.release();
 	}
 
@@ -815,32 +833,31 @@ impl NoqServer {
 	}
 }
 
-// ── NoqRequest ──────────────────────────────────────────────────────
+// ── QuinnRequest ──────────────────────────────────────────────────────
 
-/// A raw QUIC connection request without WebTransport framing (noq backend).
+/// A raw QUIC connection request without WebTransport framing (quinn backend).
 /// Accept a QUIC connection, negotiate WebTransport or raw moq, and complete the
 /// handshake (a `200 OK` for WebTransport). Returns the established session, the request
 /// URL and validated mTLS identity (both captured before the response consumes the
 /// request), and the dialed authority (the CONNECT authority on WebTransport, the TLS
 /// SNI on raw QUIC). Raw QUIC carries no request URL (the path rides the SETUP instead).
 pub(crate) async fn accept(
-	conn: noq::Incoming,
+	conn: quinn::Incoming,
 	alpns: Vec<&'static str>,
-) -> Result<crate::server::Accepted<web_transport_moq::Session>> {
+) -> Result<crate::server::Accepted<web_transport_quinn::Session>> {
 	let mut conn = conn.accept()?;
 
 	let handshake = conn
 		.handshake_data()
 		.await?
-		.downcast::<noq::crypto::rustls::HandshakeData>()
+		.downcast::<quinn::crypto::rustls::HandshakeData>()
 		.unwrap();
 
 	let alpn = handshake.protocol.ok_or(Error::MissingAlpn)?;
 	let alpn = String::from_utf8(alpn)?;
 	let host = handshake.server_name.unwrap_or_default();
 
-	// The established Connection no longer exposes a single peer address (noq 1.0
-	// supports multipath), so capture it from the Connecting before awaiting.
+	// Capture the peer address alongside its handshake metadata.
 	let remote = conn.remote_address();
 	tracing::debug!(%host, ip = %remote, %alpn, "accepting");
 
@@ -859,10 +876,10 @@ pub(crate) async fn accept(
 	};
 
 	match alpn.as_str() {
-		web_transport_moq::ALPN => {
+		web_transport_quinn::ALPN => {
 			// Wait for the CONNECT request, then capture its URL and mTLS identity before
 			// the response consumes it.
-			let request = web_transport_moq::Request::accept(conn)
+			let request = web_transport_quinn::Request::accept(conn)
 				.await
 				.map_err(|err| Error::RecvRequest(crate::error::message(err)))?;
 			let url = Some(request.url.clone());
@@ -870,7 +887,7 @@ pub(crate) async fn accept(
 			// The authority the client put in its CONNECT URL.
 			let authority = request.url.host_str().filter(|h| !h.is_empty()).map(str::to_owned);
 
-			let mut response = web_transport_moq::proto::ConnectResponse::OK;
+			let mut response = web_transport_quinn::proto::ConnectResponse::OK;
 			let mut link = link;
 			if let Some(protocol) = request.protocols.iter().find(|p| alpns.contains(&p.as_str())) {
 				response = response.with_protocol(protocol);
@@ -897,7 +914,7 @@ pub(crate) async fn accept(
 			// Raw QUIC carries no request URL; the path rides the SETUP. The TLS SNI is the
 			// only authority the client can offer here, and it is optional.
 			let authority = (!host.is_empty()).then_some(host);
-			let session = web_transport_moq::Session::raw(conn);
+			let session = web_transport_quinn::Session::raw(conn);
 			Ok(crate::server::Accepted {
 				session,
 				url: None,
@@ -930,13 +947,13 @@ impl ShardIdGenerator {
 	}
 }
 
-impl noq::ConnectionIdGenerator for ShardIdGenerator {
-	fn generate_cid(&mut self) -> noq::ConnectionId {
+impl quinn::ConnectionIdGenerator for ShardIdGenerator {
+	fn generate_cid(&mut self) -> quinn::ConnectionId {
 		use rand::RngExt;
 		let mut cid = Vec::with_capacity(Self::LEN);
 		cid.push(moq_sock::shard::cid_prefix(self.shard));
 		cid.extend(rand::rng().random_iter::<u8>().take(Self::LEN - 1));
-		noq::ConnectionId::new(cid.as_slice())
+		quinn::ConnectionId::new(cid.as_slice())
 	}
 
 	fn cid_len(&self) -> usize {
@@ -961,8 +978,8 @@ impl ServerIdGenerator {
 	}
 }
 
-impl noq::ConnectionIdGenerator for ServerIdGenerator {
-	fn generate_cid(&mut self) -> noq::ConnectionId {
+impl quinn::ConnectionIdGenerator for ServerIdGenerator {
+	fn generate_cid(&mut self) -> quinn::ConnectionId {
 		use rand::RngExt;
 		let cid_len = self.cid_len();
 		let mut cid = Vec::with_capacity(cid_len);
@@ -970,7 +987,7 @@ impl noq::ConnectionIdGenerator for ServerIdGenerator {
 		cid.push((cid_len - 1) as u8);
 		cid.extend(self.server_id.0.iter());
 		cid.extend(rand::rng().random_iter::<u8>().take(self.nonce_len));
-		noq::ConnectionId::new(cid.as_slice())
+		quinn::ConnectionId::new(cid.as_slice())
 	}
 
 	fn cid_len(&self) -> usize {
@@ -986,6 +1003,20 @@ impl noq::ConnectionIdGenerator for ServerIdGenerator {
 mod tests {
 	use super::*;
 	use url::Url;
+
+	#[cfg(feature = "qlog")]
+	#[test]
+	fn qlog_paths_are_unique_per_endpoint() {
+		let dir = tempfile::tempdir().unwrap();
+		let mut config = crate::quic::Config::default();
+		config.qlog = Some(dir.path().into());
+		let config = config.resolve();
+		let mut first = quinn::TransportConfig::default();
+		let mut second = quinn::TransportConfig::default();
+		apply_qlog(&mut first, &config, "server").unwrap();
+		apply_qlog(&mut second, &config, "server").unwrap();
+		assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
+	}
 
 	#[tokio::test]
 	async fn pinned_ipv6_connection() {
@@ -1004,7 +1035,7 @@ mod tests {
 
 	async fn pinned_connection(bind: &str, host_name: Option<&str>) {
 		let quic = crate::quic::Config::default();
-		let server = NoqServer::new(
+		let server = Server::new(
 			listen::Config {
 				bind: Some(bind.parse().unwrap()),
 				tls: crate::tls::Listen {
@@ -1028,7 +1059,7 @@ mod tests {
 			..Default::default()
 		};
 		let tls = config.tls.build().expect("tls config");
-		let client = NoqClient::new(&config, &quic).expect("client init");
+		let client = Client::new(&config, &quic).expect("client init");
 		let url: Url = format!("moqt://{addr}/.cluster/test").parse().unwrap();
 		let versions = moq_net::Versions::default();
 		let dial = client.connect(&tls, url.into(), &versions);
@@ -1042,19 +1073,19 @@ mod tests {
 		let (_client, _server) = result.expect("pinned connection failed");
 	}
 
-	/// noq exposes no getters for the flow-control windows, but its `Debug` prints
+	/// quinn exposes no getters for the flow-control windows, but its `Debug` prints
 	/// them, which is enough to prove each one reached the transport config and that
-	/// an unset knob leaves noq's own default in place.
+	/// an unset knob leaves quinn's own default in place.
 	#[test]
 	fn apply_windows_writes_each_field() {
-		let defaults = format!("{:?}", noq::TransportConfig::default());
+		let defaults = format!("{:?}", quinn::TransportConfig::default());
 
 		let mut quic = crate::quic::Config::default();
 		quic.receive_window = Some(64 << 20);
 		quic.stream_receive_window = Some(8 << 20);
 		quic.send_window = Some(32 << 20);
 
-		let mut transport = noq::TransportConfig::default();
+		let mut transport = quinn::TransportConfig::default();
 		apply_windows(&mut transport, &quic.resolve());
 		let applied = format!("{:?}", transport);
 
@@ -1066,27 +1097,27 @@ mod tests {
 			assert!(applied.contains(&field), "{field} missing from {applied}");
 		}
 
-		let mut untouched = noq::TransportConfig::default();
+		let mut untouched = quinn::TransportConfig::default();
 		apply_windows(&mut untouched, &crate::quic::Config::default().resolve());
 		assert_eq!(format!("{:?}", untouched), defaults);
 	}
 
 	/// Build a controller from each family's factory and downcast it to the
-	/// concrete noq implementation it must map to.
+	/// concrete quinn implementation it must map to.
 	#[test]
 	fn congestion_factory_maps_each_family() {
 		let now = std::time::Instant::now();
 		let mtu = 1200;
 
 		let loss = congestion_factory(CongestionControl::Loss).build(now, mtu);
-		assert!(loss.into_any().downcast::<noq::congestion::Cubic>().is_ok());
+		assert!(loss.into_any().downcast::<quinn::congestion::Cubic>().is_ok());
 
 		let delay = congestion_factory(CongestionControl::Delay).build(now, mtu);
-		assert!(delay.into_any().downcast::<noq::congestion::Bbr3>().is_ok());
+		assert!(delay.into_any().downcast::<quinn::congestion::Bbr>().is_ok());
 	}
 
-	/// Loopback regression test: with the knob unset, live noq connections must run
-	/// BBRv3 on both ends.
+	/// Loopback regression test: with the knob unset, live quinn connections must run
+	/// BBRv1 on both ends.
 	#[tokio::test]
 	async fn default_reaches_the_live_connection() {
 		let server_config = listen::Config {
@@ -1101,13 +1132,13 @@ mod tests {
 		// The knob left unset, the way a binary that never mentions it runs.
 		let quic = crate::quic::Config::default();
 
-		let server = NoqServer::new(server_config, &quic, None).expect("server init");
+		let server = Server::new(server_config, &quic, None).expect("server init");
 		let addr = server.local_addr().expect("local addr");
 
 		let accepted = tokio::spawn(async move {
 			let incoming = server.accept().await.expect("no incoming connection");
 			let conn = incoming.accept().expect("accept").await.expect("handshake");
-			is_bbr3(&conn)
+			is_bbr(&conn)
 		});
 
 		// tls::Connect has a private field, so it can't be built with a struct literal.
@@ -1121,7 +1152,7 @@ mod tests {
 		};
 
 		let tls = client_config.tls.build().expect("tls config");
-		let client = NoqClient::new(&client_config, &quic).expect("client init");
+		let client = Client::new(&client_config, &quic).expect("client init");
 		// Dial the loopback IP directly so the system resolver is never involved.
 		let url: Url = format!("moqt://127.0.0.1:{}", addr.port()).parse().unwrap();
 
@@ -1133,26 +1164,22 @@ mod tests {
 				.await
 				.expect("connect failed");
 
-			// web_transport_moq::Session derefs to the noq connection.
-			assert!(is_bbr3(&session), "client connection is not running BBRv3");
+			// web_transport_quinn::Session derefs to the quinn connection.
+			assert!(is_bbr(&session), "client connection is not running BBRv1");
 			assert!(
 				accepted.await.expect("server task panicked"),
-				"server connection is not running BBRv3"
+				"server connection is not running BBRv1"
 			);
 		})
 		.await
 		.expect("test timed out");
 	}
 
-	/// Whether a live connection's initial path is running BBRv3.
-	///
-	/// noq is multipath, so the controller is per path rather than per connection;
-	/// `PathId::ZERO` is the path the handshake came up on.
-	fn is_bbr3(conn: &noq::Connection) -> bool {
-		conn.congestion_state(noq::PathId::ZERO)
-			.expect("no controller on the initial path")
+	/// Whether a live connection is running BBRv1.
+	fn is_bbr(conn: &quinn::Connection) -> bool {
+		conn.congestion_state()
 			.into_any()
-			.downcast::<noq::congestion::Bbr3>()
+			.downcast::<quinn::congestion::Bbr>()
 			.is_ok()
 	}
 }
