@@ -153,6 +153,12 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		})
 	}
 
+	/// When a frame decoding at `decode` goes out on the current clock, once there is one.
+	pub fn at(&self, decode: Timestamp) -> Option<Instant> {
+		let (_, anchor, base) = self.clock?;
+		self.deadline(anchor, base, decode)
+	}
+
 	/// When a frame decoding at `decode` goes out on the clock anchored at `anchor` and
 	/// `base`, if any instant holds it.
 	fn deadline(&self, anchor: Instant, base: Timestamp, decode: Timestamp) -> Option<Instant> {

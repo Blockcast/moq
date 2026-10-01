@@ -110,15 +110,18 @@ A constant-rate MPEG-TS source records its multiplex rate in the catalog
 (`mpegts.muxRate`, measured off the PCR clock, null stuffing included), and
 `export ts` pads its output with null packets back to that rate on a constant-rate
 schedule, so an IRD or groomer recovering its clock from packet arrival can lock:
-every PCR interval carries the bytes the rate implies. `--mux-rate 5000000` pads to
-an explicit rate instead, including for a broadcast that recorded none. A frame
-goes out as late as the rate lets it while still arriving by its decode time, and a
-keyframe bigger than one 25 ms interval spreads over the intervals before it, back
-as far as `--delay`. That window adds up to the delay again to the output's
-latency, so a padded export trails the source by up to twice the delay. A burst
-that does not fit the window, or a source that sustains more than the rate, fails
-the export with an error naming both knobs. A VBR source records no rate, so
-export without one stays unpadded and adds no window.
+every PCR is the time of its own byte position at the rate. `--mux-rate 5000000`
+pads to an explicit rate instead, including for a broadcast that recorded none.
+
+Each frame goes out as early as a receiver's buffers for its PID admit (the
+ISO 13818-1 T-STD: no more of a PID's packets per interval than its transport
+buffer passes on, and no more bytes than its decoder buffer holds, sized from the
+SPS's HRD or level for video and per codec for audio), up to `--delay` ahead of its
+decode time, earliest decode time first. So a heavy passage rides the intervals
+before it, and the output trails the source by twice the delay. A frame that cannot
+arrive by its decode time at the rate fails the export with an error naming both
+knobs; a broadcast-sized decoder buffer (a CPB of a second or more) needs a delay to
+match. A VBR source records no rate, so export without one stays unpadded.
 
 fMP4 export writes one fragment per publisher group on each track. Audio follows
 the publisher's cuts; video normally follows GOPs. Closing a group flushes it
@@ -359,9 +362,9 @@ groups fetchable, which the [HLS gateway](/bin/hls) depends on. `export --max-ag
 stalled group before skipping. Raising the first never delays playback.
 
 `export ts` takes `--delay` (default 500 ms) instead, and works like an SRT
-receiver's latency. Every frame is written that long after its decode time,
+receiver's latency. Every frame is muxed that long after its decode time,
 with the clock started when the first frame arrived, so the output keeps the
-source's pace and interleaves all tracks in decode order whatever their arrival
+source's pace and muxes all tracks in decode order whatever their arrival
 skew: two exporters of one broadcast emit them in one order. A frame that
 arrives later than its deadline is dropped, and video then resumes at its next
 keyframe. The delay is also how stale a group may get before it is skipped.
