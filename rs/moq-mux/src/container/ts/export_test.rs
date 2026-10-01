@@ -1055,11 +1055,44 @@ async fn export_pcr_backfills_a_coarse_cadence() {
 /// is due and decoded on its own.
 #[tokio::test(start_paused = true)]
 async fn export_splits_a_multi_frame_ac3_pes() {
-	const AC3_PID: u16 = 0x104;
-	// A 32 kb/s 48 kHz 2/0 sync frame: 128 bytes, 1,536 samples (32 ms).
+	let pes = exported_ac3(ac3_sync().repeat(3)).await;
+	assert_eq!(pes.len(), 3, "one PES a sync frame: {pes:?}");
+	for (k, &(pts, bytes)) in pes.iter().enumerate() {
+		assert_eq!(bytes, 128, "frame {k} carries one sync frame");
+		assert_eq!(
+			pts,
+			pes[0].0 + k as u64 * 2_880,
+			"frame {k} is presented 32 ms after the last"
+		);
+	}
+}
+
+/// A sync frame cut short of the length its header gives, as a source stopped mid-frame
+/// leaves at the end of its last PES, is no use to a decoder, so the export drops it rather
+/// than pass the PES on whole: after whole frames, or alone.
+#[tokio::test(start_paused = true)]
+async fn export_drops_a_trailing_partial_ac3_frame() {
+	let mut payload = ac3_sync().repeat(2);
+	payload.extend_from_slice(&ac3_sync()[..60]);
+	let pes = exported_ac3(payload).await;
+	assert_eq!(pes.len(), 2, "the whole frames, each its own PES: {pes:?}");
+	assert!(pes.iter().all(|&(_, bytes)| bytes == 128), "{pes:?}");
+
+	let pes = exported_ac3(ac3_sync()[..60].to_vec()).await;
+	assert!(pes.is_empty(), "a lone cut frame goes nowhere: {pes:?}");
+}
+
+/// A 32 kb/s 48 kHz 2/0 AC-3 sync frame: 128 bytes, 1,536 samples (32 ms).
+fn ac3_sync() -> Vec<u8> {
 	let mut sync = vec![0x0b, 0x77, 0x00, 0x00, 0x00, 0x40, 0x40];
 	sync.resize(128, 0x00);
+	sync
+}
 
+/// Export one PES of `payload` on an AC-3 passthrough PID beside bbb's media, and return the
+/// PTS of every PES on that PID and how many bytes each carries.
+async fn exported_ac3(payload: Vec<u8>) -> Vec<(u64, usize)> {
+	const AC3_PID: u16 = 0x104;
 	let data = include_bytes!("test_data/bbb.ts");
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
@@ -1091,7 +1124,7 @@ async fn export_splits_a_multi_frame_ac3_pes() {
 	ac3.write(Frame {
 		timestamp: Timestamp::from_millis(1_410).unwrap(),
 		duration: None,
-		payload: Bytes::from(sync.repeat(3)),
+		payload: Bytes::from(payload),
 		keyframe: true,
 	})
 	.unwrap();
@@ -1133,15 +1166,7 @@ async fn export_splits_a_multi_frame_ac3_pes() {
 			last.1 += body.len();
 		}
 	}
-	assert_eq!(pes.len(), 3, "one PES a sync frame: {pes:?}");
-	for (k, &(pts, bytes)) in pes.iter().enumerate() {
-		assert_eq!(bytes, 128, "frame {k} carries one sync frame");
-		assert_eq!(
-			pts,
-			pes[0].0 + k as u64 * 2_880,
-			"frame {k} is presented 32 ms after the last"
-		);
-	}
+	pes
 }
 
 /// Full SCTE-35 round-trip: import `bbb.ts` (real H.264 + AAC) into a broadcast

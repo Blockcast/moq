@@ -888,6 +888,12 @@ impl<E: catalog::Catalog> Export<E> {
 			self.fill(waiter)?;
 		}
 
+		// Once every source has ended, the tail goes out late if it must: the end of the
+		// stream is not a missed deadline.
+		if !self.tracks.is_empty() && self.tracks.values().all(|track| track.finished) {
+			self.schedule.end();
+		}
+
 		// 4. Mux each frame the jitter buffer lets go (the first carries the buffered
 		// PAT/PMT), then lay out every grid slot whose time has come ([`Self::lay_due`]).
 		loop {
@@ -1690,6 +1696,13 @@ impl<E: catalog::Catalog> Export<E> {
 					.then(|| ac3_frames(frame.timestamp, &es_payload))
 					.flatten()
 					.unwrap_or_else(|| vec![(frame.timestamp, es_payload.as_slice())]);
+				if frames.is_empty() {
+					// Nothing left of the PES but the tables muxed ahead of it.
+					return match out.is_empty() {
+						true => Ok(()),
+						false => self.push_unit(name, pid, decode, out, false),
+					};
+				}
 				let mut at = decode;
 				for (k, (timestamp, payload)) in frames.into_iter().enumerate() {
 					if k > 0 {
@@ -2238,8 +2251,12 @@ fn audio_buffer(config: &AudioConfig, kind: &Kind) -> Buffer {
 /// The DVB AC-3 descriptor's tag (ETSI EN 300 468 6.2.1), marking AC-3 as private data.
 const AC3_DESCRIPTOR: u8 = 0x6a;
 
+/// The DVB teletext descriptor's tag (ETSI EN 300 468 6.2.43).
+const TELETEXT_DESCRIPTOR: u8 = 0x56;
+
 /// A verbatim stream's buffers, for the kinds its descriptors identify: AC-3 as DVB private
-/// data (ATSC A/52 Annex A 5.4). Any other stream has none the schedule knows.
+/// data (ATSC A/52 Annex A 5.4), and teletext, whose transport buffer drains at 6.75 Mb/s
+/// (ETSI EN 300 472 5). Any other stream has none the schedule knows.
 fn verbatim_buffer(kind: &Kind, descriptors: &[catalog::Descriptor]) -> Option<Buffer> {
 	let Kind::Verbatim {
 		stream_type: 0x06,
@@ -2249,29 +2266,40 @@ fn verbatim_buffer(kind: &Kind, descriptors: &[catalog::Descriptor]) -> Option<B
 	else {
 		return None;
 	};
-	descriptors
-		.iter()
-		.any(|descriptor| descriptor.tag == AC3_DESCRIPTOR)
-		.then_some(Buffer {
+	descriptors.iter().find_map(|descriptor| match descriptor.tag {
+		AC3_DESCRIPTOR => Some(Buffer {
 			rate: 2_000_000,
 			size: Some(5_696),
-		})
+		}),
+		TELETEXT_DESCRIPTOR => Some(Buffer {
+			rate: 6_750_000,
+			size: None,
+		}),
+		_ => None,
+	})
 }
 
 /// The AC-3 sync frames `payload` holds, each with its presentation time counted on from
-/// `start`, or `None` unless it is two or more whole frames.
+/// `start`, or `None` if it does not parse as AC-3. A trailing frame shorter than its header
+/// says is dropped, as a source cut off mid-frame leaves one: no decoder can use it.
 fn ac3_frames(start: Timestamp, payload: &[u8]) -> Option<Vec<(Timestamp, &[u8])>> {
 	let mut frames = Vec::new();
 	let (mut rest, mut samples) = (payload, 0u64);
 	while !rest.is_empty() {
 		let header = (crate::codec::ac3::DESCRIPTOR.parse)(rest).ok()?;
-		let (frame, tail) = rest.split_at_checked(header.len)?;
+		let Some((frame, tail)) = rest.split_at_checked(header.len) else {
+			tracing::warn!(
+				missing = header.len - rest.len(),
+				"dropped an AC-3 sync frame cut short of its length"
+			);
+			return Some(frames);
+		};
 		let offset = Timestamp::from_micros(samples * 1_000_000 / u64::from(header.sample_rate.max(1))).ok()?;
 		frames.push((start.checked_add(offset).ok()?, frame));
 		samples += header.samples;
 		rest = tail;
 	}
-	(frames.len() > 1).then_some(frames)
+	Some(frames)
 }
 
 /// Build the Annex-B elementary-stream payload for one video frame: rewrite the
@@ -2543,10 +2571,34 @@ mod tests {
 
 	use moq_net::Timestamp;
 
-	use super::{DecodeClock, PSI_INTERVAL, due, is_complete_section, si_due, slot};
+	use super::{Buffer, DecodeClock, Kind, PSI_INTERVAL, due, is_complete_section, si_due, slot, verbatim_buffer};
 
 	fn ms(value: u64) -> Timestamp {
 		Timestamp::from_millis(value).unwrap()
+	}
+
+	/// Teletext passed through as DVB private data takes its transport buffer's rate from
+	/// EN 300 472, so the schedule spreads it no faster than a receiver passes it on; private
+	/// data nothing identifies has no buffers.
+	#[test]
+	fn teletext_drains_at_its_own_rate() {
+		let kind = Kind::Verbatim {
+			stream_type: 0x06,
+			framing: super::catalog::Framing::Pes,
+			stream_id: None,
+		};
+		let descriptor = |tag| super::catalog::Descriptor {
+			tag,
+			data: bytes::Bytes::from_static(b"eng\x09\x00"),
+		};
+		assert_eq!(
+			verbatim_buffer(&kind, &[descriptor(0x56)]),
+			Some(Buffer {
+				rate: 6_750_000,
+				size: None,
+			})
+		);
+		assert_eq!(verbatim_buffer(&kind, &[descriptor(0x0a)]), None);
 	}
 
 	/// Push a decode-order PTS stream (90 kHz) through the decode clock under a catalog

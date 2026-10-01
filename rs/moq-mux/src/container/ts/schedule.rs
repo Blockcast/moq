@@ -240,6 +240,9 @@ pub(super) struct Schedule {
 	buffers: HashMap<u16, Buffer>,
 	/// Units sent into a decoder buffer: their PID, due slot and bytes held.
 	decoding: VecDeque<(u16, u128, usize)>,
+	/// Every source has ended, so a unit that misses its deadline is the tail going out late
+	/// rather than an output that cannot keep up.
+	ended: bool,
 }
 
 impl Schedule {
@@ -253,7 +256,13 @@ impl Schedule {
 			last: None,
 			buffers: HashMap::new(),
 			decoding: VecDeque::new(),
+			ended: false,
 		}
+	}
+
+	/// Every source has ended: what is queued still goes out, late if it must.
+	pub fn end(&mut self) {
+		self.ended = true;
 	}
 
 	/// Pad to `rate` bits per second from the next slot on, or stop padding.
@@ -307,6 +316,7 @@ impl Schedule {
 		self.next = None;
 		self.horizon = None;
 		self.last = None;
+		self.ended = false;
 	}
 
 	/// The first slot `unit` may go out in: a window ahead of its due slot, or only the slot
@@ -363,7 +373,9 @@ impl Schedule {
 			Some(rate) => {
 				let allowed = (packets_before(index + 1, rate) - packets_before(index, rate)).max(1);
 				let take = self.admit(index, allowed as usize - 1);
-				if let Some(unit) = self.missed(index, &take) {
+				if let Some(unit) = self.missed(index, &take)
+					&& !self.ended
+				{
 					anyhow::bail!(
 						"MPEG-TS output missed a decode deadline on PID {} at {rate} b/s; raise the delay or the multiplex rate",
 						unit.pid,
@@ -565,6 +577,22 @@ mod tests {
 		schedule.push(1, ms(1_000), unit(1, 200), true);
 		let err = std::iter::from_fn(|| schedule.next(None).transpose()).find_map(Result::err);
 		assert!(err.is_some(), "a burst past the window must fail the export");
+	}
+
+	/// Once every source has ended, a unit the window cannot carry by its due slot is the
+	/// tail going out late, not a failure.
+	#[test]
+	fn a_burst_too_big_for_the_window_goes_out_late_at_the_end() {
+		let mut schedule = Schedule::new(Duration::from_millis(50));
+		schedule.set_rate(Some(RATE));
+		schedule.set_buffer(1, VIDEO);
+		schedule.push(1, ms(1_000), unit(1, 200), true);
+		schedule.end();
+		let sent: usize = drain(&mut schedule)
+			.into_iter()
+			.map(|(_, per_pid, _)| per_pid.get(&1).copied().unwrap_or(0))
+			.sum();
+		assert_eq!(sent, 200, "the whole unit goes out");
 	}
 
 	/// The unit due first goes first, whatever order the PIDs were pushed in.
