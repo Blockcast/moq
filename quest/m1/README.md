@@ -78,7 +78,6 @@ QUIC studies there on that rule.
 - [Data consumer timestamps](/quest/m1/data-consumer-timestamps.md) - json and binary consumers return each value's timestamp, in Rust and every binding
 - [Nested data configs](/quest/m1/data-config-nesting.md) - docs nest `BinaryConfig`/`JsonConfig` in an application section instead of flattening it
 - [Omit empty catalog sections](/quest/m1/catalog-omit-empty.md) - a Rust catalog with no video or audio leaves those keys out, as JS does
-- [Public clock anchor](/quest/m1/clock-anchor-public.md) - an application demuxer shares one source offset across its tracks through `Anchor` and `Lane`
 - [Delete SourceMap](/quest/m1/source-map-removal.md) - on dev, `Anchor` with its `Lane`s is the one way onto the broadcast clock
 - [Draft-20 FETCH](/quest/m1/ietf-fetch-location.md) - a draft-20+ FETCH within one group is served from its LOCATION_FILTER, as older drafts are
 - [Fetch without SUBSCRIBE](/quest/m1/ietf-fetch-only.md) - a relay fetches from an IETF upstream without subscribing, finished tracks included, with End of Track always reported
