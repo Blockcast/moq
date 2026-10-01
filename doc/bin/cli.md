@@ -368,8 +368,12 @@ source's pace and muxes all tracks in decode order whatever their arrival
 skew: two exporters of one broadcast emit them in one order. A frame that
 arrives later than its deadline is dropped, and video then resumes at its next
 keyframe. The clock follows the source's, so a source whose clock runs a little
-fast or slow (the 30 ppm a broadcast system clock may) neither goes late nor
-piles up over a long run, and a lead it started with wears away. Each 25 ms
+fast or slow neither goes late nor piles up over a long run, and a lead it
+started with wears away. The output's PCR is that clock, so it keeps to what
+ISO/IEC 13818-1 allows a system clock: within 30 ppm of the exporter's, its
+rate changing by at most 0.075 Hz/s. Catching up with a source near that limit
+takes hours, and one further off fails the export once it has used half the
+delay. Each 25 ms
 slice of the output is written when the clock reaches it. The delay is also how
 stale a group may get before it is skipped. `--delay 0` holds nothing and drops
 nothing, writing frames in arrival order as they come.

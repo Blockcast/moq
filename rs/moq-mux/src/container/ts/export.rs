@@ -236,10 +236,10 @@ impl Track {
 	/// The decode clock runs here, as frames are read, because the deadline is on decode time:
 	/// reordered video arrives in decode order with PTS 0, 120, 40, 80, so a PTS deadline would
 	/// strand a B-frame behind its reference or send it first.
-	fn queue(&mut self, name: &str, pending: Pending, jitter: &mut jitter::Buffer<u16, Queued>) {
+	fn queue(&mut self, name: &str, pending: Pending, jitter: &mut jitter::Buffer<u16, Queued>) -> anyhow::Result<()> {
 		if pending.restart != self.restart {
 			// The source may have restarted its timeline, so the decode clock restarts too.
-			self.release(name, jitter, true);
+			self.release(name, jitter, true)?;
 			self.restart = pending.restart;
 			self.clock = DecodeClock::default();
 		}
@@ -251,7 +251,7 @@ impl Track {
 		}
 		let pts = to_ticks(pending.frame.timestamp);
 		self.clock.push((pending, self.source.description().cloned()), pts);
-		self.release(name, jitter, false);
+		self.release(name, jitter, false)
 	}
 
 	/// Whether the track passes AC-3 through as DVB private data, whose PES may carry several
@@ -289,12 +289,13 @@ impl Track {
 	}
 
 	/// Queue every held video frame whose DTS is settled, or all of them when `flush`.
-	fn release(&mut self, name: &str, jitter: &mut jitter::Buffer<u16, Queued>, flush: bool) {
+	fn release(&mut self, name: &str, jitter: &mut jitter::Buffer<u16, Queued>, flush: bool) -> anyhow::Result<()> {
 		let (delay, lookahead) = self.timing.reorder();
 		let lookahead = lookahead.max(self.timing.jitter);
 		while let Some(((pending, description), dts)) = self.clock.pop(lookahead, delay, flush) {
-			self.push(name, pending, Some(dts), description, jitter);
+			self.push(name, pending, Some(dts), description, jitter)?;
 		}
+		Ok(())
 	}
 
 	/// Queue a frame decoding at `dts` (90 kHz ticks), else at its PTS.
@@ -305,7 +306,7 @@ impl Track {
 		dts: Option<u64>,
 		description: Option<Bytes>,
 		jitter: &mut jitter::Buffer<u16, Queued>,
-	) {
+	) -> anyhow::Result<()> {
 		let Pending {
 			frame,
 			restart,
@@ -329,9 +330,10 @@ impl Track {
 				description,
 			},
 		};
-		if jitter.push(self.pid, arrival) == Push::Late {
+		if jitter.push(self.pid, arrival)? == Push::Late {
 			tracing::warn!(track = %name, dropped = jitter.dropped(), "frame missed its deadline; dropped");
 		}
+		Ok(())
 	}
 }
 
@@ -854,7 +856,7 @@ impl<E: catalog::Catalog> Export<E> {
 			for (_, name) in held {
 				let track = self.tracks.get_mut(&name).unwrap();
 				let pending = track.pending.take().unwrap();
-				track.queue(&name, pending, &mut self.jitter);
+				track.queue(&name, pending, &mut self.jitter)?;
 			}
 			self.fill(waiter)?;
 		}
@@ -1014,7 +1016,7 @@ impl<E: catalog::Catalog> Export<E> {
 							track.pending = Some(pending);
 							break;
 						}
-						track.queue(name, pending, &mut self.jitter);
+						track.queue(name, pending, &mut self.jitter)?;
 					}
 					Poll::Ready(None) => {
 						track.finished = true;
@@ -1028,7 +1030,7 @@ impl<E: catalog::Catalog> Export<E> {
 			}
 			// Nothing more can come in below the frames still held for their DTS.
 			if track.finished && !waiting_for_header {
-				track.release(name, &mut self.jitter, true);
+				track.release(name, &mut self.jitter, true)?;
 			}
 		}
 		Ok(())
@@ -1182,7 +1184,9 @@ impl<E: catalog::Catalog> Export<E> {
 			let kind = video_kind(config, name)?;
 			let mut track = match old.remove(name) {
 				Some(track) => track,
-				None => match ExportSource::for_video(&self.source, name, config, self.delay)?.map(|s| at_edge(s, self.replay)) {
+				None => match ExportSource::for_video(&self.source, name, config, self.delay)?
+					.map(|s| at_edge(s, self.replay))
+				{
 					Some(source) => Track::new(source, kind.clone()),
 					None => continue,
 				},
@@ -1195,7 +1199,9 @@ impl<E: catalog::Catalog> Export<E> {
 			let kind = audio_kind(config, name)?;
 			let mut track = match old.remove(name) {
 				Some(track) => track,
-				None => match ExportSource::for_audio(&self.source, name, config, self.delay)?.map(|s| at_edge(s, self.replay)) {
+				None => match ExportSource::for_audio(&self.source, name, config, self.delay)?
+					.map(|s| at_edge(s, self.replay))
+				{
 					Some(source) => Track::new(source, kind.clone()),
 					None => continue,
 				},

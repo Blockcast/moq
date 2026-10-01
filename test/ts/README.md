@@ -220,6 +220,12 @@ A constant-rate stream makes a fourth claim, graded by `pcr-schedule`: that the
 bytes between consecutive PCRs are the bytes the mux rate implies for that
 interval.
 
+From a pipe, `pcr-rate` also grades the PCR clock's rate against the arrival
+clock, as the least-squares slope over each time base after the start-up third:
+within 30 ppm (`--rate-ppm`), the tolerance ISO 13818-1 2.4.2.1 gives a system
+clock. `release` cannot see a clock running at a steady wrong rate, which keeps
+its intervals and only adds to the drift.
+
 ```bash
 # live: every domain, reading the exporter directly
 moq --connect http://localhost:4443 --broadcast live.hang export ts \
@@ -234,10 +240,11 @@ because every check is graded against the stream's **own** PCR values. If two
 consecutive PCRs are 25 ms apart in value then they must be ~25 ms apart in
 arrival, whatever clock rate the stream is running at. The price of that basis is
 the same one `compliance.py` pays: a PCR emitted at the wrong rate stays
-internally consistent, so absolute rate is not what this grades. `pcr-schedule`
-is the exception when it is given `--mux-rate`, which pins the rate the way
-`duration-fidelity` does; without it, it estimates the rate from the capture and
-grades only how evenly the bytes are laid over the PCRs.
+internally consistent, so absolute rate is not what this grades, except against
+the arrival clock in `pcr-rate`. `pcr-schedule` is the other exception when it is
+given `--mux-rate`, which pins the rate the way `duration-fidelity` does; without
+it, it estimates the rate from the capture and grades only how evenly the bytes
+are laid over the PCRs.
 
 | Check | Severity | What it verifies |
 |---|---|---|

@@ -5989,7 +5989,12 @@ async fn a_skipped_group_keeps_the_clock() {
 	{
 		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
 		cfg.container = Container::Legacy;
-		catalog.modify().unwrap().audio.renditions.insert("a.aac".to_string(), cfg);
+		catalog
+			.modify()
+			.unwrap()
+			.audio
+			.renditions
+			.insert("a.aac".to_string(), cfg);
 	}
 
 	let delay = Duration::from_millis(500);
