@@ -15,8 +15,9 @@ const _: () = assert!(
 		.as_nanos()
 		.is_multiple_of(PCR_INTERVAL.as_nanos())
 );
-/// One packet in the fixed-point unit of the rate credit: one slot at `rate` bits per second
-/// is exactly `rate` units, so no slot rounds on its own and the remainder carries over.
+/// One packet in bits per second of slots: `rate` bits per second fills slot `index` up to
+/// `index * rate / PACKET` packets since the start of the timeline, so no slot rounds on
+/// its own.
 const PACKET: u64 = TsPacket::SIZE as u64 * 8 * SLOTS_PER_SECOND;
 /// The most of a packet a decoder buffer can receive: everything after its 4-byte header.
 const PAYLOAD: usize = TsPacket::SIZE - 4;
@@ -35,12 +36,27 @@ pub(super) fn slot(nanos: u128) -> u128 {
 	nanos / PCR_INTERVAL.as_nanos()
 }
 
+/// One slot in system clock ticks.
+const SLOT_TICKS: u128 = PCR_INTERVAL.as_nanos() * SYSTEM_CLOCK / 1_000_000_000;
+
 /// The PCR, in system clock ticks, that opens slot `index`: one slot behind its boundary,
 /// so the slot's bytes are timed up to that boundary. It backs off through the 33-bit wrap
 /// rather than saturating, since the wire field is a circular clock.
 fn grid_pcr(index: u128) -> u128 {
-	let slot = PCR_INTERVAL.as_nanos() * SYSTEM_CLOCK / 1_000_000_000;
-	(index % PCR_WRAP * slot + PCR_WRAP - slot) % PCR_WRAP
+	(index % PCR_WRAP * SLOT_TICKS + PCR_WRAP - SLOT_TICKS) % PCR_WRAP
+}
+
+/// How many packets `rate` bits per second carries before slot `index` on the media timeline.
+fn packets_before(index: u128, rate: u64) -> u128 {
+	index * u128::from(rate) / u128::from(PACKET)
+}
+
+/// The PCR that opens slot `index` at `rate`: the time of its first byte, the timeline's
+/// packets before it at the rate, one slot behind like [`grid_pcr`]. It is a function of the
+/// slot alone, so every exporter of a broadcast stamps a slot alike.
+fn rate_pcr(index: u128, rate: u64) -> u128 {
+	let at = packets_before(index, rate) * TsPacket::SIZE as u128 * 8 * SYSTEM_CLOCK / u128::from(rate);
+	(at % PCR_WRAP + PCR_WRAP - SLOT_TICKS) % PCR_WRAP
 }
 
 /// A PID's buffers in a receiver, as the schedule respects them (ISO 13818-1 2.4.2).
@@ -203,7 +219,8 @@ impl Slot {
 /// With a multiplex rate each slot carries exactly what the rate allows, padded with null
 /// packets, and a unit that is not complete by its due slot fails the export rather than
 /// arrive late. Each slot's PCR is the time of its own first byte at the rate, so it matches
-/// its byte position exactly. Without a rate the stream is unpadded, its PCRs on the grid,
+/// its byte position exactly, and how many packets a slot carries and the PCR it opens with
+/// are functions of the slot alone, so two exporters of a broadcast lay a slot alike. Without a rate the stream is unpadded, its PCRs on the grid,
 /// and a unit still incomplete in its due slot goes out whole there. A rate that turns up
 /// mid-stream takes over from the next slot.
 pub(super) struct Schedule {
@@ -213,8 +230,6 @@ pub(super) struct Schedule {
 	window: u128,
 	/// The multiplex rate, in bits per second.
 	rate: Option<u64>,
-	/// The rate's allowance not yet spent, in [`PACKET`] units.
-	credit: u64,
 	/// The next slot to lay out.
 	next: Option<u128>,
 	/// The latest due slot pushed: the clock runs at least that far.
@@ -225,8 +240,6 @@ pub(super) struct Schedule {
 	buffers: HashMap<u16, Buffer>,
 	/// Units sent into a decoder buffer: their PID, due slot and bytes held.
 	decoding: VecDeque<(u16, u128, usize)>,
-	/// The PCR of the first slot at the rate, and the packets laid out since.
-	clock: Option<(u128, u128)>,
 }
 
 impl Schedule {
@@ -235,23 +248,17 @@ impl Schedule {
 			units: VecDeque::new(),
 			window: slot(window.as_nanos()),
 			rate: None,
-			credit: 0,
 			next: None,
 			horizon: None,
 			last: None,
 			buffers: HashMap::new(),
 			decoding: VecDeque::new(),
-			clock: None,
 		}
 	}
 
 	/// Pad to `rate` bits per second from the next slot on, or stop padding.
 	pub fn set_rate(&mut self, rate: Option<u64>) {
-		if self.rate != rate {
-			self.rate = rate;
-			self.credit = 0;
-			self.clock = None;
-		}
+		self.rate = rate;
 	}
 
 	/// Hold the packets on `pid` to `buffer`.
@@ -297,8 +304,6 @@ impl Schedule {
 		self.next = None;
 		self.horizon = None;
 		self.last = None;
-		self.credit = 0;
-		self.clock = None;
 	}
 
 	/// The first slot `unit` may go out in: a window ahead of its due slot, or only the slot
@@ -349,17 +354,11 @@ impl Schedule {
 		if known.is_some_and(|known| index + self.window >= known) {
 			return Ok(None);
 		}
-		if self.next != Some(index) {
-			// A skipped gap carried no bytes, so the clock starts over past it.
-			self.clock = None;
-		}
 		self.next = Some(index + 1);
 
 		let (take, nulls, pcr) = match self.rate {
 			Some(rate) => {
-				self.credit += rate;
-				let allowed = (self.credit / PACKET).max(1);
-				self.credit -= (self.credit / PACKET).min(allowed) * PACKET;
+				let allowed = (packets_before(index + 1, rate) - packets_before(index, rate)).max(1);
 				let take = self.admit(index, allowed as usize - 1);
 				if let Some(unit) = self.missed(index, &take) {
 					anyhow::bail!(
@@ -368,10 +367,7 @@ impl Schedule {
 					);
 				}
 				let media: usize = take.iter().sum();
-				let (base, laid) = self.clock.get_or_insert((grid_pcr(index), 0));
-				let pcr = (*base + *laid * TsPacket::SIZE as u128 * 8 * SYSTEM_CLOCK / u128::from(rate)) % PCR_WRAP;
-				*laid += u128::from(allowed);
-				(take, allowed as usize - 1 - media, pcr)
+				(take, allowed as usize - 1 - media, rate_pcr(index, rate))
 			}
 			None => {
 				let mut take = self.admit(index, usize::MAX);
@@ -641,8 +637,10 @@ mod tests {
 		assert_eq!(sent, [(39, 2)]);
 	}
 
-	/// Each PCR is the time of its slot's first byte at the rate, so a rate that does not
-	/// divide into whole packets per slot moves it off the grid by less than a packet.
+	/// Each PCR is the time of its slot's first byte at the rate, to within a tick of the
+	/// system clock, so a rate that does not divide into whole packets per slot moves it off
+	/// the grid by less than a packet. Both are functions of the slot alone, so a schedule
+	/// started later lays the same slot alike.
 	#[test]
 	fn the_pcr_is_its_byte_position_at_the_rate() {
 		let mut schedule = Schedule::new(Duration::ZERO);
@@ -658,7 +656,8 @@ mod tests {
 		while let Some(slot) = schedule.next(None).unwrap() {
 			let base = *first.get_or_insert(u128::from(slot.pcr));
 			let expected = base + laid * TsPacket::SIZE as u128 * 8 * SYSTEM_CLOCK / u128::from(rate);
-			assert_eq!(u128::from(slot.pcr), expected, "slot {}", slot.index);
+			assert!(u128::from(slot.pcr).abs_diff(expected) <= 1, "slot {}", slot.index);
+			assert_eq!(u128::from(slot.pcr), rate_pcr(slot.index, rate), "slot {}", slot.index);
 			let grid = grid_pcr(slot.index);
 			let packet = TsPacket::SIZE as u128 * 8 * SYSTEM_CLOCK / u128::from(rate);
 			assert!(grid - u128::from(slot.pcr) < packet, "slot {} strays a packet off the grid", slot.index);

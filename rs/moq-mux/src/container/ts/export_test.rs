@@ -5685,10 +5685,15 @@ async fn export_reordered(
 	pps: &'static [u8],
 	pyramid: &'static [u64],
 	jitter: Option<(u64, Duration)>,
+	rate: Option<u64>,
 ) -> (Vec<Frame>, Vec<Frame>) {
 	let delay = Duration::from_millis(500);
 	let mut rig = Reordered::new(sps, pps, pyramid);
-	let mut a = rig.export(delay).await;
+	let padded = |export: Export| match rate {
+		Some(rate) => export.with_mux_rate(rate),
+		None => export,
+	};
+	let mut a = padded(rig.export(delay).await);
 	let start = tokio::time::Instant::now();
 	let mut b = None;
 	let (mut out_a, mut out_b) = (Vec::new(), Vec::new());
@@ -5707,7 +5712,7 @@ async fn export_reordered(
 			out_b.extend(poll_frames(b));
 		}
 		if tick + 1 == JOIN {
-			b = Some(Export::new(rig.source.clone()).await.unwrap().with_delay(delay));
+			b = Some(padded(Export::new(rig.source.clone()).await.unwrap().with_delay(delay)));
 		}
 	}
 	rig.finish();
@@ -5865,6 +5870,18 @@ async fn reordered_video_loses_nothing_on_a_clean_path() {
 	assert_on_time(&out);
 }
 
+/// Two exporters of a broadcast padded to a multiplex rate, one joining a second late, lay the
+/// same packets once the joiner's first group is out: how many packets a slot carries, the PCR
+/// it opens with and which units ride it are functions of the media, not of when either
+/// started. The continuity counter is the one exception ([`assert_only_continuity_differs`]).
+#[tokio::test(start_paused = true)]
+async fn late_join_at_a_rate_matches_a_running_exporter() {
+	let (runner, joiner) = export_reordered(SPS, PPS, &[], None, Some(2_000_000)).await;
+	let keyframes: Vec<Timestamp> = joiner.iter().filter(|f| f.keyframe).map(|f| f.timestamp).collect();
+	assert!(keyframes.len() > 2, "too few keyframes to judge: {keyframes:?}");
+	assert_only_continuity_differs(&runner, &joiner, keyframes[1]);
+}
+
 /// With nothing declared, the reorder delay grows to the deepest reordering muxed so far. This
 /// is the one path where it depends on when an exporter joined: a joiner that has muxed only
 /// shallow groups runs a shallower clock than a runner that saw a deep one before the join,
@@ -5873,7 +5890,7 @@ async fn reordered_video_loses_nothing_on_a_clean_path() {
 async fn undeclared_reorder_converges_after_its_deepest_reorder() {
 	// The runner sees a pyramid in group 2; the joiner, arriving at group 5, first in group 7.
 	// Group 9 repeats it on the settled delay.
-	let (runner, joiner) = export_reordered(SPS, PPS, &[2, 7, 9], None).await;
+	let (runner, joiner) = export_reordered(SPS, PPS, &[2, 7, 9], None, None).await;
 	let keyframes: Vec<Timestamp> = joiner.iter().filter(|f| f.keyframe).map(|f| f.timestamp).collect();
 	let deepest = reordered_at(8 * GOP);
 	assert!(
@@ -5901,7 +5918,7 @@ async fn undeclared_reorder_converges_after_its_deepest_reorder() {
 #[tokio::test(start_paused = true)]
 async fn jitter_published_after_the_tables_keeps_the_encoders_clock() {
 	let jitter = Duration::from_millis(80);
-	let (runner, joiner) = export_reordered(SPS, PPS, &[], Some((2 * GOP, jitter))).await;
+	let (runner, joiner) = export_reordered(SPS, PPS, &[], Some((2 * GOP, jitter)), None).await;
 	let keyframes: Vec<Timestamp> = joiner.iter().filter(|f| f.keyframe).map(|f| f.timestamp).collect();
 	assert_only_continuity_differs(&runner, &joiner, keyframes[1]);
 
