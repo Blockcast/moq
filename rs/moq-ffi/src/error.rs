@@ -271,6 +271,10 @@ pub enum MoqError {
 
 	#[error("log: {0}")]
 	Log(String),
+
+	/// A configuration record held a value the constructor cannot use.
+	#[error("config: {0}")]
+	Config(String),
 }
 
 impl From<moq_net::Error> for MoqError {

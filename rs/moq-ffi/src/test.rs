@@ -1,7 +1,7 @@
 use super::origin::*;
 use super::producer::*;
-use super::server::MoqServer;
-use super::session::{MoqClient, MoqSession};
+use super::server::{MoqServer, MoqServerConfig, MoqServerTls};
+use super::session::{MoqClient, MoqClientConfig, MoqClientTls, MoqSession};
 use crate::consumer::MoqBroadcastConsumer;
 use crate::consumer::MoqFetchGroupOptions;
 use crate::consumer::MoqSubscription;
@@ -61,6 +61,32 @@ where
 		.await
 		.expect("timed out waiting for the FFI runtime to poll the read");
 	handle
+}
+
+/// Trust any certificate, for dialing a server with a generated one.
+fn insecure_tls() -> MoqClientTls {
+	MoqClientTls {
+		insecure: true,
+		..Default::default()
+	}
+}
+
+/// A self-signed identity for `localhost`.
+fn localhost_tls() -> MoqServerTls {
+	MoqServerTls {
+		generate: vec!["localhost".into()],
+		..Default::default()
+	}
+}
+
+/// Retry pacing fast enough for a test, retrying forever.
+fn fast_backoff() -> MoqBackoff {
+	MoqBackoff {
+		initial_us: Some(50_000),
+		multiplier: Some(2),
+		max_us: Some(200_000),
+		timeout_us: Some(0),
+	}
 }
 
 async fn wait_for_config_error(
@@ -375,16 +401,17 @@ fn publish_media_lifecycle() {
 async fn raw_track_activity() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("status".into(), None).unwrap();
-	assert_eq!(track.name().unwrap(), "status");
+	let demand = track.demand().unwrap();
+	assert_eq!(demand.name(), "status");
 
 	let consumer = track.consume(None).unwrap();
-	tokio::time::timeout(TIMEOUT, track.used())
+	tokio::time::timeout(TIMEOUT, demand.used())
 		.await
 		.expect("timed out waiting for raw track to become used")
 		.unwrap();
 
 	drop(consumer);
-	tokio::time::timeout(TIMEOUT, track.unused())
+	tokio::time::timeout(TIMEOUT, demand.unused())
 		.await
 		.expect("timed out waiting for raw track to become unused")
 		.unwrap();
@@ -639,7 +666,7 @@ async fn json_snapshot_roundtrip() {
 	let track = broadcast.publish_track("meta".into(), None).unwrap();
 	let producer = MoqJsonSnapshotProducer::new(&broadcast, &track, config.clone()).unwrap();
 	assert!(
-		matches!(track.name(), Err(MoqError::Closed)),
+		matches!(track.demand(), Err(MoqError::Closed)),
 		"the producer takes over the track"
 	);
 	let consumer = MoqJsonSnapshotConsumer::new(&*subscribe(&broadcast, "meta").await, config).unwrap();
@@ -3261,8 +3288,9 @@ async fn raw_read_frame_terminal_cancel_releases_demand() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("status".into(), None).unwrap();
 	let consumer = track.consume(None).unwrap();
+	let demand = track.demand().unwrap();
 
-	tokio::time::timeout(TIMEOUT, track.used())
+	tokio::time::timeout(TIMEOUT, demand.used())
 		.await
 		.expect("timed out waiting for the subscriber")
 		.unwrap();
@@ -3286,7 +3314,7 @@ async fn raw_read_frame_terminal_cancel_releases_demand() {
 		Ok(None) => panic!("cancelled read returned EOF"),
 	}
 
-	tokio::time::timeout(TIMEOUT, track.unused())
+	tokio::time::timeout(TIMEOUT, demand.unused())
 		.await
 		.expect("timed out waiting for demand to drop")
 		.unwrap();
@@ -3371,9 +3399,12 @@ fn without_runtime() {
 		assert_eq!(announcement.prefix, "test");
 		let _bc = pollster::block_on(consumer.request_broadcast("test".into())).unwrap();
 
-		let client = MoqClient::new();
-		client.set_tls_verify(false).unwrap();
-		client.set_consume(Some(origin)).unwrap();
+		let client = MoqClient::new(MoqClientConfig {
+			tls: insecure_tls(),
+			consume: Some(origin),
+			..Default::default()
+		})
+		.unwrap();
 
 		announced.cancel();
 		client.cancel();
@@ -3392,10 +3423,13 @@ fn without_runtime() {
 async fn server_client_roundtrip() {
 	// Server side: bind, set a publish origin, accept incoming sessions.
 	let server_origin = MoqOriginProducer::new(MoqOriginConfig::default());
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
-	server.set_publish(Some(server_origin.clone())).unwrap();
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		publish: Some(server_origin.clone()),
+		..Default::default()
+	})
+	.unwrap();
 
 	let addr = tokio::time::timeout(TIMEOUT, server.listen())
 		.await
@@ -3417,10 +3451,13 @@ async fn server_client_roundtrip() {
 
 	// Client side: connect, subscribe via a consume origin.
 	let client_origin = MoqOriginProducer::new(MoqOriginConfig::default());
-	let client = MoqClient::new();
-	client.set_tls_verify(false).unwrap();
-	client.set_bind("127.0.0.1:0".into()).unwrap();
-	client.set_consume(Some(client_origin.clone())).unwrap();
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		bind: Some("127.0.0.1:0".into()),
+		consume: Some(client_origin.clone()),
+		..Default::default()
+	})
+	.unwrap();
 	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("connect timed out")
@@ -3487,10 +3524,13 @@ async fn server_client_roundtrip_auto_origin() {
 	// `set_publish` / `set_consume`: the auto-created origin sides on
 	// `MoqClientSession` are what drive publishing and subscribing.
 	let server_origin = MoqOriginProducer::new(MoqOriginConfig::default());
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
-	server.set_publish(Some(server_origin.clone())).unwrap();
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		publish: Some(server_origin.clone()),
+		..Default::default()
+	})
+	.unwrap();
 
 	let addr = tokio::time::timeout(TIMEOUT, server.listen())
 		.await
@@ -3509,9 +3549,12 @@ async fn server_client_roundtrip_auto_origin() {
 	});
 
 	// No set_publish / set_consume, so this uses the auto-origin path.
-	let client = MoqClient::new();
-	client.set_tls_verify(false).unwrap();
-	client.set_bind("127.0.0.1:0".into()).unwrap();
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		bind: Some("127.0.0.1:0".into()),
+		..Default::default()
+	})
+	.unwrap();
 	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("connect timed out")
@@ -3553,26 +3596,34 @@ async fn server_client_roundtrip_auto_origin() {
 }
 
 #[tokio::test]
-async fn server_set_bind_validates() {
-	let server = MoqServer::new();
-	assert!(server.set_bind("127.0.0.1:0".into()).is_ok());
-	assert!(server.set_bind("[::]:443".into()).is_ok());
-	assert!(server.set_bind("localhost:4443".into()).is_ok());
-	assert!(matches!(
-		server.set_bind("localhost:443:8443".into()),
-		Err(crate::error::MoqError::Bind(_))
-	));
-	assert!(matches!(
-		server.set_bind("not-an-address".into()),
-		Err(crate::error::MoqError::Bind(_))
-	));
+async fn server_new_validates_the_config() {
+	let server = |bind: &str| {
+		MoqServer::new(MoqServerConfig {
+			bind: Some(bind.into()),
+			..Default::default()
+		})
+	};
+	assert!(server("127.0.0.1:0").is_ok());
+	assert!(server("[::]:443").is_ok());
+	assert!(server("localhost:4443").is_ok());
+	assert!(matches!(server("localhost:443:8443"), Err(MoqError::Config(_))));
+	assert!(matches!(server("not-an-address"), Err(MoqError::Config(_))));
+
+	let version = MoqServer::new(MoqServerConfig {
+		versions: vec!["moq-lite-99".into()],
+		..Default::default()
+	});
+	assert!(matches!(version, Err(MoqError::Config(_))));
 }
 
 #[tokio::test]
 async fn server_cert_fingerprints_available_after_listen() {
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
 
 	// Not available before listen().
 	assert!(matches!(
@@ -3594,9 +3645,12 @@ async fn server_cert_fingerprints_available_after_listen() {
 
 #[tokio::test]
 async fn server_cert_fingerprints_rejected_after_cancel() {
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
 
 	tokio::time::timeout(TIMEOUT, server.listen())
 		.await
@@ -3618,15 +3672,18 @@ async fn server_cert_fingerprints_rejected_after_cancel() {
 /// cancel has to unwind an in-flight run rather than an idle state.
 #[tokio::test]
 async fn server_cancel_releases_the_bound_port() {
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
 	let addr = server.listen().await.expect("listen failed");
 
 	// Park an accept on the server lock, the state a live server is closed in.
 	let accepting = server.clone();
 	let accept = tokio::spawn(async move { accepting.accept().await });
-	wait_for_config_error(|| server.set_publish(None), |err| matches!(err, MoqError::Busy)).await;
+	wait_for_config_error(|| server.cert_fingerprints().map(drop), |err| matches!(err, MoqError::Busy)).await;
 
 	server.cancel();
 
@@ -3636,9 +3693,12 @@ async fn server_cancel_releases_the_bound_port() {
 	std::net::UdpSocket::bind(&addr).expect("cancel should release the socket before it returns");
 
 	// No retry: the socket is already closed, so this must succeed on the first try.
-	let rebound = MoqServer::new();
-	rebound.set_bind(addr.clone()).unwrap();
-	rebound.set_tls_generate(vec!["localhost".into()]).unwrap();
+	let rebound = MoqServer::new(MoqServerConfig {
+		bind: Some(addr.clone()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
 	rebound.listen().await.expect("the port should rebind immediately");
 
 	let accept = tokio::time::timeout(TIMEOUT, accept)
@@ -3654,9 +3714,12 @@ async fn server_cancel_releases_the_bound_port() {
 async fn request_double_respond_returns_already_responded() {
 	use crate::error::MoqError;
 
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
 	let addr = server.listen().await.expect("listen failed");
 
 	let url = format!("https://{addr}");
@@ -3683,9 +3746,12 @@ async fn request_double_respond_returns_already_responded() {
 		session
 	});
 
-	let client = MoqClient::new();
-	client.set_tls_verify(false).unwrap();
-	client.set_bind("127.0.0.1:0".into()).unwrap();
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		bind: Some("127.0.0.1:0".into()),
+		..Default::default()
+	})
+	.unwrap();
 	let _session = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("connect timed out")
@@ -3703,9 +3769,12 @@ async fn request_double_respond_returns_already_responded() {
 #[tokio::test]
 async fn request_per_session_publish_override() {
 	// The server's publish origin is empty; a per-request override is used instead.
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
 
 	let addr = server.listen().await.expect("listen failed");
 	let url = format!("https://{addr}");
@@ -3726,10 +3795,13 @@ async fn request_per_session_publish_override() {
 	});
 
 	let client_origin = MoqOriginProducer::new(MoqOriginConfig::default());
-	let client = MoqClient::new();
-	client.set_tls_verify(false).unwrap();
-	client.set_bind("127.0.0.1:0".into()).unwrap();
-	client.set_consume(Some(client_origin.clone())).unwrap();
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		bind: Some("127.0.0.1:0".into()),
+		consume: Some(client_origin.clone()),
+		..Default::default()
+	})
+	.unwrap();
 	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("connect timed out")
@@ -3761,10 +3833,13 @@ async fn request_per_session_publish_override() {
 #[tokio::test]
 async fn client_reconnects_and_resumes_announcements() {
 	let server_origin = MoqOriginProducer::new(MoqOriginConfig::default());
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
-	server.set_publish(Some(server_origin.clone())).unwrap();
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		publish: Some(server_origin.clone()),
+		..Default::default()
+	})
+	.unwrap();
 
 	let addr = tokio::time::timeout(TIMEOUT, server.listen())
 		.await
@@ -3800,19 +3875,15 @@ async fn client_reconnects_and_resumes_announcements() {
 	});
 
 	let client_origin = MoqOriginProducer::new(MoqOriginConfig::default());
-	let client = MoqClient::new();
-	client.set_tls_verify(false).unwrap();
-	client.set_bind("127.0.0.1:0".into()).unwrap();
-	client.set_consume(Some(client_origin.clone())).unwrap();
-	// Fast retries so the test doesn't wait out the default 1s backoff.
-	client
-		.set_backoff(MoqBackoff {
-			initial_us: 50_000,
-			multiplier: 2,
-			max_us: 200_000,
-			timeout_us: 0,
-		})
-		.unwrap();
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		bind: Some("127.0.0.1:0".into()),
+		consume: Some(client_origin.clone()),
+		// Fast retries so the test doesn't wait out the default 1s backoff.
+		backoff: fast_backoff(),
+		..Default::default()
+	})
+	.unwrap();
 
 	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
@@ -3882,9 +3953,12 @@ async fn client_reconnects_and_resumes_announcements() {
 /// the session, surfacing through `closed()` instead of a redial.
 #[tokio::test]
 async fn one_shot_client_close_surfaces_through_closed() {
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
 
 	let addr = tokio::time::timeout(TIMEOUT, server.listen())
 		.await
@@ -3902,10 +3976,13 @@ async fn one_shot_client_close_surfaces_through_closed() {
 		request.accept().await.expect("handshake failed")
 	});
 
-	let client = MoqClient::new();
-	client.set_tls_verify(false).unwrap();
-	client.set_bind("127.0.0.1:0".into()).unwrap();
-	client.set_reconnect(false).unwrap();
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		bind: Some("127.0.0.1:0".into()),
+		once: true,
+		..Default::default()
+	})
+	.unwrap();
 
 	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
@@ -3932,9 +4009,12 @@ async fn one_shot_client_close_surfaces_through_closed() {
 /// test_server_request_close, which drives the same path through the bindings.
 #[tokio::test]
 async fn rejected_session_surfaces_through_closed() {
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
 
 	let addr = tokio::time::timeout(TIMEOUT, server.listen())
 		.await
@@ -3952,10 +4032,13 @@ async fn rejected_session_surfaces_through_closed() {
 		}
 	});
 
-	let client = MoqClient::new();
-	client.set_tls_verify(false).unwrap();
-	client.set_bind("127.0.0.1:0".into()).unwrap();
-	client.set_reconnect(false).unwrap();
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		bind: Some("127.0.0.1:0".into()),
+		once: true,
+		..Default::default()
+	})
+	.unwrap();
 
 	// Either the dial fails outright, or the optimistic connect resolves and the
 	// rejection lands as the session's terminal close. Both must surface within
@@ -3978,8 +4061,11 @@ async fn rejected_session_surfaces_through_closed() {
 /// loop or not; the kt BindingsSmokeTest relies on this to fail fast.
 #[tokio::test]
 async fn cancel_before_connect_fails_fast() {
-	let client = MoqClient::new();
-	client.set_tls_verify(false).unwrap();
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		..Default::default()
+	})
+	.unwrap();
 	client.cancel();
 	let result = tokio::time::timeout(
 		Duration::from_secs(5),
@@ -4001,9 +4087,12 @@ async fn cancel_before_connect_fails_fast() {
 /// `recv_datagram`) sits on that path; `status` is just the easiest to drive.
 #[tokio::test]
 async fn cancelled_status_does_not_swallow_the_next_transition() {
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
 
 	let addr = tokio::time::timeout(TIMEOUT, server.listen())
 		.await
@@ -4023,17 +4112,13 @@ async fn cancelled_status_does_not_swallow_the_next_transition() {
 		request.accept().await.expect("handshake failed")
 	});
 
-	let client = MoqClient::new();
-	client.set_tls_verify(false).unwrap();
-	client.set_bind("127.0.0.1:0".into()).unwrap();
-	client
-		.set_backoff(MoqBackoff {
-			initial_us: 50_000,
-			multiplier: 2,
-			max_us: 200_000,
-			timeout_us: 0,
-		})
-		.unwrap();
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		bind: Some("127.0.0.1:0".into()),
+		backoff: fast_backoff(),
+		..Default::default()
+	})
+	.unwrap();
 
 	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
@@ -4217,9 +4302,12 @@ async fn set_bitrate_caps_a_later_bandwidth_grant() {
 }
 
 async fn one_shot_peers() -> (Arc<MoqSession>, Arc<MoqSession>, Arc<MoqServer>) {
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
 	let addr = tokio::time::timeout(TIMEOUT, server.listen())
 		.await
 		.expect("listen timed out")
@@ -4236,10 +4324,13 @@ async fn one_shot_peers() -> (Arc<MoqSession>, Arc<MoqSession>, Arc<MoqServer>) 
 		request.accept().await.expect("handshake failed")
 	});
 
-	let client = MoqClient::new();
-	client.set_tls_verify(false).unwrap();
-	client.set_bind("127.0.0.1:0".into()).unwrap();
-	client.set_reconnect(false).unwrap();
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		bind: Some("127.0.0.1:0".into()),
+		once: true,
+		..Default::default()
+	})
+	.unwrap();
 	let client_session = tokio::time::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("connect timed out")
@@ -4284,33 +4375,29 @@ async fn session_protocol_codes_cross_the_ffi() {
 		server.cancel();
 	}
 }
-
 #[tokio::test]
-async fn client_setters_busy_during_connect_and_cancelled_after() {
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+async fn client_cancel_aborts_a_pending_connect() {
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
 	let addr = server.listen().await.expect("listen failed");
 
-	let client = MoqClient::new();
-	client.set_tls_verify(false).unwrap();
-	client.set_bind("127.0.0.1:0".into()).unwrap();
-	client.set_reconnect(false).unwrap();
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		bind: Some("127.0.0.1:0".into()),
+		once: true,
+		..Default::default()
+	})
+	.unwrap();
 
-	// The server never accepts, so connect holds the client lock in established().
+	// The server never accepts, so connect parks in established().
 	let connecting = client.clone();
-	let connect = tokio::spawn(async move { connecting.connect(format!("https://{addr}")).await });
-
-	assert!(matches!(
-		wait_for_config_error(|| client.set_tls_verify(false), |err| matches!(err, MoqError::Busy)).await,
-		MoqError::Busy
-	));
-	assert!(matches!(client.set_publish(None), Err(MoqError::Busy)));
-	assert!(matches!(client.set_bind("127.0.0.1:0".into()), Err(MoqError::Busy)));
+	let connect = spawn_parked(async move { connecting.connect(format!("https://{addr}")).await }).await;
 
 	client.cancel();
-	assert!(matches!(client.set_tls_verify(true), Err(MoqError::Cancelled)));
-	assert!(matches!(client.set_publish(None), Err(MoqError::Cancelled)));
 
 	let connect_err = tokio::time::timeout(TIMEOUT, connect)
 		.await
@@ -4321,84 +4408,26 @@ async fn client_setters_busy_during_connect_and_cancelled_after() {
 }
 
 #[tokio::test]
-async fn client_setters_apply_after_connect_returns() {
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
-	let addr = server.listen().await.expect("listen failed");
-
-	let accept_server = server.clone();
-	let accept = tokio::spawn(async move {
-		let request = accept_server
-			.accept()
-			.await
-			.expect("accept errored")
-			.expect("accept returned None");
-		request.accept().await.expect("handshake failed")
-	});
-
-	let client = MoqClient::new();
-	client.set_tls_verify(false).unwrap();
-	client.set_bind("127.0.0.1:0".into()).unwrap();
-	let session = tokio::time::timeout(TIMEOUT, client.connect(format!("https://{addr}")))
-		.await
-		.expect("connect timed out")
-		.expect("connect failed");
-
-	// A finished connect releases the lock; later setters apply to the next dial.
-	client.set_quic_max_streams(2048).unwrap();
-	client.set_reconnect(false).unwrap();
-
-	let server_session = tokio::time::timeout(TIMEOUT, accept)
-		.await
-		.expect("accept timed out")
-		.expect("accept task panicked");
-	session.shutdown();
-	server_session.cancel(0);
-	server.cancel();
-}
-
-#[tokio::test]
-async fn server_setters_busy_during_accept_cancelled_after_and_frozen_after_listen() {
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+async fn server_cert_fingerprints_busy_during_accept_and_cancelled_after() {
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
 	server.listen().await.expect("listen failed");
-
-	assert!(matches!(server.set_bind("127.0.0.1:1".into()), Err(MoqError::Bind(_))));
-	assert!(matches!(
-		server.set_tls_generate(vec!["other".into()]),
-		Err(MoqError::Bind(_))
-	));
-	assert!(matches!(
-		server.set_tls_cert(vec!["cert.pem".into()]),
-		Err(MoqError::Bind(_))
-	));
-	assert!(matches!(
-		server.set_tls_key(vec!["key.pem".into()]),
-		Err(MoqError::Bind(_))
-	));
-
-	// Origins are captured at accept, so they still apply between accepts.
-	server.set_publish(None).unwrap();
-	server.set_consume(None).unwrap();
+	server.cert_fingerprints().expect("fingerprints available between accepts");
 
 	let accepting = server.clone();
 	let accept = tokio::spawn(async move { accepting.accept().await });
 
-	assert!(matches!(
-		wait_for_config_error(|| server.set_publish(None), |err| matches!(err, MoqError::Busy)).await,
-		MoqError::Busy
-	));
-	assert!(matches!(server.set_consume(None), Err(MoqError::Busy)));
-	assert!(matches!(server.cert_fingerprints(), Err(MoqError::Busy)));
+	wait_for_config_error(
+		|| server.cert_fingerprints().map(drop),
+		|err| matches!(err, MoqError::Busy),
+	)
+	.await;
 
 	server.cancel();
-	assert!(matches!(server.set_publish(None), Err(MoqError::Cancelled)));
-	assert!(matches!(
-		server.set_bind("127.0.0.1:0".into()),
-		Err(MoqError::Cancelled)
-	));
 	assert!(matches!(server.cert_fingerprints(), Err(MoqError::Cancelled)));
 
 	let accept_err = tokio::time::timeout(TIMEOUT, accept)
@@ -4410,15 +4439,21 @@ async fn server_setters_busy_during_accept_cancelled_after_and_frozen_after_list
 
 #[tokio::test]
 async fn request_origin_setters_apply_or_error() {
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
 	let addr = server.listen().await.expect("listen failed");
 
-	let client = MoqClient::new();
-	client.set_tls_verify(false).unwrap();
-	client.set_bind("127.0.0.1:0".into()).unwrap();
-	client.set_reconnect(false).unwrap();
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		bind: Some("127.0.0.1:0".into()),
+		once: true,
+		..Default::default()
+	})
+	.unwrap();
 
 	let connecting = client.clone();
 	let connect = tokio::spawn(async move { connecting.connect(format!("https://{addr}")).await });
@@ -4477,15 +4512,21 @@ async fn request_origin_setters_apply_or_error() {
 
 #[tokio::test]
 async fn request_origin_setters_cancelled_after_cancel() {
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		..Default::default()
+	})
+	.unwrap();
 	let addr = server.listen().await.expect("listen failed");
 
-	let client = MoqClient::new();
-	client.set_tls_verify(false).unwrap();
-	client.set_bind("127.0.0.1:0".into()).unwrap();
-	client.set_reconnect(false).unwrap();
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		bind: Some("127.0.0.1:0".into()),
+		once: true,
+		..Default::default()
+	})
+	.unwrap();
 
 	let connecting = client.clone();
 	let connect = tokio::spawn(async move { connecting.connect(format!("https://{addr}")).await });
@@ -4522,10 +4563,13 @@ async fn shutdown_cancels_and_drops_cleanly() {
 	}
 
 	let server_origin = MoqOriginProducer::new(MoqOriginConfig::default());
-	let server = MoqServer::new();
-	server.set_bind("127.0.0.1:0".into()).unwrap();
-	server.set_tls_generate(vec!["localhost".into()]).unwrap();
-	server.set_publish(Some(server_origin.clone())).unwrap();
+	let server = MoqServer::new(MoqServerConfig {
+		bind: Some("127.0.0.1:0".into()),
+		tls: localhost_tls(),
+		publish: Some(server_origin.clone()),
+		..Default::default()
+	})
+	.unwrap();
 	let addr = tokio::time::timeout(TIMEOUT, server.listen())
 		.await
 		.expect("listen timed out")
@@ -4538,9 +4582,12 @@ async fn shutdown_cancels_and_drops_cleanly() {
 	});
 
 	let client_origin = MoqOriginProducer::new(MoqOriginConfig::default());
-	let client = MoqClient::new();
-	client.set_tls_verify(false).unwrap();
-	client.set_consume(Some(client_origin.clone())).unwrap();
+	let client = MoqClient::new(MoqClientConfig {
+		tls: insecure_tls(),
+		consume: Some(client_origin.clone()),
+		..Default::default()
+	})
+	.unwrap();
 	let session = tokio::time::timeout(TIMEOUT, client.connect(format!("https://{addr}")))
 		.await
 		.expect("connect timed out")
@@ -4704,7 +4751,7 @@ async fn data_track_names_cannot_collide() {
 		MoqJsonStreamProducer::new(&broadcast, &track, MoqJsonStreamConfig { compression: false }).is_err(),
 		"a duplicate data track name should fail"
 	);
-	assert_eq!(track.name().unwrap(), "state");
+	assert_eq!(track.demand().unwrap().name(), "state");
 	assert_eq!(
 		published_catalog(&broadcast)
 			.json
