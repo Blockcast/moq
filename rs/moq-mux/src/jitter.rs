@@ -250,8 +250,14 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 	/// Queue a frame, or drop it if it cannot make its deadline. Fails once the source's clock
 	/// runs further off ours than the clock may follow.
 	pub fn push(&mut self, key: K, arrival: Arrival<T>) -> anyhow::Result<Push> {
-		let held = self.acquire.as_ref().is_some_and(|acquire| acquire.tracks.contains_key(&key));
-		let Some(clock) = self.clock.filter(|_| !held && !(self.released && self.jumps(&key, &arrival))) else {
+		let held = self
+			.acquire
+			.as_ref()
+			.is_some_and(|acquire| acquire.tracks.contains_key(&key));
+		let Some(clock) = self
+			.clock
+			.filter(|_| !held && !(self.released && self.jumps(&key, &arrival)))
+		else {
 			self.hold(key, arrival);
 			return Ok(Push::Queued);
 		};
@@ -272,7 +278,8 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		let deadline = self.deadline(&clock, arrival.decode);
 		let restarted = track.restart != arrival.restart
 			&& (track.generation == clock.generation || !self.lands(deadline, arrival.arrived));
-		let leapt = track.skip != arrival.skip && deadline.is_some_and(|deadline| deadline > self.bound(arrival.arrived));
+		let leapt =
+			track.skip != arrival.skip && deadline.is_some_and(|deadline| deadline > self.bound(arrival.arrived));
 		restarted || leapt
 	}
 
@@ -343,7 +350,10 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 	/// `acquiring`.
 	fn judge(&self, clock: &Clock, frame: &Arrival<T>, acquiring: bool) -> (Option<Instant>, bool) {
 		let deadline = self.deadline(clock, frame.decode);
-		(deadline, acquiring && deadline.is_none_or(|deadline| deadline < frame.read))
+		(
+			deadline,
+			acquiring && deadline.is_none_or(|deadline| deadline < frame.read),
+		)
 	}
 
 	/// Queue a frame on `generation` due at `deadline`, unless it is `stale` or cannot make it.
@@ -988,7 +998,11 @@ mod tests {
 			assert!(run.worst <= bound, "{ppm} ppm: held {} s off the delay", run.worst);
 			let drift = run.drift.expect("a measurement") * 1e6;
 			assert!((drift + ppm).abs() < 0.1, "{ppm} ppm: measured {drift} ppm");
-			assert!((run.clock * 1e6 - ppm).abs() < 0.5, "{ppm} ppm: the clock settled at {}", run.clock * 1e6);
+			assert!(
+				(run.clock * 1e6 - ppm).abs() < 0.5,
+				"{ppm} ppm: the clock settled at {}",
+				run.clock * 1e6
+			);
 			assert_eq!(run.out_of_tolerance, 0, "{ppm} ppm");
 		}
 	}
@@ -1005,9 +1019,15 @@ mod tests {
 		.await;
 		assert!(run.err.is_none(), "{:?}", run.err);
 		let (before, after) = (run.before.unwrap() * 1e6, run.drift.unwrap() * 1e6);
-		assert!((after - before).abs() < 0.01, "the estimate moved from {before} to {after} ppm");
+		assert!(
+			(after - before).abs() < 0.01,
+			"the estimate moved from {before} to {after} ppm"
+		);
 		let (before, after) = (run.clock_before * 1e6, run.clock * 1e6);
-		assert!((after - before).abs() < 0.01, "the clock moved from {before} to {after} ppm");
+		assert!(
+			(after - before).abs() < 0.01,
+			"the clock moved from {before} to {after} ppm"
+		);
 	}
 
 	/// A source further off than the clock may follow is counted, and fails once it has used

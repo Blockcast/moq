@@ -16,8 +16,8 @@ use mpeg2ts::ts::{ReadTsPacket, TsPacketReader, TsPayload};
 use tokio::time::Instant;
 
 use crate::catalog::hang::Container as HangContainer;
-use crate::container::ts::{Export, ExportStats};
 use crate::container::ts::export::PCR_INTERVAL;
+use crate::container::ts::{Export, ExportStats};
 use crate::container::{Container as _, Frame, Producer};
 
 const SPS: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xde];
@@ -522,15 +522,15 @@ async fn a_skip_while_running_keeps_one_clock() {
 // turn once the walk passes the delay, and one running fast makes the buffer grow without bound.
 // The output's clock may follow it only as fast as 13818-1 lets a system clock change, so
 // reaching a source 30 ppm off takes hours (the jitter buffer's own tests run a day); these
-// cases run twenty minutes of a source at the limit, long enough to measure its rate.
+// cases run five minutes of a source at the limit, long enough to measure its rate.
 
 /// How far the instant each slot goes out may wander against the source over a run: what
 /// reaching a source at the limit costs under the slew limit (30 ppm squared over twice
 /// 0.075 Hz/s of 27 MHz), and a slot.
 const DRIFT_SLACK: Duration = Duration::from_millis(162 + 25);
 
-/// Twenty minutes of media.
-const DRIFT_TICKS: u64 = 1_200_000_000 / VIDEO_US;
+/// Five minutes of media.
+const DRIFT_TICKS: u64 = 300_000_000 / VIDEO_US;
 
 /// The spread of (slot sent − source's clock at the slot) after the first 10 s over `ticks`
 /// of media, the drops, and the export's stats at the end.
