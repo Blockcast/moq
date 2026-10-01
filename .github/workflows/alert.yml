@@ -32,7 +32,7 @@ on:
       - Cachix
       - Docker
       - Interop
-      - libmoq
+      - moq-c
       - moq-cli
       - moq-gst
       - moq-relay

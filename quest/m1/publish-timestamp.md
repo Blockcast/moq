@@ -5,7 +5,7 @@
 Every publish API takes a timestamp, and nothing below it invents one. A
 frame's timestamp is the publisher's statement of when the content happened.
 A library never fills in "now" on the caller's behalf. Covers moq-net,
-moq-json, moq-binary, moq-mux, moq-ffi, and every binding wrapper (Python,
+moq-json, moq-flate, moq-mux, moq-ffi, and every binding wrapper (Python,
 Swift, Kotlin, Go, Dart). Not libmoq, which the
 [Generated C bindings](/quest/m1/c/README.md) replace.
 
@@ -13,15 +13,15 @@ Swift, Kotlin, Go, Dart). Not libmoq, which the
 
 Decided (2026-09-30): the wire timestamp stays required, so the publish side
 must be too. Today `Timed.at: None` means "stamp when written": moq-json and
-moq-binary fill `Timestamp::now()` (moq-net's clock, not the broadcast's), and
+moq-flate fill `Timestamp::now()` (moq-net's clock, not the broadcast's), and
 moq-mux's `Clock::stamp` fills the broadcast clock's `now()`. The FFI raw
 `MoqFrame.timestamp_us` and `MoqDatagram.timestamp_us` default to 0.
 
 - `moq_net::Timed<P, T>` keeps its name and gets a required `at: T`, with no
-  `From<bare payload>`. The json/binary consumers return the same type (see
+  `From<bare payload>`. The json/flate consumers return the same type (see
   [Data consumer timestamps](/quest/m1/data-consumer-timestamps.md)).
 - moq-json (snapshot, stream, and window, whose `push` always stamps now) and
-  moq-binary producers take `Timed<_, Timestamp>`. The moq-mux data producers
+  moq-flate producers take `Timed<_, Timestamp>`. The moq-mux data producers
   take `Timed<_, Instant>` and map it onto the broadcast clock, refusing one
   ahead of now (`Error::InvalidCapture`), as today; `Clock::stamp` stops
   filling `None`. `catalog::data::Listing::record` then always has a capture
@@ -35,15 +35,16 @@ moq-mux's `Clock::stamp` fills the broadcast clock's `now()`. The FFI raw
   device or process clock out, as the Rust `Instant` mapping does. Either map
   the timestamp back through the clock inside moq-ffi or give the clock a
   typed timestamp moq-mux accepts; keep a raw `Timestamp` from compiling
-  there. The json/binary `update` and `append` take it as a required
+  there. The json/flate `update` and `append` take it as a required
   argument, and the raw frame and datagram records lose their `default = 0`.
 - Go (`go/wrapper/moq`) and Python (`py/moq-rs`) wrap only the JSON
   producers; [#4137](https://github.com/moq-dev/moq/pull/4137) added
-  `publish_binary_snapshot` / `publish_binary_stream` to moq-ffi without
-  them. Add hand-written binary wrappers there. The maintainer asked for this.
+  `publish_binary_snapshot` / `publish_binary_stream` (now
+  `publish_flate_*`) to moq-ffi without them. Add hand-written flate wrappers
+  there. The maintainer asked for this.
   Each wrapper gets a test that a past capture time is accepted and a future
   one refused.
-- Docs: "stamped when written" in `doc/lib/rs/{moq-json,moq-binary}.md` and
+- Docs: "stamped when written" in `doc/lib/rs/{moq-json,moq-flate}.md` and
   `rs/moq-net/src/model/timed.rs`, plus `doc/lib/{py,swift,kt,go,dart}`.
 
 What a receiver fills in when a peer sends no timestamp is out of scope:

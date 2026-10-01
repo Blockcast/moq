@@ -454,7 +454,7 @@
             moq-relay
             moq-bench
             moq-boy
-            libmoq
+            moq-c
             moq-gst
             ;
 

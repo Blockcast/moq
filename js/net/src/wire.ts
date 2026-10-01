@@ -7,7 +7,7 @@
  *
  * @module
  */
-import type { Dispose, Getter } from "@moq/signals";
+import type { Dispose, GetPromise, Getter } from "@moq/signals";
 import type * as broadcast from "./broadcast.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import type { Route } from "./hop.ts";
@@ -35,8 +35,13 @@ export interface OriginProducer {
 	): origin.Dynamic;
 	attach(discovery: boolean): Dispose;
 	expect(): Dispose;
+	/**
+	 * Hold the live marker of announcement streams opened now that overlap `prefix`, until the
+	 * peer's initial set under it lands.
+	 */
+	replaying(prefix: Path.Valid): Dispose;
 	readonly requests: Getter<ReadonlyMap<Path.Valid, origin.RequestSlot> | undefined>;
-	changed(): Promise<unknown>;
+	changed(): GetPromise<unknown>;
 	answer(path: Path.Valid, front: broadcast.Consumer): Dispose | undefined;
 	routes(path: Path.Valid): boolean;
 }
