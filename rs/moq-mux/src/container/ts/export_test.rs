@@ -1034,6 +1034,93 @@ async fn export_pcr_backfills_a_coarse_cadence() {
 	}
 }
 
+/// AC-3 passed through as DVB private data (stream_type 0x06 with the AC-3 descriptor) can
+/// carry several sync frames in one PES, more than a receiver's 5,696-byte buffer holds at
+/// once. The export splits it a frame a PES, each presented a frame after the last, so each
+/// is due and decoded on its own.
+#[tokio::test(start_paused = true)]
+async fn export_splits_a_multi_frame_ac3_pes() {
+	const AC3_PID: u16 = 0x104;
+	// A 32 kb/s 48 kHz 2/0 sync frame: 128 bytes, 1,536 samples (32 ms).
+	let mut sync = vec![0x0b, 0x77, 0x00, 0x00, 0x00, 0x40, 0x40];
+	sync.resize(128, 0x00);
+
+	let data = include_bytes!("test_data/bbb.ts");
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(
+		&mut broadcast,
+		crate::catalog::Config::default().with_catalog(crate::catalog::hang::Catalog::<tscat::Ext>::default()),
+	)
+	.unwrap();
+	let ac3_track = broadcast
+		.unique_track(".ac3", hang::container::track_info(hang::catalog::PRIORITY.audio))
+		.unwrap();
+	{
+		let mut track = tscat::Track::new(AC3_PID);
+		track.verbatim = Some(tscat::Verbatim::new(0x06, tscat::Framing::Pes));
+		track.descriptors = vec![tscat::Descriptor {
+			tag: 0x6a,
+			data: Bytes::from_static(&[0x00]),
+		}];
+		catalog
+			.modify()
+			.unwrap()
+			.ext
+			.mpegts
+			.tracks
+			.insert(ac3_track.name().to_string(), track);
+	}
+	let mut ac3 = Producer::new(ac3_track, HangContainer::Legacy(crate::container::Kind::Data));
+	// Just after bbb's first keyframe at 1.4 s, so it survives the tune-in alignment.
+	ac3.write(Frame {
+		timestamp: Timestamp::from_millis(1_410).unwrap(),
+		duration: None,
+		payload: Bytes::from(sync.repeat(3)),
+		keyframe: true,
+	})
+	.unwrap();
+	ac3.cut(None).unwrap();
+	ac3.finish().unwrap();
+
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
+	import.decode(&BytesMut::from(&data[..])).unwrap();
+	import.finish().unwrap();
+	let ts = drain_with(
+		Export::with_ts(crate::source::announced(&consumer), crate::catalog::CatalogFormat::Hang)
+			.await
+			.unwrap(),
+	)
+	.await;
+
+	// The PTS of every PES on the AC-3 PID, and how many bytes each carries.
+	let mut pes: Vec<(u64, usize)> = Vec::new();
+	for packet in ts.as_chunks::<188>().0 {
+		let pid = (u16::from(packet[1] & 0x1f) << 8) | u16::from(packet[2]);
+		if pid != AC3_PID || packet[3] & 0x10 == 0 {
+			continue;
+		}
+		let start = 4 + if packet[3] & 0x20 != 0 { usize::from(packet[4]) + 1 } else { 0 };
+		let body = &packet[start..];
+		if packet[1] & 0x40 != 0 {
+			let b = &body[9..14];
+			let pts = u64::from((b[0] >> 1) & 7) << 30
+				| u64::from(b[1]) << 22
+				| u64::from(b[2] >> 1) << 15
+				| u64::from(b[3]) << 7
+				| u64::from(b[4] >> 1);
+			pes.push((pts, body.len() - 9 - usize::from(body[8])));
+		} else if let Some(last) = pes.last_mut() {
+			last.1 += body.len();
+		}
+	}
+	assert_eq!(pes.len(), 3, "one PES a sync frame: {pes:?}");
+	for (k, &(pts, bytes)) in pes.iter().enumerate() {
+		assert_eq!(bytes, 128, "frame {k} carries one sync frame");
+		assert_eq!(pts, pes[0].0 + k as u64 * 2_880, "frame {k} is presented 32 ms after the last");
+	}
+}
+
 /// Full SCTE-35 round-trip: import `bbb.ts` (real H.264 + AAC) into a broadcast
 /// that also carries a `.scte35` cue track, export to TS, re-import, and assert
 /// the splice_info_section came back byte-for-byte. The PMT must advertise the

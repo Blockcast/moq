@@ -248,6 +248,19 @@ impl Track {
 		self.release(name, jitter, false);
 	}
 
+	/// Whether the track passes AC-3 through as DVB private data, whose PES may carry several
+	/// sync frames.
+	fn carries_ac3(&self) -> bool {
+		matches!(
+			self.kind,
+			Kind::Verbatim {
+				stream_type: 0x06,
+				framing: catalog::Framing::Pes,
+				..
+			}
+		) && self.descriptors.iter().any(|descriptor| descriptor.tag == AC3_DESCRIPTOR)
+	}
+
 	/// The receiver's buffers for the track's PID, if the T-STD gives it any.
 	fn buffer(&self) -> Option<Buffer> {
 		match self.kind {
@@ -1589,17 +1602,40 @@ impl<E: catalog::Catalog> Export<E> {
 					Kind::Opus { .. } => Some(StreamId::PRIVATE_STREAM_1),
 					_ => None,
 				};
-				let unit = PesUnit {
-					pid,
-					is_video,
-					keyframe: frame.keyframe,
-					timestamp: frame.timestamp,
-					dts,
-					stream_id,
-				};
-				self.write_pes(&mut out, &unit, &es_payload)?;
+				// A passed-through PES of several AC-3 sync frames goes out a frame a PES, each
+				// due at its own decode time: a receiver's buffer holds and decodes each on its
+				// own, and the whole PES would overflow it.
+				let track = self.tracks.get(name).context("missing track")?;
+				let frames = track
+					.carries_ac3()
+					.then(|| ac3_frames(frame.timestamp, &es_payload))
+					.flatten()
+					.unwrap_or_else(|| vec![(frame.timestamp, es_payload.as_slice())]);
+				let mut at = decode;
+				for (k, (timestamp, payload)) in frames.into_iter().enumerate() {
+					if k > 0 {
+						let unit = std::mem::take(&mut out);
+						self.push_unit(name, pid, at, unit, keyframe && k == 1)?;
+						at = timestamp;
+					}
+					let unit = PesUnit {
+						pid,
+						is_video,
+						keyframe: frame.keyframe && k == 0,
+						timestamp,
+						dts: dts.filter(|_| k == 0),
+						stream_id,
+					};
+					self.write_pes(&mut out, &unit, payload)?;
+				}
+				return self.push_unit(name, pid, at, out, keyframe && at == decode);
 			}
 		}
+		self.push_unit(name, pid, decode, out, keyframe)
+	}
+
+	/// Queue one unit of `name`'s packets on `pid`, decoding at `decode`, on the [`Schedule`].
+	fn push_unit(&mut self, name: &str, pid: u16, decode: Timestamp, out: Vec<u8>, keyframe: bool) -> anyhow::Result<()> {
 		let track = self.tracks.get(name).context("missing track")?;
 		if let Some(buffer) = track.buffer() {
 			self.schedule.set_buffer(pid, buffer);
@@ -2102,8 +2138,11 @@ fn audio_buffer(config: &AudioConfig, kind: &Kind) -> Buffer {
 	Buffer { rate, size: Some(size) }
 }
 
-/// A verbatim stream's buffers, for the kinds its descriptors identify: AC-3 and E-AC-3 as
-/// DVB private data (ATSC A/52 Annex A 5.4). Any other stream has none the schedule knows.
+/// The DVB AC-3 descriptor's tag (ETSI EN 300 468 6.2.1), marking AC-3 as private data.
+const AC3_DESCRIPTOR: u8 = 0x6a;
+
+/// A verbatim stream's buffers, for the kinds its descriptors identify: AC-3 as DVB private
+/// data (ATSC A/52 Annex A 5.4). Any other stream has none the schedule knows.
 fn verbatim_buffer(kind: &Kind, descriptors: &[catalog::Descriptor]) -> Option<Buffer> {
 	let Kind::Verbatim {
 		stream_type: 0x06,
@@ -2115,11 +2154,27 @@ fn verbatim_buffer(kind: &Kind, descriptors: &[catalog::Descriptor]) -> Option<B
 	};
 	descriptors
 		.iter()
-		.any(|descriptor| matches!(descriptor.tag, 0x6a | 0x7a))
+		.any(|descriptor| descriptor.tag == AC3_DESCRIPTOR)
 		.then_some(Buffer {
 			rate: 2_000_000,
 			size: Some(5_696),
 		})
+}
+
+/// The AC-3 sync frames `payload` holds, each with its presentation time counted on from
+/// `start`, or `None` unless it is two or more whole frames.
+fn ac3_frames(start: Timestamp, payload: &[u8]) -> Option<Vec<(Timestamp, &[u8])>> {
+	let mut frames = Vec::new();
+	let (mut rest, mut samples) = (payload, 0u64);
+	while !rest.is_empty() {
+		let header = (crate::codec::ac3::DESCRIPTOR.parse)(rest).ok()?;
+		let (frame, tail) = rest.split_at_checked(header.len)?;
+		let offset = Timestamp::from_micros(samples * 1_000_000 / u64::from(header.sample_rate.max(1))).ok()?;
+		frames.push((start.checked_add(offset).ok()?, frame));
+		samples += header.samples;
+		rest = tail;
+	}
+	(frames.len() > 1).then_some(frames)
 }
 
 /// Build the Annex-B elementary-stream payload for one video frame: rewrite the
