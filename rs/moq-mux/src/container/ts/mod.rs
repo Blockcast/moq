@@ -19,7 +19,7 @@
 //! only the newest group.
 
 mod adts;
-mod export;
+pub mod export;
 mod import;
 mod mux_rate;
 mod programs;
@@ -32,7 +32,7 @@ mod si;
 mod catalog;
 
 pub use catalog::{Catalog, Descriptor, Ext, Framing, Mpegts, Program, SiEntry, Track, Verbatim};
-pub use export::*;
+pub use export::Export;
 pub use import::*;
 pub use programs::Programs;
 

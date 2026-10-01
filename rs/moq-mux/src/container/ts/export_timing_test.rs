@@ -16,8 +16,9 @@ use mpeg2ts::ts::{ReadTsPacket, TsPacketReader, TsPayload};
 use tokio::time::Instant;
 
 use crate::catalog::hang::Container as HangContainer;
+use crate::container::ts::Export;
 use crate::container::ts::export::PCR_INTERVAL;
-use crate::container::ts::{Export, ExportStats};
+use crate::container::ts::export::Stats;
 use crate::container::{Container as _, Frame, Producer};
 
 const SPS: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xde];
@@ -534,7 +535,7 @@ const DRIFT_TICKS: u64 = 300_000_000 / VIDEO_US;
 
 /// The spread of (slot sent − source's clock at the slot) after the first 10 s over `ticks`
 /// of media, the drops, and the export's stats at the end.
-async fn on_a_scaled_clock(scale: f64, ticks: u64) -> (Duration, u64, ExportStats) {
+async fn on_a_scaled_clock(scale: f64, ticks: u64) -> (Duration, u64, Stats) {
 	let mut live = Live::new(scale, 0);
 	let mut leg = live.join(Duration::ZERO).await;
 	live.run(ticks, &mut [&mut leg], |_| false).await;

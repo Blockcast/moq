@@ -3,7 +3,7 @@
 //! [`Export`] subscribes to a MoQ broadcast and produces MPEG-TS: PAT/PMT program
 //! tables and PES packets, packetized into 188-byte TS packets, with the PCR
 //! riding its own adaptation-field-only packets on a fixed media-time grid.
-//! Output is sliced on that grid rather than per media frame ([`Schedule`]):
+//! Output is sliced on that grid rather than per media frame (the schedule):
 //! each [`Frame`] is one slot's clock packet plus the bytes belonging to it,
 //! stamped at the slot boundary, so the clock a receiver recovers from byte
 //! position agrees with the values, and a pacing caller releases each slot at
@@ -13,7 +13,7 @@
 //! so tracks interleave in `(DTS, PID)` order whatever the arrival skew between them,
 //! and the output keeps the source's pace.
 //!
-//! Video flows through [`ExportSource`], which normalizes every H.264/H.265
+//! Video flows through `ExportSource`, which normalizes every H.264/H.265
 //! source to length-prefixed NALU plus a resolved avcC/hvcC (parsing in-band
 //! avc3/hev1 parameter sets out of the bitstream, or taking the catalog
 //! `description` for out-of-band avc1/hvc1). The muxer then does one
@@ -92,7 +92,7 @@ fn sanitize_mux_rate(rate: u64) -> Option<u64> {
 /// How an [`Export`]'s release clock is keeping up with the source. See [`Export::stats`].
 #[derive(Clone, Debug, Default, PartialEq)]
 #[non_exhaustive]
-pub struct ExportStats {
+pub struct Stats {
 	/// Frames dropped for arriving after their deadline, and the frames a video track then
 	/// dropped waiting for its next keyframe.
 	pub dropped: u64,
@@ -1307,8 +1307,8 @@ impl<E: catalog::Catalog> Export<E> {
 	}
 
 	/// How the release clock is keeping up with the source.
-	pub fn stats(&self) -> ExportStats {
-		ExportStats {
+	pub fn stats(&self) -> Stats {
+		Stats {
 			dropped: self.jitter.dropped(),
 			drift: self.jitter.drift().map(|drift| drift * 1e6),
 			out_of_tolerance: self.jitter.out_of_tolerance(),
