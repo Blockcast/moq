@@ -1,4 +1,4 @@
-# T-STD compliant TS export
+# [M] T-STD compliant TS export
 
 ## Goal
 
@@ -25,7 +25,3 @@ than overrun the rate.
 This README owns the end-to-end proof: the #4613 netem rig (10% loss, a real
 ~10 Mb/s broadcast TS) passes the strict T-STD check, and the recipe runs
 nightly.
-
-## Required
-
-- [T-STD check](/quest/m1/tstd/check.md) - the harness grades the full buffer model instead of the transport buffer alone
