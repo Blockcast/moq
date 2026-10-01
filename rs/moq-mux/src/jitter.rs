@@ -39,6 +39,10 @@ pub(crate) enum Push {
 	Late,
 	/// It was dropped because the track is waiting for a sync frame.
 	Waiting,
+	/// It missed its deadline but decodes on its own, so the clock moved to put it a whole
+	/// delay early again: the source fell behind (a stall upstream), and dropping every
+	/// frame after it would never catch up.
+	Rebuffered,
 }
 
 /// Holds each track's frames until a fixed delay past their decode time, like an SRT
@@ -54,6 +58,11 @@ pub(crate) enum Push {
 /// there first and the frame lands on its clock, otherwise one anchored at this frame,
 /// though never ahead of a deadline already given out. A backlog read in one go still
 /// releases each generation after the one before it, and a live stream keeps its delay.
+///
+/// A sync frame that misses its deadline re-anchors its generation on itself rather than
+/// being dropped, like a player re-buffering after a stall: a source that falls behind by
+/// more than the delay and stays there would otherwise lose every frame from then on.
+/// Output pauses for the stall, and the media timeline does not jump.
 ///
 /// A zero delay holds nothing and drops nothing: each frame goes out as soon as it is
 /// read, ordered only among the frames read together.
@@ -124,13 +133,21 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 				self.horizon = self.horizon.max(Some(deadline));
 				Push::Queued
 			}
+			Some(_) if arrival.sync => {
+				self.anchors.insert(generation, (arrival.arrived, arrival.decode));
+				let deadline = arrival.arrived + self.delay;
+				track.waiting = false;
+				track.queue.push_back((deadline, generation, arrival.item));
+				self.horizon = self.horizon.max(Some(deadline));
+				Push::Rebuffered
+			}
 			// Past the deadline, or so far off the clock that no instant holds it.
 			_ => {
 				track.waiting = true;
 				Push::Late
 			}
 		};
-		if push != Push::Queued {
+		if matches!(push, Push::Late | Push::Waiting) {
 			self.dropped += 1;
 		}
 
@@ -337,6 +354,27 @@ mod tests {
 
 		tokio::time::advance(Duration::from_secs(1)).await;
 		assert_eq!(due(&mut buffer), ["v0", "a0", "a180", "v240"]);
+	}
+
+	/// A sync frame past its deadline re-anchors the clock instead of being dropped, so a
+	/// source that fell behind carries on a delay behind its new position.
+	#[tokio::test(start_paused = true)]
+	async fn a_late_sync_frame_rebuffers() {
+		let start = Instant::now();
+		let mut buffer = Buffer::new(DELAY);
+		buffer.push(2, arrival(start, 0, "a0"));
+		// The source stalls for a second, then carries on from where it was.
+		let stalled = start + Duration::from_secs(1);
+		assert_eq!(buffer.push(2, arrival(stalled, 20, "a20")), Push::Rebuffered);
+		assert_eq!(buffer.push(2, arrival(stalled, 40, "a40")), Push::Queued);
+		assert_eq!(buffer.dropped(), 0);
+
+		tokio::time::advance(Duration::from_secs(1)).await;
+		assert_eq!(due(&mut buffer), ["a0"]);
+		tokio::time::advance(DELAY).await;
+		assert_eq!(due(&mut buffer), ["a20"]);
+		tokio::time::advance(Duration::from_millis(20)).await;
+		assert_eq!(due(&mut buffer), ["a40"]);
 	}
 
 	/// A discontinuity re-anchors the track, and a track reaching the same discontinuity

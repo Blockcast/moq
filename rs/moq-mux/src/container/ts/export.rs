@@ -266,8 +266,14 @@ impl Track {
 				description,
 			},
 		};
-		if jitter.push(self.pid, arrival) == Push::Late {
-			tracing::warn!(track = %name, dropped = jitter.dropped(), "frame missed its deadline; dropped");
+		match jitter.push(self.pid, arrival) {
+			Push::Late => {
+				tracing::warn!(track = %name, dropped = jitter.dropped(), "frame missed its deadline; dropped")
+			}
+			Push::Rebuffered => {
+				tracing::warn!(track = %name, "source fell behind the delay; restarting the clock on this frame")
+			}
+			Push::Queued | Push::Waiting => {}
 		}
 	}
 }
