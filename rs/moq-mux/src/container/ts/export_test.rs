@@ -5320,7 +5320,8 @@ async fn declared_reorder_sizes_the_decode_clock_from_the_first_frame() {
 
 	let timing = video_timing(&out_late, ..);
 	assert_decodes_before_presenting(&timing);
-	// Depth 1 at 25 fps, and one tick so the B-frame decodes after the P-frame above it.
+	// Depth 1 at 25 fps, plus one tick of reserve: every frame decodes one period after the
+	// last, the keyframe a whole reserve before it is presented.
 	let (pts, dts) = timing[1];
 	assert_eq!(
 		pts,
@@ -5329,9 +5330,13 @@ async fn declared_reorder_sizes_the_decode_clock_from_the_first_frame() {
 	);
 	assert_eq!(
 		dts,
-		Some(pts - FRAME_TICKS - 1),
+		Some(REORDERED_BASE * FRAME_TICKS - 1),
 		"the first P-frame already runs on the declared reserve"
 	);
+	let decode: Vec<u64> = timing.iter().map(|&(pts, dts)| dts.unwrap_or(pts)).collect();
+	for (i, step) in decode.windows(2).map(|w| w[1] - w[0]).enumerate() {
+		assert_eq!(step, FRAME_TICKS, "frame {i} does not decode one period after the last: {decode:?}");
+	}
 	assert_decodes_after_the_clock(&out_late);
 }
 
