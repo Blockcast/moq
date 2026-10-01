@@ -916,17 +916,12 @@ impl AnnounceRun {
 				return Poll::Ready(res);
 			}
 			// Queued updates come first, so a held route that was withdrawn while the
-			// writer was blocked is dropped rather than advertised.
+			// writer was blocked is dropped rather than advertised. Once the cursor is
+			// idle, a held route is the current one.
 			let Poll::Ready(next) = announced.poll_next(waiter) else {
 				if let Some(hold) = &mut self.hold
 					&& let Poll::Ready((suffix, hops, cost)) = hold.poll_due(waiter)
 				{
-					// The cursor may still be holding a change to this route: if it no
-					// longer stands, keep holding until that change arrives.
-					if !origin.carries(&suffix, &hops) {
-						hold.hold(suffix, hops, cost);
-						continue;
-					}
 					tracing::debug!(route = %origin.absolute(&suffix), "announce after hold-down");
 					self.start(stream, suffix, hops, cost)?;
 					continue;
@@ -1986,7 +1981,6 @@ mod announce_test {
 		h.announcement
 			.update(crate::origin::Route::default().with_hops(pub_hops()).with_cost(3))
 			.unwrap();
-		tokio::time::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
 		settle().await;
 		match h.wire.take_announces().as_slice() {
 			[lite::AnnounceBroadcast::Restart { id: 0, hops, cost }] => {
@@ -2038,12 +2032,10 @@ mod announce_test {
 		let mut h = harness().await;
 		let route = |cost| crate::origin::Route::default().with_hops(pub_hops()).with_cost(cost);
 		h.announcement.update(route(u64::MAX)).unwrap();
-		tokio::time::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
 		settle().await;
 		assert_eq!(h.wire.take_announces().len(), 1, "expected the clamped restart");
 
 		h.announcement.update(route(u64::MAX - 1)).unwrap();
-		tokio::time::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
 		settle().await;
 		h.assert_idle();
 	}
@@ -2113,7 +2105,6 @@ mod announce_test {
 					.with_cost(u64::MAX),
 			)
 			.unwrap();
-		tokio::time::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
 		settle().await;
 		match h.wire.take_announces().as_slice() {
 			[lite::AnnounceBroadcast::Restart { cost, .. }] => {
@@ -2145,17 +2136,7 @@ mod announce_test {
 
 	impl Held {
 		async fn new() -> Self {
-			// Deliver route changes at once: the session's hold is what this checks.
-			Self::with_update_hold(Duration::ZERO).await
-		}
-
-		/// Over an origin whose cursors hold a changed route for `update_hold`.
-		async fn with_update_hold(update_hold: Duration) -> Self {
-			let origin = crate::origin::Config {
-				update_hold,
-				..crate::origin::Config::new(Hop::new(1).unwrap())
-			}
-			.produce();
+			let origin = Hop::new(1).unwrap().produce();
 			let best = origin.announce("cam", route(&[9, 5], 1)).unwrap();
 			let fallback = origin.announce("cam", route(&[9, 6], 2)).unwrap();
 
@@ -2265,40 +2246,6 @@ mod announce_test {
 		match h.wire.take_announces().as_slice() {
 			[lite::AnnounceBroadcast::EndedId { id: 0 }] => {}
 			other => panic!("expected only the retraction, got {other:?}"),
-		}
-		h.assert_idle();
-	}
-
-	/// A held route withdrawn while the origin's cursor still holds the change is
-	/// not released at the deadline: it waits for the change and advertises what
-	/// survives.
-	#[tokio::test(start_paused = true)]
-	async fn held_route_withdrawn_behind_the_cursor_hold_is_never_sent() {
-		let mut h = Held::with_update_hold(crate::origin::DEFAULT_UPDATE_HOLD).await;
-		let _last = h.origin.announce("cam", route(&[9, 7], 3)).unwrap();
-
-		// The cursor delivers the switch to relay 6 after its hold; we retract.
-		h.best = None;
-		tokio::time::sleep(crate::origin::DEFAULT_UPDATE_HOLD + Duration::from_millis(100)).await;
-		match h.wire.take_announces().as_slice() {
-			[lite::AnnounceBroadcast::EndedId { id: 0 }] => {}
-			other => panic!("expected the retraction, got {other:?}"),
-		}
-
-		// Relay 6 goes too, just before our hold ends; the cursor holds that change
-		// past our deadline.
-		tokio::time::sleep(HOLD_DOWN - Duration::from_millis(200)).await;
-		h.fallback = None;
-		tokio::time::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
-		h.assert_idle();
-
-		// Relay 7 survives its own hold-down.
-		tokio::time::sleep(HOLD_DOWN).await;
-		match h.wire.take_announces().as_slice() {
-			[lite::AnnounceBroadcast::Active { hops, .. }] => {
-				assert_eq!(hops, &lite::HopsRef::literal(chain(&[9, 7])));
-			}
-			other => panic!("expected relay 7's route, got {other:?}"),
 		}
 		h.assert_idle();
 	}

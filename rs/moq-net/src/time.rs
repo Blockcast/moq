@@ -66,9 +66,6 @@ struct State {
 	now: Option<Instant>,
 	next: u64,
 	timers: BTreeMap<(Instant, u64), Arc<Mutex<kio::WaiterList>>>,
-	/// The driver's poll, woken when a timer armed outside it becomes the earliest,
-	/// so the driver's sleep never outlasts a deadline it did not see.
-	driver: kio::WaiterList,
 }
 
 impl Clock {
@@ -101,21 +98,6 @@ impl Clock {
 			let mut ready = waiters.lock().unwrap().take();
 			ready.wake();
 		}
-	}
-
-	/// The latest supplied instant, or `None` before the first.
-	pub(crate) fn try_now(&self) -> Option<Instant> {
-		let state = self.0.lock().unwrap();
-		#[cfg(test)]
-		if state.automatic {
-			return Some(tokio::time::Instant::now().into_std());
-		}
-		state.now
-	}
-
-	/// Register the driver's poll to be woken by a new earliest timer.
-	pub(crate) fn register_driver(&self, waiter: &kio::Waiter) {
-		waiter.register(&mut self.0.lock().unwrap().driver);
 	}
 
 	pub(crate) fn timeout(&self) -> Option<Instant> {
@@ -178,15 +160,6 @@ impl crate::runtime::Timer for Timer {
 			&& state.now.is_none_or(|now| at > now)
 		{
 			state.timers.insert((at, self.id), self.waiters.clone());
-			if state
-				.timers
-				.first_key_value()
-				.is_some_and(|(key, _)| *key == (at, self.id))
-			{
-				let mut driver = state.driver.take();
-				drop(state);
-				driver.wake();
-			}
 		}
 	}
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
