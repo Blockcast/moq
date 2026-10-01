@@ -741,9 +741,11 @@ impl<E: catalog::Catalog> Export<E> {
 	///
 	/// Each [`Frame`] carries one slice of the PCR grid in `payload`: the clock
 	/// packets that slice opens with, followed by the muxed bytes belonging to it.
-	/// It is stamped with the media time that slice starts at, so a transport can
-	/// pace delivery on the media clock, and `keyframe` marks the slice a video
-	/// keyframe begins in. The leading PAT/PMT rides on the first slice, and is
+	/// With a [delay](Self::with_delay), each slice is handed over at its time on the
+	/// jitter buffer's clock, which follows the source's, so a sink writes it as it
+	/// comes. It is stamped with the media time that slice starts at, for a transport
+	/// that stamps its own delivery, and `keyframe` marks the slice a video keyframe
+	/// begins in. The leading PAT/PMT rides on the first slice, and is
 	/// re-emitted at video keyframes and periodically for mid-stream tune-in.
 	/// Returns `None` when the broadcast ends. `duration` is always `None`: the
 	/// muxer has no use for it.
@@ -883,18 +885,23 @@ impl<E: catalog::Catalog> Export<E> {
 		}
 
 		// 5. Once every track has drained, nothing more can ride the slots still open, so
-		// they go out. That's independent of the catalog: a retained track finishes while
-		// the broadcast stays live, and holding its tail until the catalog closed would
-		// strand it indefinitely.
+		// they go out: at their times on the clock, or at once without one. That's
+		// independent of the catalog: a retained track finishes while the broadcast stays
+		// live, and holding its tail until the catalog closed would strand it indefinitely.
 		let drained = !self.tracks.is_empty()
 			&& self.tracks.values().all(|t| t.finished)
 			&& self.jitter.is_empty()
 			&& self.held.is_none();
 		if drained {
-			self.lay(None)?;
+			if self.slot_due().is_none() {
+				self.lay(None)?;
+			}
 			if let Some(out) = self.queue.pop_front() {
 				self.emitted_epoch = self.epoch;
 				return Poll::Ready(Ok(Some(out)));
+			}
+			if !self.schedule.is_empty() {
+				return Poll::Pending;
 			}
 			// SI emission rides media frames, so a snapshot that arrived behind the
 			// last one gets one trailing flush before the stream ends.

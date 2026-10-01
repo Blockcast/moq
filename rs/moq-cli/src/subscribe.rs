@@ -314,13 +314,9 @@ impl Subscribe {
 		}
 
 		// A TS byte stream carries no per-frame timing, so delivery time is the only
-		// carrier of each frame's spacing: the exporter slices its output on the PCR
-		// grid and stamps each slice at its slot boundary, on the contract that the
-		// caller writes the bytes at the time the stamp asserts. Draining on arrival
-		// instead collapses the clock into position clusters no downstream stage can
-		// repair (#2984). The export already releases at the source's pace, so the
-		// pacer only spreads each burst of settled slices over the time they cover.
-		let mut delivery = Delivery::new(self.args.max_age);
+		// carrier of each frame's spacing (#2984). The export lays each slice of the PCR
+		// grid out at its time on its own clock, which follows the source's, so each is
+		// written as it comes.
 		let linger = self.args.linger;
 		loop {
 			let end = loop {
@@ -329,7 +325,8 @@ impl Subscribe {
 					Ok(None) => break Ok(()),
 					Err(err) => break Err(err),
 				};
-				delivery.deliver(&frame, ts.discontinuity(), &mut stdout).await?;
+				stdout.write_all(&frame.payload).await?;
+				stdout.flush().await?;
 			};
 
 			// Any end waits out the linger, and on expiry the last one is the result: a
@@ -392,165 +389,9 @@ async fn resume_within(
 	}
 }
 
-/// Paced stdout delivery for the TS export: sleeps until each frame's send instant.
-///
-/// The export holds every frame its delay and lays the multiplex out a slot at a time,
-/// so it hands slices over at the source's pace, a few at once. The pacer spreads each
-/// handful over the slots it covers, holding up to the delay ahead of the wall clock.
-/// A sink that falls behind writes what is overdue at once and catches up.
-struct Delivery {
-	discontinuity: u64,
-	pacer: moq_mux::Pacer,
-}
-
-impl Delivery {
-	fn new(lead: Duration) -> Self {
-		Self {
-			pacer: moq_mux::Pacer::default().with_lead(lead),
-			discontinuity: 0,
-		}
-	}
-
-	/// Write one export frame to `out` at its paced instant. A new `discontinuity`
-	/// (the program clock restarted) re-anchors the pacing on this frame.
-	async fn deliver(
-		&mut self,
-		frame: &moq_mux::container::Frame,
-		discontinuity: u64,
-		out: &mut (impl tokio::io::AsyncWrite + Unpin),
-	) -> anyhow::Result<()> {
-		// tokio's clock rather than the bare std one so tests can pause it; in
-		// production they are identical.
-		let now = tokio::time::Instant::now().into_std();
-		let send_at = match std::mem::replace(&mut self.discontinuity, discontinuity) == discontinuity {
-			true => self.pacer.pace(frame.timestamp, now),
-			false => self.pacer.hurry(frame.timestamp, now),
-		};
-		tokio::time::sleep_until(tokio::time::Instant::from_std(send_at)).await;
-		out.write_all(&frame.payload).await?;
-		out.flush().await?;
-		Ok(())
-	}
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use hang::moq_net::{Timescale, Timestamp};
-
-	fn frame(value: u64, scale: Timescale) -> moq_mux::container::Frame {
-		moq_mux::container::Frame {
-			timestamp: Timestamp::new(value, scale).unwrap(),
-			duration: None,
-			payload: bytes::Bytes::from_static(&[0x47; 188]),
-			keyframe: false,
-		}
-	}
-
-	/// Regression for #2984: the TS stdout writer must deliver each frame at the
-	/// instant its timestamp asserts, not as fast as frames arrive. The exporter
-	/// stamps PCR grid frames in microseconds and media frames at the source's own
-	/// timescale, so the spacing must also survive a scale change mid-stream.
-	#[tokio::test(start_paused = true)]
-	async fn ts_frames_are_paced_on_the_media_clock() {
-		let mut delivery = Delivery::new(Duration::from_millis(500));
-		let mut out = Vec::new();
-
-		let start = tokio::time::Instant::now();
-
-		// The first frame anchors the pacer and is written immediately.
-		delivery
-			.deliver(&frame(0, Timescale::MICRO), 0, &mut out)
-			.await
-			.unwrap();
-		assert_eq!(start.elapsed(), Duration::ZERO);
-
-		// A PCR slot 25ms later waits for its grid boundary.
-		delivery
-			.deliver(&frame(25_000, Timescale::MICRO), 0, &mut out)
-			.await
-			.unwrap();
-		assert_eq!(start.elapsed(), Duration::from_millis(25));
-
-		// A media frame at the source's 90 kHz timescale paces on the same clock.
-		delivery
-			.deliver(&frame(3_600, Timescale::new(90_000).unwrap()), 0, &mut out)
-			.await
-			.unwrap();
-		assert_eq!(start.elapsed(), Duration::from_millis(40));
-
-		assert_eq!(out.len(), 3 * 188, "every payload was written");
-	}
-
-	/// A sink that falls behind writes what is overdue at once, then paces again.
-	#[tokio::test(start_paused = true)]
-	async fn a_slow_sink_catches_up() {
-		let mut delivery = Delivery::new(Duration::from_millis(500));
-		let mut out = Vec::new();
-
-		let start = tokio::time::Instant::now();
-		delivery
-			.deliver(&frame(0, Timescale::MICRO), 0, &mut out)
-			.await
-			.unwrap();
-
-		// The writer stalls for 2s (a blocked pipe): every slot after this is overdue.
-		tokio::time::advance(Duration::from_secs(2)).await;
-		delivery
-			.deliver(&frame(400_000, Timescale::MICRO), 0, &mut out)
-			.await
-			.unwrap();
-		assert_eq!(
-			start.elapsed(),
-			Duration::from_secs(2),
-			"an overdue slot writes at once"
-		);
-	}
-
-	/// Slots the export has ready at once still go out on their grid.
-	#[tokio::test(start_paused = true)]
-	async fn a_buffered_producer_keeps_pacing() {
-		let mut delivery = Delivery::new(Duration::from_millis(500));
-		let mut out = Vec::new();
-
-		let start = tokio::time::Instant::now();
-		delivery
-			.deliver(&frame(0, Timescale::MICRO), 0, &mut out)
-			.await
-			.unwrap();
-
-		for slot in 1..=40u64 {
-			delivery
-				.deliver(&frame(slot * 25_000, Timescale::MICRO), 0, &mut out)
-				.await
-				.unwrap();
-			assert_eq!(
-				start.elapsed(),
-				Duration::from_millis(slot * 25),
-				"slot {slot} must be paced, not shed"
-			);
-		}
-	}
-	#[tokio::test(start_paused = true)]
-	async fn a_rewind_re_anchors_the_pacer() {
-		let mut delivery = Delivery::new(Duration::from_millis(500));
-		let mut out = tokio::io::sink();
-		delivery
-			.deliver(&frame(10_000_000, Timescale::MICRO), 0, &mut out)
-			.await
-			.unwrap();
-		let now = tokio::time::Instant::now();
-		delivery
-			.deliver(&frame(0, Timescale::MICRO), 1, &mut out)
-			.await
-			.unwrap();
-		assert_eq!(now.elapsed(), Duration::ZERO);
-		delivery
-			.deliver(&frame(40_000, Timescale::MICRO), 1, &mut out)
-			.await
-			.unwrap();
-		assert_eq!(now.elapsed(), Duration::from_millis(40));
-	}
 
 	/// A broadcast that returns but never serves its catalog gives up at the linger,
 	/// rather than waiting on the catalog past it.

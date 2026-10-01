@@ -58,20 +58,49 @@ pub(crate) enum Push {
 /// keep in step with, so a discontinuity there (a consumer skipping a stale group at join)
 /// keeps the clock. No two tracks are ever on different clocks.
 ///
+/// The clock follows the source's: a source clock running slower than ours would make
+/// every frame late in the end, and a faster one would hold more and more. So the clock
+/// keeps the least slack a frame arrived with near the delay, by running its decode
+/// timeline up to [`MAX_DRIFT`] faster or slower than ours, which also wears away a lead
+/// the first frame anchored it with.
+///
 /// A zero delay holds nothing and drops nothing: each frame goes out as soon as it is
 /// read, ordered only among the frames read together.
 pub(crate) struct Buffer<K, T> {
 	delay: Duration,
-	/// The clock every frame is pushed under: its generation, and the arrival and decode
-	/// time of the frame that anchored it.
-	clock: Option<(u64, Instant, Timestamp)>,
+	/// The clock every frame is pushed under.
+	clock: Option<Clock>,
 	tracks: BTreeMap<K, Track<T>>,
 	/// The latest deadline given out.
 	horizon: Option<Instant>,
 	/// Whether a frame has gone out since the clock started.
 	released: bool,
+	/// The least slack (deadline less arrival, in nanoseconds) a frame arrived with since the
+	/// clock was last steered, and the decode time it was steered at.
+	slack: Option<(i128, Timestamp)>,
 	timer: Option<Pin<Box<Sleep>>>,
 	dropped: u64,
+}
+
+/// How often the clock is steered, in decode time: long enough that the least slack covers
+/// a group's worth of frames sent ahead by different amounts.
+const STEER: Duration = Duration::from_secs(2);
+/// How quickly the clock steers its slack back to the delay: it closes the gap over this
+/// long, and a source drifting at `r` keeps it `r` times this off.
+const RESPONSE: Duration = Duration::from_secs(60);
+/// The fastest the clock runs off ours, in parts per billion: far past the 30 ppm a source's
+/// system clock may be off (ISO 13818-1 2.4.2.1), with ours as far off the other way.
+const MAX_DRIFT: i128 = 500_000;
+
+/// The decode timeline's mapping onto ours: where a frame decoding at `base` is due, less the
+/// delay, and how much longer than the decode timeline ours runs.
+#[derive(Clone, Copy)]
+struct Clock {
+	generation: u64,
+	anchor: Instant,
+	base: Timestamp,
+	/// In parts per billion.
+	drift: i128,
 }
 
 struct Track<T> {
@@ -93,6 +122,7 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 			tracks: BTreeMap::new(),
 			horizon: None,
 			released: false,
+			slack: None,
 			timer: None,
 			dropped: 0,
 		}
@@ -100,8 +130,14 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 
 	/// Queue a frame, or drop it if it cannot make its deadline.
 	pub fn push(&mut self, key: K, arrival: Arrival<T>) -> Push {
-		let (mut generation, anchor, base) = *self.clock.get_or_insert((0, arrival.arrived, arrival.decode));
-		let mut deadline = self.deadline(anchor, base, arrival.decode);
+		let clock = *self.clock.get_or_insert(Clock {
+			generation: 0,
+			anchor: arrival.arrived,
+			base: arrival.decode,
+			drift: 0,
+		});
+		let mut generation = clock.generation;
+		let mut deadline = self.deadline(&clock, arrival.decode);
 		// A track still on an older generation may be crossing the discontinuity another
 		// track opened the newest one for.
 		let jumped = self.tracks.get(&key).is_some_and(|track| {
@@ -111,9 +147,17 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		if jumped && self.released {
 			generation += 1;
 			let after = self.horizon.and_then(|horizon| horizon.checked_sub(self.delay));
-			let anchor = after.map_or(arrival.arrived, |after| after.max(arrival.arrived));
-			self.clock = Some((generation, anchor, arrival.decode));
-			deadline = self.deadline(anchor, arrival.decode, arrival.decode);
+			let clock = Clock {
+				generation,
+				anchor: after.map_or(arrival.arrived, |after| after.max(arrival.arrived)),
+				base: arrival.decode,
+				drift: clock.drift,
+			};
+			self.clock = Some(clock);
+			self.slack = None;
+			deadline = self.deadline(&clock, arrival.decode);
+		} else if self.released && !self.delay.is_zero() {
+			self.steer(deadline, &arrival);
 		}
 
 		let track = self.tracks.entry(key).or_insert_with(|| Track {
@@ -153,21 +197,49 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		})
 	}
 
-	/// When a frame decoding at `decode` goes out on the current clock, once there is one.
-	pub fn at(&self, decode: Timestamp) -> Option<Instant> {
-		let (_, anchor, base) = self.clock?;
-		self.deadline(anchor, base, decode)
+	/// Account for the slack a frame arrived with, and every [`STEER`] of decode time set the
+	/// clock's drift to close the gap between the least slack and the delay over [`RESPONSE`].
+	fn steer(&mut self, deadline: Option<Instant>, arrival: &Arrival<T>) {
+		let (Some(clock), Some(deadline)) = (self.clock, deadline) else {
+			return;
+		};
+		let slack = match deadline >= arrival.arrived {
+			true => (deadline - arrival.arrived).as_nanos() as i128,
+			false => -((arrival.arrived - deadline).as_nanos() as i128),
+		};
+		let (least, since) = self.slack.get_or_insert((slack, arrival.decode));
+		*least = (*least).min(slack);
+		if arrival.decode.as_nanos().saturating_sub(since.as_nanos()) < STEER.as_nanos() {
+			return;
+		}
+		let gap = *least - self.delay.as_nanos() as i128;
+		let drift = (-gap * 1_000_000_000 / RESPONSE.as_nanos() as i128).clamp(-MAX_DRIFT, MAX_DRIFT);
+		// Re-anchor where this frame decodes, so the new drift starts from there.
+		if let Some(anchor) = deadline.checked_sub(self.delay) {
+			self.clock = Some(Clock {
+				anchor,
+				base: arrival.decode,
+				drift,
+				..clock
+			});
+		}
+		self.slack = None;
 	}
 
-	/// When a frame decoding at `decode` goes out on the clock anchored at `anchor` and
-	/// `base`, if any instant holds it.
-	fn deadline(&self, anchor: Instant, base: Timestamp, decode: Timestamp) -> Option<Instant> {
+	/// When a frame decoding at `decode` goes out on the current clock, once there is one.
+	pub fn at(&self, decode: Timestamp) -> Option<Instant> {
+		self.deadline(self.clock.as_ref()?, decode)
+	}
+
+	/// When a frame decoding at `decode` goes out on `clock`, if any instant holds it.
+	fn deadline(&self, clock: &Clock, decode: Timestamp) -> Option<Instant> {
 		// Signed, since a frame can decode before the one that anchored the clock.
-		let offset = decode.as_nanos() as i128 - base.as_nanos() as i128 + self.delay.as_nanos() as i128;
+		let since = decode.as_nanos() as i128 - clock.base.as_nanos() as i128;
+		let offset = since + since * clock.drift / 1_000_000_000 + self.delay.as_nanos() as i128;
 		let nanos = u64::try_from(offset.unsigned_abs()).ok()?;
 		match offset >= 0 {
-			true => anchor.checked_add(Duration::from_nanos(nanos)),
-			false => anchor.checked_sub(Duration::from_nanos(nanos)),
+			true => clock.anchor.checked_add(Duration::from_nanos(nanos)),
+			false => clock.anchor.checked_sub(Duration::from_nanos(nanos)),
 		}
 	}
 
@@ -232,6 +304,7 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		self.tracks.clear();
 		self.horizon = None;
 		self.released = false;
+		self.slack = None;
 		self.timer = None;
 	}
 }
@@ -430,6 +503,34 @@ mod tests {
 			released(&mut buffer),
 			[("a20", 0), ("v40", 0), ("a4900", 1), ("v5000", 1), ("a5020", 1)]
 		);
+	}
+
+	/// A source whose clock runs off ours, slower or faster, neither goes late nor piles up:
+	/// two hours at 200 ppm is 1.44 s, over ten times the delay.
+	#[tokio::test(start_paused = true)]
+	async fn the_clock_follows_a_drifting_source() {
+		for ppm in [200i128, -200] {
+			let start = Instant::now();
+			let mut buffer = Buffer::new(DELAY);
+			let mut most = 0;
+			for k in 0..2 * 3_600 * 25u64 {
+				let decode = Duration::from_millis(k * 40);
+				let source = decode.as_nanos() as i128 * (1_000_000 + ppm) / 1_000_000;
+				let arrived = start + Duration::from_nanos(source as u64);
+				tokio::time::advance(arrived.saturating_duration_since(Instant::now())).await;
+				let frame = Arrival {
+					arrived,
+					decode: Timestamp::from_micros(decode.as_micros() as u64).unwrap(),
+					discontinuity: 0,
+					sync: true,
+					item: "v",
+				};
+				assert_eq!(buffer.push(1, frame), Push::Queued, "{ppm} ppm: frame {k} was late");
+				most = most.max(buffer.tracks[&1].queue.len());
+				due(&mut buffer);
+			}
+			assert!(most <= 10, "{ppm} ppm: the buffer grew to {most} frames");
+		}
 	}
 
 	/// Zero holds nothing: frames read together go out at once in decode order, and a

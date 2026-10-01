@@ -633,8 +633,9 @@ mod tests {
 	/// `next()` blocks, surfaced here as a timeout once the buffered frames are gone.
 	async fn drain(mut exporter: Export<tscat::Ext>) -> Vec<u8> {
 		let mut out = Vec::new();
-		// Past the export's release delay, so the first frame goes out before it ends.
-		let wait = RECORDING_MAX_AGE + Duration::from_secs(1);
+		// Past the export's release delay and the send-ahead window behind it, so the first
+		// frame goes out before it ends.
+		let wait = RECORDING_MAX_AGE * 3 + Duration::from_secs(1);
 		while let Ok(res) = tokio::time::timeout(wait, exporter.next()).await {
 			match res.expect("exporter error") {
 				Some(frame) => out.extend_from_slice(&frame.payload),

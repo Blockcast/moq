@@ -843,7 +843,11 @@ async fn export_pcr_wraps_below_zero_at_start() {
 		.await
 		.unwrap()
 		.with_delay(RECORDING_MAX_AGE);
-	let frames = drain_frames(&mut exporter).await;
+	// Every slot up to the last decode time, the clock laying them out at theirs.
+	let mut frames = Vec::new();
+	while let Ok(Ok(Some(frame))) = tokio::time::timeout(DRAIN, exporter.next()).await {
+		frames.push(frame);
+	}
 
 	// A slot's clock packets lead the frame carrying that slot's bytes, and the
 	// frame is stamped at the slot boundary so the caller's pacer delivers the
@@ -5091,6 +5095,46 @@ async fn pcr_stamps_step_by_the_grid() {
 		steps.iter().all(|&step| step == interval),
 		"every clock packet must be stamped one grid interval past the last: {steps:?}"
 	);
+}
+
+/// #2984: a TS byte stream carries no per-frame timing, so the slices have to go out at the
+/// times they assert, not as fast as frames arrive. With a delay the export hands each slice
+/// over at its time on its own clock, however the frames arrive: here a second at a time.
+#[tokio::test(start_paused = true)]
+async fn slices_go_out_on_the_clock() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let mut audio = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
+	let mut export = Export::new(crate::source::announced(&consumer))
+		.await
+		.unwrap()
+		.with_delay(Duration::from_millis(1_500));
+	let writer = tokio::spawn(async move {
+		for second in 0..4 {
+			for ms in (0..1_000).step_by(20) {
+				write_aac(&mut audio, second * 1_000 + ms);
+			}
+			tokio::time::sleep(Duration::from_secs(1)).await;
+		}
+		audio.finish().unwrap();
+		(broadcast, catalog)
+	});
+	let mut handed = Vec::new();
+	while let Ok(Ok(Some(_))) = tokio::time::timeout(Duration::from_secs(5), export.next()).await {
+		handed.push(tokio::time::Instant::now());
+	}
+	writer.await.unwrap();
+	assert!(handed.len() > 100, "too few slices to judge: {}", handed.len());
+	// Each slice follows the last by a slot, give or take the clock steering toward the
+	// source's, through to the end of the broadcast.
+	for w in handed.windows(2) {
+		let step = w[1] - w[0];
+		assert!(
+			step.abs_diff(PCR_INTERVAL) < Duration::from_micros(100),
+			"a slice went out {step:?} after the last"
+		);
+	}
 }
 
 /// The same positional property on a real reordered (B-frame) capture with a second
