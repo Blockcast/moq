@@ -22,6 +22,7 @@ mod adts;
 mod export;
 mod import;
 mod mux_rate;
+mod schedule;
 mod programs;
 mod si;
 

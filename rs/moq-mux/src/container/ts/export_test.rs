@@ -69,9 +69,12 @@ fn length_prefixed(nals: &[&[u8]]) -> Bytes {
 /// exporter's default [`Duration::ZERO`] collapses to the
 /// live edge: completeness has to be asked for, exactly as a real recorder does.
 const RECORDING_MAX_AGE: Duration = Duration::from_secs(30);
-/// How long a drain waits for the next frame: past the recording delay, so the first
-/// frame goes out, and then until output stops.
-const DRAIN: std::time::Duration = RECORDING_MAX_AGE.saturating_add(std::time::Duration::from_secs(1));
+/// How long a drain waits for the next frame: past the recording delay, the mux-ahead
+/// window a multiplex rate adds on top of it, and the clip, so the first frame goes out,
+/// and then until output stops.
+const DRAIN: std::time::Duration = RECORDING_MAX_AGE
+	.saturating_mul(3)
+	.saturating_add(std::time::Duration::from_secs(1));
 
 async fn drain(consumer: moq_net::broadcast::Consumer) -> BytesMut {
 	drain_with(Export::new(crate::source::announced(&consumer)).await.unwrap()).await
@@ -2842,6 +2845,10 @@ async fn discontinuity_flags_the_break_once_across_tracks() {
 	);
 	assert_eq!(count_discontinuity(&after), 1, "the break is flagged exactly once");
 	let bytes: Vec<_> = after.iter().flat_map(|f| f.payload.iter().copied()).collect();
+	// The old generation's last frame spreads up to its decode time, so its tail leads
+	// `after`; read from the new generation's tables.
+	let tables = bytes.chunks(188).position(|p| p[1] & 0x1f == 0 && p[2] == 0).unwrap() * 188;
+	let bytes = bytes[tables..].to_vec();
 	let (video_pts, audio_pts) = collect_pes_pts(&bytes);
 	assert!(!video_pts.is_empty(), "video resumed");
 	assert!(!audio_pts.is_empty(), "audio resumed");
@@ -3642,8 +3649,8 @@ async fn late_join_matches_a_running_exporter() {
 async fn late_join_matches_a_running_exporter_without_video() {
 	let (a, b) = export_twice(false).await;
 
-	// The joiner's first span leads with PAT/PMT, while the running exporter has no
-	// reason to repeat them there. The span can cover several PCR slices, so compare
+	// The joiner's first frame leads with PAT/PMT, while the running exporter has no
+	// reason to repeat them there. It can spread over several PCR slices, so compare
 	// from the next PAT/PMT refresh, which both exporters anchor to the media grid.
 	let from = b
 		.iter()
@@ -3811,6 +3818,17 @@ fn pes_decode_in_order(frames: &[Frame]) -> Vec<u64> {
 	out
 }
 
+/// Whether every PES start decodes no earlier than those ahead of it, up to one grid slot:
+/// a slot spreads each PID's packets among the others, so units sharing one may swap.
+fn in_decode_order(decode: &[u64]) -> bool {
+	let slot = PCR_INTERVAL.as_micros() as u64 * 90 / 1_000;
+	let mut high = 0;
+	decode.iter().all(|&d| {
+		high = high.max(d);
+		d + slot >= high
+	})
+}
+
 /// Audio lagging video by up to a frame, on a live clock: each video frame lands before
 /// the audio that precedes it. Returns the decode order the exporter emitted.
 async fn lagging_audio(delay: Duration) -> Vec<u64> {
@@ -3834,7 +3852,7 @@ async fn late_audio_still_leads_the_interleave() {
 	let decode = lagging_audio(Duration::from_millis(500)).await;
 	assert!(decode.len() > 100, "too little output to judge: {}", decode.len());
 	assert!(
-		decode.is_sorted(),
+		in_decode_order(&decode),
 		"a frame went out ahead of an earlier one: {decode:?}"
 	);
 }
@@ -3844,7 +3862,7 @@ async fn late_audio_still_leads_the_interleave() {
 async fn zero_delay_keeps_arrival_order() {
 	let decode = lagging_audio(Duration::ZERO).await;
 	assert!(
-		!decode.is_sorted(),
+		!in_decode_order(&decode),
 		"video should have led the audio that arrived after it"
 	);
 }
@@ -3904,7 +3922,7 @@ async fn a_late_frame_is_dropped_and_the_rest_keep_their_order() {
 		"only the late frames were dropped"
 	);
 	assert!(
-		decode.is_sorted(),
+		in_decode_order(&decode),
 		"a frame went out ahead of an earlier one: {decode:?}"
 	);
 }
@@ -3921,7 +3939,7 @@ async fn tune_in_does_not_wait_on_dropped_audio() {
 		rig.video(tick);
 	}
 	out.extend(poll_frames(&mut export));
-	// Past the keyframe's deadline, and far enough on that a later frame closes its span.
+	// Past the keyframe's deadline, and far enough on that a later frame settles its slot.
 	tokio::time::advance(delay + Duration::from_micros(4 * VIDEO_US)).await;
 	out.extend(poll_frames(&mut export));
 	assert!(!out.is_empty(), "the tune-in waited on audio it had dropped");
@@ -4299,19 +4317,20 @@ async fn si_revision_does_not_wait_for_the_interval() {
 	let mut rig = si_cadence_rig(0x0014, 0x70, Duration::from_secs(30)).await;
 
 	rig.si_track.write_frame(Timestamp::ZERO, Bytes::from(tick(1))).unwrap();
-	assert_eq!(rig.media(0, 0x0014).await, 0, "the first span stays buffered");
+	assert_eq!(rig.media(0, 0x0014).await, 0, "the first frame stays buffered");
 	assert_eq!(
 		rig.media(1_000, 0x0014).await,
 		1,
-		"the next span closes the lead emission"
+		"the next frame lets the lead emission out"
 	);
 	assert_eq!(rig.media(2_000, 0x0014).await, 0, "unchanged: still held");
 
 	// The clock ticks. Nothing about the 30 s interval has elapsed, but the value
-	// changed: it must go out with the very next frame.
+	// changed: it must go out with the very next frame, which spreads from the slot
+	// after the frame before it.
 	rig.si_track.write_frame(Timestamp::ZERO, Bytes::from(tick(2))).unwrap();
-	assert_eq!(rig.media(3_000, 0x0014).await, 0, "the revision enters the open span");
-	assert_eq!(rig.media(4_000, 0x0014).await, 1, "the next span closes the revision");
+	assert_eq!(rig.media(3_000, 0x0014).await, 1, "the revision rides the next frame");
+	assert_eq!(rig.media(4_000, 0x0014).await, 0, "and only that one");
 }
 
 /// #3948: an unchanged snapshot repeats on the absolute media-time grid, like the
@@ -4325,32 +4344,32 @@ async fn si_repeats_ride_the_media_grid() {
 
 	// The lead emission lands wherever this exporter joined.
 	rig.si_track.write_frame(Timestamp::ZERO, Bytes::from(sdt_v1)).unwrap();
-	assert_eq!(rig.media(1_500, 0x0011).await, 0, "the first span stays buffered");
+	assert_eq!(rig.media(1_500, 0x0011).await, 0, "the first frame stays buffered");
 	assert_eq!(
 		rig.media(1_900, 0x0011).await,
 		1,
-		"the next span closes the lead emission"
+		"the next frame lets the lead emission out"
 	);
 	// The 2s boundary is 0.5s after the lead: the grid, not a floor from the join.
-	assert_eq!(rig.media(2_000, 0x0011).await, 0, "the repeat enters the open span");
-	assert_eq!(rig.media(2_500, 0x0011).await, 1, "the next span closes the repeat");
+	assert_eq!(rig.media(2_000, 0x0011).await, 1, "the repeat rides the 2s frame");
+	assert_eq!(rig.media(2_500, 0x0011).await, 0, "and only that one");
 
 	// A revision lands mid-slot: it waits only for the 1s revision floor.
 	rig.si_track.write_frame(Timestamp::ZERO, Bytes::from(sdt_v2)).unwrap();
 	assert_eq!(rig.media(2_900, 0x0011).await, 0, "within the floor of the repeat");
 	assert_eq!(
 		rig.media(3_000, 0x0011).await,
-		0,
-		"the revision enters the span once its floor lapses"
+		1,
+		"the revision rides the frame where its floor lapses"
 	);
-	assert_eq!(rig.media(3_500, 0x0011).await, 1, "the next span closes the revision");
+	assert_eq!(rig.media(3_500, 0x0011).await, 0, "and only that one");
 
 	// Repeats stay on the grid after it.
-	assert_eq!(rig.media(4_000, 0x0011).await, 0, "the 4s repeat enters the open span");
-	assert_eq!(rig.media(5_000, 0x0011).await, 1, "the next span closes it");
+	assert_eq!(rig.media(4_000, 0x0011).await, 1, "the 4s repeat");
+	assert_eq!(rig.media(5_000, 0x0011).await, 0, "nothing until the next grid slot");
 	assert_eq!(rig.media(5_900, 0x0011).await, 0, "nothing between grid slots");
-	assert_eq!(rig.media(6_000, 0x0011).await, 0, "the 6s repeat enters the open span");
-	assert_eq!(rig.media(6_100, 0x0011).await, 1, "the next span closes it");
+	assert_eq!(rig.media(6_000, 0x0011).await, 1, "the 6s repeat");
+	assert_eq!(rig.media(6_100, 0x0011).await, 0, "and only that one");
 }
 
 /// A clock table (TDT/TOT) never repeats an unchanged snapshot: a repeat re-asserts
@@ -4362,11 +4381,11 @@ async fn si_clock_tables_do_not_repeat_unchanged() {
 	let mut rig = si_cadence_rig(0x0014, 0x70, Duration::from_secs(2)).await;
 
 	rig.si_track.write_frame(Timestamp::ZERO, Bytes::from(tick(1))).unwrap();
-	assert_eq!(rig.media(0, 0x0014).await, 0, "the first span stays buffered");
+	assert_eq!(rig.media(0, 0x0014).await, 0, "the first frame stays buffered");
 	assert_eq!(
 		rig.media(1_000, 0x0014).await,
 		1,
-		"the next span closes the lead emission"
+		"the next frame lets the lead emission out"
 	);
 	let mut repeats = 0;
 	for millis in (2_000..=9_000).step_by(1_000) {
@@ -4375,8 +4394,8 @@ async fn si_clock_tables_do_not_repeat_unchanged() {
 	assert_eq!(repeats, 0, "an unchanged time is never re-sent");
 
 	rig.si_track.write_frame(Timestamp::ZERO, Bytes::from(tick(2))).unwrap();
-	assert_eq!(rig.media(10_000, 0x0014).await, 0, "the new time enters the open span");
-	assert_eq!(rig.media(11_000, 0x0014).await, 1, "the next span closes it");
+	assert_eq!(rig.media(10_000, 0x0014).await, 1, "the new time rides the next frame");
+	assert_eq!(rig.media(11_000, 0x0014).await, 0, "and only that one");
 }
 
 /// A reordered (B-frame) timestamp below the emission anchor earns no credit:
@@ -4391,30 +4410,32 @@ async fn si_reordered_frames_earn_no_emission_credit() {
 	rig.si_track
 		.write_frame(Timestamp::ZERO, Bytes::from(section(0)))
 		.unwrap();
-	assert_eq!(rig.media(1_000, 0x0011).await, 0, "the first span stays buffered");
+	assert_eq!(rig.media(1_000, 0x0011).await, 0, "the first frame stays buffered");
 
 	rig.si_track
 		.write_frame(Timestamp::ZERO, Bytes::from(section(1)))
 		.unwrap();
-	assert_eq!(rig.media(2_500, 0x0011).await, 1, "the lead emission closes");
+	assert_eq!(
+		rig.media(2_500, 0x0011).await,
+		2,
+		"the lead emission and the revision riding the 2.5s frame"
+	);
 
 	// The next revision arrives on a frame stepping back behind the 2.5s anchor,
-	// like a B-frame emitted in decode order: no elapsed time, no emission. It still
-	// decodes after the frame before it, so it closes the span the prior revision
-	// rode, and its own span carries nothing.
+	// like a B-frame emitted in decode order: no elapsed time, no emission.
 	rig.si_track
 		.write_frame(Timestamp::ZERO, Bytes::from(section(2)))
 		.unwrap();
-	assert_eq!(rig.media(2_400, 0x0011).await, 1, "only the prior revision closes");
+	assert_eq!(rig.media(2_400, 0x0011).await, 0, "a reordered frame earns no credit");
 
 	// The floor measures from the 2.5s anchor: not due at 3.4s, due at 3.5s.
-	assert_eq!(rig.media(3_400, 0x0011).await, 0, "a reordered frame earns no credit");
+	assert_eq!(rig.media(3_400, 0x0011).await, 0, "not due within the floor");
 	assert_eq!(
 		rig.media(3_500, 0x0011).await,
-		0,
-		"the deferred revision enters the span at the floor"
+		1,
+		"the deferred revision rides the frame at the floor"
 	);
-	assert_eq!(rig.media(3_600, 0x0011).await, 1, "the next span closes the revision");
+	assert_eq!(rig.media(3_600, 0x0011).await, 0, "and only that one");
 	assert_eq!(rig.exporter.discontinuity(), 0, "B-frame reordering is not a rewind");
 }
 
@@ -4433,11 +4454,16 @@ async fn si_anchor_survives_a_zero_interval_reorder() {
 	rig.si_track
 		.write_frame(Timestamp::ZERO, Bytes::from(section(0)))
 		.unwrap();
-	assert_eq!(rig.media(1_000, 0x0011).await, 0, "the first span stays buffered");
-	assert_eq!(rig.media(3_000, 0x0011).await, 1, "the anchor advances to 3s");
+	assert_eq!(rig.media(1_000, 0x0011).await, 0, "the first frame stays buffered");
+	assert_eq!(
+		rig.media(3_000, 0x0011).await,
+		2,
+		"the 1s emission, and the anchor advancing to 3s"
+	);
 	// A reordered frame steps back behind the anchor, into the previous 1s slot;
-	// zero interval still emits. It decodes after the 3s frame, so it closes that span.
-	assert_eq!(rig.media(2_900, 0x0011).await, 1, "the 3s span closes");
+	// zero interval still emits. It decodes just after the 3s frame, so it shares that
+	// frame's last slot and waits with it.
+	assert_eq!(rig.media(2_900, 0x0011).await, 0, "the reordered frame waits");
 
 	// The catalog raises the interval to 1s. The grid slot must be the 3s anchor's,
 	// not the reordered 2.9s emission's.
@@ -4452,10 +4478,12 @@ async fn si_anchor_survives_a_zero_interval_reorder() {
 		.get_mut(&0x42)
 		.unwrap()
 		.interval = Some(Duration::from_secs(1));
-	assert_eq!(rig.media(3_400, 0x0011).await, 1, "the reordered span closes");
-	assert_eq!(rig.media(3_900, 0x0011).await, 0, "still in the anchor's slot");
-	assert_eq!(rig.media(4_000, 0x0011).await, 0, "the due table enters the open span");
-	assert_eq!(rig.media(4_100, 0x0011).await, 1, "the next span closes the due table");
+	// The decode clock catches up on the reorder over the next frames, so count the
+	// emissions across them rather than per frame.
+	let held = rig.media(3_400, 0x0011).await + rig.media(3_900, 0x0011).await;
+	assert_eq!(held, 1, "only the reordered emission, still in the anchor's slot");
+	let due = rig.media(4_000, 0x0011).await + rig.media(4_100, 0x0011).await + rig.media(4_200, 0x0011).await;
+	assert_eq!(due, 1, "the 4s table, once");
 	assert_eq!(rig.exporter.discontinuity(), 0, "B-frame reordering is not a rewind");
 }
 
@@ -4476,10 +4504,9 @@ async fn si_rapid_revisions_are_rate_bounded() {
 		let frames = rig.media_frames(u64::from(i) * 250).await;
 		let count = count_pid(&frames, 0x0011);
 		emitted += count;
-		if i == 5 {
-			// The 1s floor lapses here; the emission carries the newest revision,
-			// not the revisions that arrived after it while its span was buffered.
-			assert_eq!(count, 1, "the next span closes the 1s emission");
+		if i == 4 {
+			// The 1s floor lapses here, and the emission carries the newest revision.
+			assert_eq!(count, 1, "the 1s emission");
 			let needle = section(4);
 			assert!(
 				frames
@@ -4729,10 +4756,8 @@ async fn pcr_stamps_step_by_the_grid() {
 /// rendition, where the exporter has no uniform cadence to lean on: frames arrive in
 /// decode order, and the two tracks advance the media clock at different rates. The
 /// clock still lands among the bytes it labels rather than clustering, though the
-/// gaps are no longer uniform: a span is however long it took the next timestamp to
-/// arrive, which for interleaved tracks is nothing like the media a frame's bytes
-/// represent. Evening that out needs the muxer to hold a byte buffer and drain it at
-/// a measured rate, which this does not do.
+/// gaps are not uniform: without a multiplex rate each frame spreads only over the
+/// slots since the frame before it.
 #[tokio::test(start_paused = true)]
 async fn pcr_stays_among_the_bytes_across_reordered_tracks() {
 	let data = include_bytes!("test_data/scte35/kyrion_dirtystart.ts");
@@ -4758,8 +4783,7 @@ async fn pcr_stays_among_the_bytes_across_reordered_tracks() {
 		"no clock packet may sit adjacent to the previous one: {gaps:?}"
 	);
 
-	// Stamps still step by exactly one slot, apart from the first interval, which
-	// covers the leading span rather than a whole slot.
+	// Stamps step by exactly one slot.
 	let interval = PCR_INTERVAL.as_micros() as i128;
 	let off = pcrs
 		.windows(2)
@@ -5374,7 +5398,7 @@ async fn reordered_video_loses_nothing_on_a_clean_path() {
 	);
 	let decode = pes_decode_in_order(&out);
 	assert!(
-		decode.is_sorted(),
+		in_decode_order(&decode),
 		"a frame went out ahead of an earlier one: {decode:?}"
 	);
 }

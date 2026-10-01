@@ -12,9 +12,12 @@ use bytes::BytesMut;
 /// [`std::time::Duration::ZERO`](std::time::Duration::ZERO) budget collapses to the live edge:
 /// completeness has to be asked for.
 const RECORDING_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
-/// How long a drain waits for the next frame: past the recording delay, so the first
-/// frame goes out, and then until output stops.
-const DRAIN: std::time::Duration = RECORDING_MAX_AGE.saturating_add(std::time::Duration::from_secs(1));
+/// How long a drain waits for the next frame: past the recording delay, the mux-ahead
+/// window a multiplex rate adds on top of it, and the clip, so the first frame goes out,
+/// and then until output stops.
+const DRAIN: std::time::Duration = RECORDING_MAX_AGE
+	.saturating_mul(3)
+	.saturating_add(std::time::Duration::from_secs(1));
 
 /// Decode a whole TS buffer into a fresh broadcast and return the catalog.
 fn import_ts(data: &[u8]) -> crate::catalog::hang::Catalog {

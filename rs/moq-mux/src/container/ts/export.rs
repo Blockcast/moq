@@ -3,7 +3,7 @@
 //! [`Export`] subscribes to a MoQ broadcast and produces MPEG-TS: PAT/PMT program
 //! tables and PES packets, packetized into 188-byte TS packets, with the PCR
 //! riding its own adaptation-field-only packets on a fixed media-time grid.
-//! Output is sliced on that grid rather than per media frame ([`Export::emit`]):
+//! Output is sliced on that grid rather than per media frame ([`Schedule`]):
 //! each [`Frame`] is one slot's clock packet plus the bytes belonging to it,
 //! stamped at the slot boundary, so the clock a receiver recovers from byte
 //! position agrees with the values, and a pacing caller releases each slot at
@@ -46,6 +46,7 @@ use crate::container::{ExportSource, Frame};
 use crate::jitter::{self, Arrival, Push};
 
 use super::adts;
+use super::schedule::{self, Schedule};
 use super::catalog;
 
 /// PID of the single program's PMT.
@@ -61,16 +62,9 @@ const PSI_INTERVAL: Duration = Duration::from_millis(500);
 /// enforced on the media timeline. Clamped to the entry's own interval, so a
 /// table asking for faster repetition than this still gets it.
 const SI_REVISION_INTERVAL: Duration = Duration::from_secs(1);
-/// Emit a PCR on every crossing of this media-time grid ([`Export::emit`]).
+/// Emit a PCR on every crossing of this media-time grid ([`Schedule`]).
 /// TR 101 290 flags a gap over 40 ms; broadcast muxes emit every 25-40 ms.
 pub(super) const PCR_INTERVAL: Duration = Duration::from_millis(25);
-/// How many missed PCR slots to backfill at most: one second's worth. Frames
-/// coarser than the grid cross several slots at a time and every one is filled so
-/// the ramp stays uniform, down to a 1 fps cadence. Past this cap the media
-/// didn't have a coarse cadence, it had an outage, and reconstructing a dense
-/// clock history for a span that carried no bytes only stalls anything pacing on
-/// the asserted values.
-const PCR_BACKFILL: u128 = 40;
 /// A null packet: PID 0x1FFF, payload only, all stuffing. Its continuity counter
 /// is don't-care (ISO 13818-1), so one template serves every one.
 pub(super) const NULL_PACKET: [u8; TsPacket::SIZE] = {
@@ -81,18 +75,6 @@ pub(super) const NULL_PACKET: [u8; TsPacket::SIZE] = {
 	packet[3] = 0x10;
 	packet
 };
-/// Grid slots per second, so the multiplex rate in bits per second is also the
-/// per-slot allowance in [`STUFFING_UNIT`]s.
-const SLOTS_PER_SECOND: i64 = (Duration::from_secs(1).as_nanos() / PCR_INTERVAL.as_nanos()) as i64;
-const _: () = assert!(
-	Duration::from_secs(1)
-		.as_nanos()
-		.is_multiple_of(PCR_INTERVAL.as_nanos())
-);
-/// Fixed-point unit of the stuffing balance: one packet is this many units, so that
-/// one slot at `mux_rate` bits per second is exactly `mux_rate` units and no slot
-/// rounds on its own. The remainder carries across slots instead.
-const STUFFING_UNIT: i64 = TsPacket::SIZE as i64 * 8 * SLOTS_PER_SECOND;
 /// Upper bound on an accepted multiplex rate, in bits per second: far above any
 /// broadcast contribution multiplex, while bounding one slot's null allocation
 /// to a few megabytes. Zero and anything past it are refused where they enter,
@@ -131,10 +113,8 @@ pub struct Export<E: catalog::Catalog = ()> {
 	generation: u64,
 
 	tracks: HashMap<String, Track>,
-	/// Continuity counter per PID (PAT, PMT, and each elementary stream).
-	counters: HashMap<u16, ContinuityCounter>,
-	/// Counter state before the uncommitted span, restored if a rewind discards it.
-	span_counters: Option<HashMap<u16, ContinuityCounter>>,
+	/// The next continuity counter per PID, numbered as packets go out.
+	counters: HashMap<u16, u8>,
 	/// PMT program-level descriptors captured on import, re-emitted in the PMT.
 	program_descriptors: Vec<catalog::Descriptor>,
 	/// Transport/service identity captured on import, used to rebuild a consistent
@@ -154,37 +134,20 @@ pub struct Export<E: catalog::Catalog = ()> {
 	psi: Option<Psi>,
 	/// Media timestamp of the last PAT/PMT emission ([`due`]).
 	last_psi: Option<Timestamp>,
-	/// Grid slot of the last PCR emission ([`Self::emit`]).
-	last_pcr: Option<u128>,
 	/// Program generation being muxed; source counters are local to each rendition.
 	epoch: u64,
 	/// Generation of the last returned frame, updated only at the output boundary.
 	emitted_epoch: u64,
 	pcr_discontinuity: bool,
-	/// TS packets muxed into the span that is still open.
-	pending: Vec<u8>,
-	/// Offsets into [`pending`](Self::pending) where a keyframe's packets begin, so
-	/// the output frame carrying one keeps the flag.
-	keyframes: Vec<usize>,
-	/// Output frames ready to hand out, one per grid slot the last span covered.
+	/// Lays the muxed packets onto the PCR grid.
+	schedule: Schedule,
+	/// Output frames ready to hand out, one per grid slot.
 	queue: VecDeque<Frame>,
-	/// Continuity counter of the last packet emitted on the PCR PID. A clock packet
-	/// carries no payload, so it repeats whatever preceded it on the wire rather
-	/// than advancing the counter ([`Export::pcr_at`]).
-	pcr_cc: Option<u8>,
-	/// Media time the next span's bytes are transmitted from ([`Export::emit`]).
-	clock: Option<Timestamp>,
-	/// Earliest decode time muxed into the open span: what its bytes have to arrive
-	/// before, so it bounds how far the clock may run.
-	low: Option<Timestamp>,
-	/// Decode time that opened the current span, which closes on a later one.
-	watermark: Option<Timestamp>,
 	/// The rate to pad the output to with null packets, in bits per second: the
 	/// builder override when set, else the catalog's recorded multiplex rate, else
-	/// none and the output is unpadded ([`Self::stuff`]).
+	/// none and the output is unpadded ([`Schedule`]).
 	mux_rate: Option<u64>,
 	mux_rate_override: Option<u64>,
-	stuffing: Stuffing,
 	/// Tune-in point: the first video keyframe's timestamp, captured when the program
 	/// tables are built. Non-video frames before it are dropped so the keyframe leads
 	/// the stream.
@@ -461,18 +424,6 @@ enum Kind {
 	},
 }
 
-/// The null stuffing owed to the multiplex rate ([`Export::stuff`]).
-#[derive(Default)]
-struct Stuffing {
-	/// Packets the rate has allowed minus packets sent, in [`STUFFING_UNIT`]s.
-	/// Negative while the media alone exceeds the rate.
-	balance: i64,
-	/// Packets sent since the last clock packet, that packet included.
-	since_pcr: u64,
-	/// Whether the debt cap has been hit and reported in the current overrun.
-	overrun: bool,
-}
-
 /// The program tables plus the resolved PID layout.
 struct Psi {
 	pat: Pat,
@@ -728,7 +679,6 @@ impl<E: catalog::Catalog> Export<E> {
 			generation: 0,
 			tracks: HashMap::new(),
 			counters: HashMap::new(),
-			span_counters: None,
 			program_descriptors: Vec::new(),
 			program: None,
 			si: BTreeMap::new(),
@@ -736,21 +686,14 @@ impl<E: catalog::Catalog> Export<E> {
 			si_flushed: false,
 			psi: None,
 			last_psi: None,
-			last_pcr: None,
 			epoch: 0,
 			emitted_epoch: 0,
 			pcr_discontinuity: false,
-			pending: Vec::new(),
-			keyframes: Vec::new(),
+			schedule: Schedule::new(Duration::ZERO),
 			queue: VecDeque::new(),
-			pcr_cc: None,
-			clock: None,
-			low: None,
-			watermark: None,
 			video_start: None,
 			mux_rate: None,
 			mux_rate_override: None,
-			stuffing: Stuffing::default(),
 		})
 	}
 
@@ -766,6 +709,7 @@ impl<E: catalog::Catalog> Export<E> {
 		}
 		self.mux_rate_override = Some(mux_rate);
 		self.mux_rate = sanitize_mux_rate(mux_rate);
+		self.schedule.set_rate(self.mux_rate);
 		self
 	}
 
@@ -776,10 +720,17 @@ impl<E: catalog::Catalog> Export<E> {
 	/// between them. A frame that arrives after its deadline is dropped, and a video
 	/// track that dropped one resumes at its next keyframe. The delay is also each
 	/// source's staleness budget (see [`Consumer`](crate::container::Consumer)).
-	/// Defaults to [`Duration::ZERO`].
+	///
+	/// With a multiplex rate it is also how far ahead of its decode time a frame may go
+	/// out: a keyframe bigger than one PCR interval at the rate spreads over the intervals
+	/// before it, back as far as the delay, so the output trails the source by up to twice
+	/// the delay. A frame that does not fit there fails the export. Defaults to
+	/// [`Duration::ZERO`], which pads no further ahead than one interval.
 	pub fn with_delay(mut self, delay: Duration) -> Self {
 		self.delay = delay;
 		self.jitter = jitter::Buffer::new(delay);
+		self.schedule = Schedule::new(delay);
+		self.schedule.set_rate(self.mux_rate);
 		self
 	}
 
@@ -880,12 +831,10 @@ impl<E: catalog::Catalog> Export<E> {
 			self.fill(waiter)?;
 		}
 
-		// 4. Mux each frame the jitter buffer lets go into the open span (the first
-		// one carries the buffered PAT/PMT). Nothing goes out until a later
-		// timestamp measures that span: only then is it known how many bytes it
-		// carried, which is what puts the clock packets at the byte position their
-		// own values imply and lets the caller's pacer release each at the instant
-		// it asserts. See [`Self::advance`].
+		// 4. Mux each frame the jitter buffer lets go (the first carries the buffered
+		// PAT/PMT) and lay out every grid slot it settles. A slot is settled once every
+		// frame that could ride it has been muxed: the jitter buffer hands frames over in
+		// decode order, so a frame settles every slot whose window ends before its own.
 		loop {
 			if let Some(out) = self.queue.pop_front() {
 				self.emitted_epoch = self.epoch;
@@ -899,10 +848,10 @@ impl<E: catalog::Catalog> Export<E> {
 				},
 			};
 			if ready.generation > self.generation {
-				if !self.pending.is_empty() {
+				if !self.schedule.is_empty() {
 					// A boundary ends valid media rather than reneging it.
 					// Return that tail under the old generation before adopting the new one.
-					self.emit(None)?;
+					self.lay(None)?;
 					self.held = Some(ready);
 					continue;
 				}
@@ -916,20 +865,21 @@ impl<E: catalog::Catalog> Export<E> {
 				.map(|(name, _)| name.clone())
 				.context("frame for an unknown PID")?;
 			self.last_timestamp = Some(ready.item.frame.timestamp);
-			self.advance(ready.item.decode)?;
+			let decode = ready.item.decode.as_nanos();
 			self.mux(&name, ready.item)?;
+			self.lay(Some(schedule::slot(decode)))?;
 		}
 
-		// 5. Once every track has drained, no later timestamp is coming to measure
-		// the open span, so its bytes go out whole. That's independent of the
-		// catalog: a retained track finishes while the broadcast stays live, and
-		// holding its tail until the catalog closed would strand it indefinitely.
+		// 5. Once every track has drained, nothing more can ride the slots still open, so
+		// they go out. That's independent of the catalog: a retained track finishes while
+		// the broadcast stays live, and holding its tail until the catalog closed would
+		// strand it indefinitely.
 		let drained = !self.tracks.is_empty()
 			&& self.tracks.values().all(|t| t.finished)
 			&& self.jitter.is_empty()
 			&& self.held.is_none();
 		if drained {
-			self.emit(None)?;
+			self.lay(None)?;
 			if let Some(out) = self.queue.pop_front() {
 				self.emitted_epoch = self.epoch;
 				return Poll::Ready(Ok(Some(out)));
@@ -975,6 +925,7 @@ impl<E: catalog::Catalog> Export<E> {
 				self.write_section(&mut out, pid, section)?;
 			}
 		}
+		self.number(&mut out);
 		Ok(Some(Frame {
 			timestamp,
 			duration: None,
@@ -1056,10 +1007,8 @@ impl<E: catalog::Catalog> Export<E> {
 				})
 			}),
 		};
-		if self.mux_rate != mux_rate {
-			self.mux_rate = mux_rate;
-			self.stuffing = Stuffing::default();
-		}
+		self.mux_rate = mux_rate;
+		self.schedule.set_rate(mux_rate);
 
 		// Reconcile the SI subscriptions with the catalog's map. Entries may appear
 		// after the PAT/PMT is built (a table acquired late): they ride standalone
@@ -1363,28 +1312,20 @@ impl<E: catalog::Catalog> Export<E> {
 		Ok(())
 	}
 
-	/// Discard uncommitted bytes and restart the program clock. Every rendition
+	/// Discard what has not gone out and restart the program clock. Every rendition
 	/// joins the new generation: no track is fenced across a declared marker, since a
-	/// latency skip on one track says nothing about another's timeline.
+	/// latency skip on one track says nothing about another's timeline. The continuity
+	/// counters run on, since they number only what went out.
 	fn rewind(&mut self) {
 		self.epoch += 1;
-		if let Some(counters) = self.span_counters.take() {
-			self.counters = counters;
-		}
-		self.pending.clear();
-		self.keyframes.clear();
+		self.schedule.clear();
 		self.queue.clear();
-		self.watermark = None;
-		self.clock = None;
-		self.low = None;
-		self.last_pcr = None;
 		self.last_psi = None;
 		for si in self.si.values_mut() {
 			si.last_emit = None;
 		}
 		self.video_start = None;
 		self.pcr_discontinuity = true;
-		self.stuffing = Stuffing::default();
 	}
 
 	/// Header is ready when every track's [`ExportSource`] has resolved its
@@ -1567,12 +1508,8 @@ impl<E: catalog::Catalog> Export<E> {
 		Ok(())
 	}
 
-	/// Packetize one media frame into the open span, re-emitting PAT/PMT before
-	/// video keyframes (and periodically) so receivers can tune in mid-stream.
-	///
-	/// The bytes are buffered rather than returned: which grid slots they belong
-	/// to isn't known until a later timestamp measures the span (see
-	/// [`Self::advance`]).
+	/// Packetize one media frame and queue it on the [`Schedule`], re-emitting PAT/PMT
+	/// before video keyframes (and periodically) so receivers can tune in mid-stream.
 	fn mux(&mut self, name: &str, queued: Queued) -> anyhow::Result<()> {
 		let Queued {
 			frame,
@@ -1580,9 +1517,6 @@ impl<E: catalog::Catalog> Export<E> {
 			dts,
 			description,
 		} = queued;
-		if self.span_counters.is_none() {
-			self.span_counters = Some(self.counters.clone());
-		}
 		let track = self.tracks.get_mut(name).context("missing track")?;
 		let pid = track.pid;
 		let kind = track.kind.clone();
@@ -1703,241 +1637,73 @@ impl<E: catalog::Catalog> Export<E> {
 				self.write_pes(&mut out, &unit, &es_payload)?;
 			}
 		}
-		if keyframe {
-			self.keyframes.push(self.pending.len());
-		}
-		self.pending.extend_from_slice(&out);
-		self.low = Some(self.low.map_or(decode, |low| low.min(decode)));
+		self.schedule.push(decode.as_nanos(), out, keyframe);
 		Ok(())
 	}
 
-	/// Close the open span if `ts` passes the watermark, laying its bytes out.
+	/// Lay out every grid slot the schedule has settled, one [`Frame`] each: `known` is
+	/// the first slot a frame still to be muxed could be due in, or `None` when nothing
+	/// more is coming.
 	///
-	/// `ts` is the decode time of the frame about to be muxed. Passing the watermark
-	/// means the span that decode time opened is done: everything buffered since is
-	/// exactly the bytes it carried, and the distance from it measures how long it ran.
-	/// The jitter buffer hands frames over in decode order, so only a tie, or a frame
-	/// read out of order under a zero delay, trails the watermark; it closes nothing,
-	/// and its bytes join the open span.
+	/// Each frame opens with its slot's clock packet, so the packet count between
+	/// consecutive PCRs is what the interval between their values carries, and a consumer
+	/// holding only the byte stream (which is every MPEG-TS tool) recovers the same clock
+	/// from byte position that the values assert. Each frame is stamped at its slot
+	/// boundary, so a pacing caller releases the clock at the instant it asserts.
 	///
-	/// This is why nothing goes out on arrival, and why it can't. A span's bytes
-	/// have to reach a receiver before the units in it decode, so they ride the
-	/// grid slots *preceding* the span, which are only known once the span has
-	/// closed. That is the mux buffer: the exporter runs two spans behind the media
-	/// clock, by a constant amount, so a caller pacing on the stamps still releases
-	/// every slot at the interval its own PCR value asserts.
-	fn advance(&mut self, ts: Timestamp) -> anyhow::Result<()> {
-		let Some(watermark) = self.watermark else {
-			self.watermark = Some(ts);
+	/// The PES units cannot carry the clock themselves: a PCR sampled from the DTS would
+	/// step with the frame cadence, and no downstream CBR stage can repair that, because a
+	/// groomer can only place the clock samples it receives. So the PCR asserts its own
+	/// uniform ramp instead: absolute grid slots on the media timeline, shared by every
+	/// exporter of the broadcast, like [`due`].
+	fn lay(&mut self, known: Option<u128>) -> anyhow::Result<()> {
+		let Some(psi) = self.psi.as_ref() else {
 			return Ok(());
 		};
-		if ts <= watermark {
-			return Ok(());
-		}
-		self.watermark = Some(ts);
-		let span = ts.as_nanos().saturating_sub(watermark.as_nanos());
-		self.emit(Some(span))
-	}
-
-	/// Lay the open span's bytes across the grid slots that run up to its decode
-	/// time, one [`Frame`] per slot. `span` is how long the span ran, or `None` at
-	/// end of stream, where nothing measured it.
-	///
-	/// Each frame opens with the clock packets whose slot boundary it starts at,
-	/// then carries the share of the bytes its slice of the interval earns. Three
-	/// things follow, and they are the whole point of muxing this way. The packet
-	/// count between consecutive PCRs is proportional to the difference between
-	/// their values, so a consumer holding only the byte stream (which is every
-	/// MPEG-TS tool) recovers the same clock from byte position that the values
-	/// assert. Each frame is stamped at its own slot boundary, so a pacing caller
-	/// releases the clock at the instant it asserts rather than when the media that
-	/// revealed it arrived. And the interval ends at the span's earliest media
-	/// decode time, so every byte precedes the decode time of the unit it belongs to.
-	///
-	/// The PES units cannot carry the clock themselves: a PCR sampled from the DTS
-	/// would step with the frame cadence, and no downstream CBR stage can repair
-	/// that, because a groomer can only place the clock samples it receives. So the
-	/// PCR asserts its own uniform ramp instead: absolute grid slots on the media
-	/// timeline (shared by every exporter of the broadcast, like [`due`]).
-	fn emit(&mut self, span: Option<u128>) -> anyhow::Result<()> {
-		self.span_counters = None;
-		let bytes = std::mem::take(&mut self.pending);
-		let keyframes = std::mem::take(&mut self.keyframes);
-		let Some(to) = self.low.take() else { return Ok(()) };
-		let packets = bytes.len() / TsPacket::SIZE;
-
-		// Transmit from where the last span stopped up to this one's decode time, so
-		// the intervals abut and the clock neither repeats nor reverses. The first
-		// has nothing to abut, so it takes the span's own measured length.
-		//
-		// The clock only ever moves forward. A track skewed far enough behind that it
-		// decodes before the clock already reached it can't be placed ahead of its own
-		// decode time, and [`Self::with_delay`] owns that skew, so its bytes go out at the
-		// clock rather than dragging it backwards.
-		let start = match self.clock {
-			Some(clock) => clock.as_nanos(),
-			None => to.as_nanos().saturating_sub(span.unwrap_or(0)),
-		};
-		let end = to.as_nanos().max(start);
-		let from = stamp(start)?;
-		self.clock = Some(stamp(end)?);
-
-		// The slot `start` sits in; its boundary is at or before every byte here.
-		let open = start / PCR_INTERVAL.as_nanos();
-		// The last boundary strictly inside the interval: `end` opens the next one's.
-		let last = slot_before(end, PCR_INTERVAL).max(open);
-		// Slots still owed a clock packet. Backfill every missed one so the ramp
-		// stays uniform when frames are coarser than the grid, but cap it: past the
-		// cap the media itself gapped, and a dense clock history for a span that
-		// carried no bytes helps nobody.
-		let first = self
-			.last_pcr
-			.map_or(open, |l| l + 1)
-			.max((last + 1).saturating_sub(PCR_BACKFILL));
-		// Spread the bytes only across an interval the grid can describe. Past the
-		// cap they were muxed before a media gap, so they belong at its start rather
-		// than smeared across silence.
-		let spread = last - open < PCR_BACKFILL;
-		let width = end - start;
-
-		// The first frame opens at `from` rather than a boundary, and carries every
-		// clock packet whose slot has already begun.
-		let pcr_pid = self.psi.as_ref().context("PSI not built")?.pcr_pid;
-		let mut payload = Vec::new();
-		for index in first..=open {
-			self.stuff(index, &mut payload);
-			let before = counter_before(&bytes, 0, pcr_pid, self.pcr_cc);
-			let clock = self.pcr_at(index, before)?;
-			self.send(&mut payload, &clock);
-		}
-		let mut cut = 0;
-		let mut at = from;
-
-		// One frame per boundary inside the interval. `first` can only exceed
-		// `open + 1` when the backfill cap skipped the slots below it, and that cap
-		// bounds this range to [`PCR_BACKFILL`] iterations however long the gap was.
-		for index in (open + 1).max(first)..=last {
-			let boundary = slot_stamp(index)?;
-			let next = if spread && width > 0 {
-				(packets as u128 * (boundary.as_nanos() - start) / width) as usize
-			} else {
-				packets
-			};
-			self.send(&mut payload, &bytes[cut * TsPacket::SIZE..next * TsPacket::SIZE]);
-			self.stuff(index, &mut payload);
-			self.push(at, payload, &keyframes, cut, next);
-			cut = next;
-			at = boundary;
-			let before = counter_before(&bytes, cut * TsPacket::SIZE, pcr_pid, self.pcr_cc);
-			let clock = self.pcr_at(index, before)?;
-			payload = Vec::new();
-			self.send(&mut payload, &clock);
-		}
-
-		self.send(&mut payload, &bytes[cut * TsPacket::SIZE..]);
-		self.push(at, payload, &keyframes, cut, packets);
-		if let Some(cc) = counter_before(&bytes, bytes.len(), pcr_pid, None) {
-			self.pcr_cc = Some(cc);
+		let (pcr_pid, pmt_pid) = (psi.pcr_pid, psi.pmt_pid);
+		while let Some(slot) = self.schedule.next(known)? {
+			let mut payload = self.pcr_at(slot.index, pcr_pid)?;
+			payload.extend_from_slice(&slot.layout(pmt_pid, &NULL_PACKET));
+			self.number(&mut payload);
+			self.queue.push_back(Frame {
+				timestamp: slot_stamp(slot.index)?,
+				duration: None,
+				payload: Bytes::from(payload),
+				keyframe: slot.keyframe,
+			});
 		}
 		Ok(())
 	}
 
-	/// Append packets to the open output frame, counting them against the rate.
-	fn send(&mut self, payload: &mut Vec<u8>, packets: &[u8]) {
-		payload.extend_from_slice(packets);
-		self.stuffing.since_pcr += (packets.len() / TsPacket::SIZE) as u64;
-	}
-
-	/// Settle the interval that closes at grid slot `index`, the one the clock packet
-	/// about to be written for it ends, appending the null packets that bring it up
-	/// to the multiplex rate. Nothing without a rate.
-	///
-	/// The rate credits each slot its exact fractional allowance and every packet
-	/// sent debits one, so the remainder carries across slots and the long-run count
-	/// is exact. Media is never delayed or dropped to fit: a slot that already
-	/// exceeds its allowance gets no nulls and carries the debt forward, and a source
-	/// that sustains more than the rate simply overruns it. The debt is capped at one
-	/// second of packets and reported once per overrun, or the rate would never
-	/// recover after a long burst. Credit is capped the same way, matching the clock
-	/// backfill: past it the media gapped, and a second of stuffing marks that without
-	/// filling the whole gap.
-	fn stuff(&mut self, index: u128, payload: &mut Vec<u8>) {
-		let since = std::mem::take(&mut self.stuffing.since_pcr);
-		let (Some(rate), Some(last)) = (self.mux_rate, self.last_pcr) else {
-			return;
-		};
-		// The rate is sanitized where it enters (the builder and the catalog), so
-		// this holds; refuse to pad rather than wrap if it ever does not.
-		let Ok(rate) = i64::try_from(rate) else {
-			return;
-		};
-		let slots = index.saturating_sub(last).min(PCR_BACKFILL) as i64;
-		let stuffing = &mut self.stuffing;
-		stuffing.balance = stuffing
-			.balance
-			.saturating_add(slots.saturating_mul(rate))
-			.saturating_sub((since as i64).saturating_mul(STUFFING_UNIT));
-		let floor = rate.saturating_mul(-SLOTS_PER_SECOND);
-		if stuffing.balance < floor {
-			if !std::mem::replace(&mut stuffing.overrun, true) {
-				tracing::warn!(mux_rate = rate, "MPEG-TS output exceeds the multiplex rate");
+	/// Number the continuity counters of packets about to go out. A packet without a
+	/// payload (a clock packet) repeats the counter before it (ISO 13818-1 2.4.3.3); before
+	/// anything has gone out on its PID, any value starts a valid run.
+	fn number(&mut self, packets: &mut [u8]) {
+		for packet in packets.chunks_exact_mut(TsPacket::SIZE) {
+			let pid = u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2]);
+			if pid == 0x1FFF {
+				continue;
 			}
-			stuffing.balance = floor;
-		} else if stuffing.balance >= 0 {
-			stuffing.overrun = false;
-		}
-		let nulls = (stuffing.balance / STUFFING_UNIT).max(0);
-		// Never emit more than the slots just credited could allow: a bound on one
-		// call's allocation whatever the balance holds. A no-op on a rate that came
-		// through [`sanitize_mux_rate`], whose balance carries less than one packet.
-		// (A manual `div_ceil`: all terms are non-negative, and the toolchain's
-		// signed `div_ceil` is still unstable.)
-		let ceiling = slots.saturating_mul(rate).saturating_add(STUFFING_UNIT - 1) / STUFFING_UNIT;
-		let nulls = nulls.min(ceiling);
-		stuffing.balance -= nulls * STUFFING_UNIT;
-		payload.reserve(nulls as usize * TsPacket::SIZE);
-		for _ in 0..nulls {
-			payload.extend_from_slice(&NULL_PACKET);
+			let next = self.counters.entry(pid).or_default();
+			let cc = match packet[3] & 0x10 != 0 {
+				true => std::mem::replace(next, (*next + 1) & ContinuityCounter::MAX),
+				false => next.wrapping_sub(1) & ContinuityCounter::MAX,
+			};
+			packet[3] = (packet[3] & 0xf0) | cc;
 		}
 	}
 
-	/// Queue one output frame, unless it would be empty. `from`..`to` are the packet
-	/// indices it carries, which decide whether a keyframe begins in it.
-	fn push(&mut self, timestamp: Timestamp, payload: Vec<u8>, keyframes: &[usize], from: usize, to: usize) {
-		if payload.is_empty() {
-			return;
-		}
-		let (from, to) = (from * TsPacket::SIZE, to * TsPacket::SIZE);
-		let keyframe = keyframes.iter().any(|&at| at >= from && at < to);
-		self.queue.push_back(Frame {
-			timestamp,
-			duration: None,
-			payload: Bytes::from(payload),
-			keyframe,
-		});
-	}
-
-	/// The clock packet for grid slot `index`, and record that the slot is served.
+	/// The clock packet for grid slot `index`.
 	///
-	/// The value runs one slot behind the boundary. A receiver times the bytes
-	/// between two clock packets by interpolating their values, and the bytes after
-	/// the last boundary in a span run on toward the next one, past the span's decode
-	/// time; the slot of slack keeps every byte ahead of the unit it belongs to. Back
-	/// off through the 33-bit wrap rather than saturating: a timeline that starts in
-	/// its first slot would otherwise clamp to zero and break the uniform step. The
-	/// wire field is a circular clock, so the masked wrapped value is the correct
-	/// mod-2^33 back-off.
-	fn pcr_at(&mut self, index: u128, before: Option<u8>) -> anyhow::Result<Vec<u8>> {
-		let pcr_pid = self.psi.as_ref().context("PSI not built")?.pcr_pid;
+	/// The value runs one slot behind the boundary, so the bytes of slot `index` are timed
+	/// up to its boundary: a unit due in that slot decodes no earlier ([`schedule::slot`]).
+	/// Back off through the 33-bit wrap rather than saturating: a timeline that starts in
+	/// its first slot would otherwise clamp to zero and break the uniform step. The wire
+	/// field is a circular clock, so the masked wrapped value is the correct mod-2^33
+	/// back-off.
+	fn pcr_at(&mut self, index: u128, pcr_pid: u16) -> anyhow::Result<Vec<u8>> {
 		let ticks = slot_ticks(index, PCR_INTERVAL).wrapping_sub(slot_ticks(1, PCR_INTERVAL));
-		// Nothing has gone out on this PID yet, so there is no counter to repeat and
-		// any value starts a valid run; take the one before the next to be used.
-		let cc = match before {
-			Some(cc) => cc,
-			None => self.counters.entry(pcr_pid).or_default().as_u8().wrapping_sub(1),
-		};
-		self.last_pcr = Some(index);
-		let mut packet = pcr_packet(pcr_pid, ticks, cc)?;
+		let mut packet = pcr_packet(pcr_pid, ticks)?;
 		if std::mem::take(&mut self.pcr_discontinuity) {
 			packet[5] |= 0x80;
 		}
@@ -2068,7 +1834,8 @@ impl<E: catalog::Catalog> Export<E> {
 		Ok(())
 	}
 
-	/// Serialize one TS packet (with its continuity counter) into `out`.
+	/// Serialize one TS packet into `out`. Its continuity counter is numbered when it goes
+	/// out ([`Self::number`]), since the schedule decides that order.
 	fn write_packet(
 		&mut self,
 		out: &mut Vec<u8>,
@@ -2076,9 +1843,7 @@ impl<E: catalog::Catalog> Export<E> {
 		adaptation_field: Option<AdaptationField>,
 		payload: TsPayload,
 	) -> anyhow::Result<()> {
-		let counter = self.counters.entry(pid).or_default();
-		let continuity_counter = *counter;
-		counter.increment();
+		let continuity_counter = ContinuityCounter::default();
 
 		let packet = TsPacket {
 			header: TsHeader {
@@ -2103,22 +1868,17 @@ impl<E: catalog::Catalog> Export<E> {
 /// between PCR base and extension as zeros where ISO 13818-1 requires ones, and
 /// strict analyzers flag that.
 ///
-/// There is no payload, so the field's stuffing fills the packet and the continuity
-/// counter is not incremented (ISO 13818-1 2.4.3.3): `cc` is the counter of
-/// whatever preceded this packet on the same PID, which it repeats. The clock rides
-/// a PID that also carries media, and the packets around it were numbered when they
-/// were muxed rather than when they go out, so this has to come from the wire order
-/// rather than from the counter's current value.
-fn pcr_packet(pid: u16, ticks: u64, cc: u8) -> anyhow::Result<Vec<u8>> {
+/// There is no payload, so the field's stuffing fills the packet; its continuity counter
+/// is numbered when it goes out ([`Export::number`]).
+fn pcr_packet(pid: u16, ticks: u64) -> anyhow::Result<Vec<u8>> {
 	anyhow::ensure!(pid <= 0x1FFF, "PID out of range: {pid}");
-	let cc = cc & ContinuityCounter::MAX;
 	let base = ticks & TS_TIMESTAMP_MASK;
 	let mut p = Vec::with_capacity(TsPacket::SIZE);
 	p.push(0x47);
 	p.push((pid >> 8) as u8);
 	p.push(pid as u8);
 	// adaptation_field_control = adaptation field only, no scrambling.
-	p.push(0x20 | cc);
+	p.push(0x20);
 	// adaptation_field_length covers the rest of the packet.
 	p.push(183);
 	// PCR_flag alone.
@@ -2133,28 +1893,6 @@ fn pcr_packet(pid: u16, ticks: u64, cc: u8) -> anyhow::Result<Vec<u8>> {
 	p.push(0x00);
 	p.resize(TsPacket::SIZE, 0xff);
 	Ok(p)
-}
-
-/// The continuity counter a payload-less packet inserted at byte offset `cut` has to
-/// repeat: the last one before it on `pid`, else the one carried in from the last
-/// span, else one behind the first packet that follows it, which is what keeps the
-/// run continuous where the clock leads the stream and nothing precedes it.
-fn counter_before(bytes: &[u8], cut: usize, pid: u16, carried: Option<u8>) -> Option<u8> {
-	let on_pid = |p: &[u8]| (u16::from(p[1] & 0x1f) << 8 | u16::from(p[2])) == pid;
-	let counter = |p: &[u8]| p[3] & ContinuityCounter::MAX;
-	bytes[..cut]
-		.rchunks_exact(TsPacket::SIZE)
-		.find(|p| on_pid(p))
-		.map(counter)
-		.or(carried)
-		.or_else(|| {
-			bytes[cut..]
-				.as_chunks::<{ TsPacket::SIZE }>()
-				.0
-				.iter()
-				.find(|p| on_pid(p.as_slice()))
-				.map(|p| counter(p).wrapping_sub(1) & ContinuityCounter::MAX)
-		})
 }
 
 /// Optional PES header region carrying PTS only: 2 flag bytes + 1 length byte + 5 PTS bytes.
@@ -2224,18 +1962,6 @@ fn is_clock_table(table_id: u8) -> bool {
 /// divide by it.
 fn slot(timestamp: Timestamp, interval: Duration) -> u128 {
 	Duration::from(timestamp).as_nanos() / interval.as_nanos()
-}
-
-/// Index of the last repetition slot to *begin* strictly before `nanos`.
-///
-/// [`slot`] rounds down, so a position sitting exactly on a boundary belongs to the slot that
-/// boundary opens. When the position is the exclusive end of an interval, that slot is the
-/// next interval's, not this one's, hence the offset.
-fn slot_before(nanos: u128, interval: Duration) -> u128 {
-	if nanos == 0 {
-		return 0;
-	}
-	(nanos - 1) / interval.as_nanos()
 }
 
 /// A repetition slot's boundary as a media timestamp.
