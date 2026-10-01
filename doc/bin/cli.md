@@ -335,10 +335,7 @@ with the clock started when the first frame arrived, so the output keeps the
 source's pace and interleaves all tracks in decode order whatever their arrival
 skew: two exporters of one broadcast emit them in one order. A frame that
 arrives later than its deadline is dropped, and video then resumes at its next
-keyframe. A keyframe or audio frame that arrives late restarts the clock on
-itself instead, so a source that stalls for longer than the delay pauses the
-output rather than losing everything after the stall. The delay is also how
-stale a group may get before it is skipped.
+keyframe. The delay is also how stale a group may get before it is skipped.
 `--delay 0` holds nothing and drops nothing, writing frames in arrival order.
 
 A stdout export ends with the broadcast. `export ts --linger 10s` waits that

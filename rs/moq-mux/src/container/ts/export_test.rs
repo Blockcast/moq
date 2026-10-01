@@ -3893,8 +3893,8 @@ async fn arrival_order_does_not_change_the_output() {
 	assert!(eager == batched, "arrival order changed the rendering");
 }
 
-/// Video that arrives past its deadline is dropped and counted until its next keyframe, and
-/// everything else still goes out in decode order.
+/// Audio that arrives past its deadline is dropped and counted, and everything else still
+/// goes out in decode order.
 #[tokio::test(start_paused = true)]
 async fn a_late_frame_is_dropped_and_the_rest_keep_their_order() {
 	let delay = Duration::from_millis(100);
@@ -3903,21 +3903,19 @@ async fn a_late_frame_is_dropped_and_the_rest_keep_their_order() {
 	let mut out = Vec::new();
 	for tick in 0..TICKS / 2 {
 		rig.at(tick * VIDEO_US).await;
-		// Video stalls for 320ms, then its backlog lands at once, before the next keyframe.
-		match tick {
-			20..28 => {}
-			28 => (20..=28).for_each(|tick| rig.video(tick)),
-			_ => rig.video(tick),
-		}
+		rig.video(tick);
 		out.extend(poll_frames(&mut export));
-		rig.audio_until(tick * VIDEO_US, &mut export, &mut out);
+		// Audio stalls for 400ms, then its backlog lands at once.
+		if !(20..30).contains(&tick) {
+			rig.audio_until(tick * VIDEO_US, &mut export, &mut out);
+		}
 	}
 	rig.finish();
 	out.extend(drain_frames(&mut export).await);
 
 	let written = rig.audio_index + TICKS / 2;
 	let decode = pes_decode_in_order(&out);
-	assert!(export.dropped() > 0, "the stalled video missed its deadline");
+	assert!(export.dropped() > 0, "the stalled audio missed its deadline");
 	assert_eq!(
 		decode.len() as u64,
 		written - export.dropped(),
