@@ -236,7 +236,14 @@ pub(crate) fn sps_reorder(nal: &[u8]) -> Option<crate::codec::video::Reorder> {
 pub(crate) fn sps_hrd(nal: &[u8]) -> Option<crate::codec::video::Hrd> {
 	let sps = SpsNALUnit::parse(&mut &nal[..]).ok()?;
 	let highest = sps.rbsp.sps_max_sub_layers_minus1 as usize;
-	let hrd = sps.rbsp.vui_parameters.as_ref()?.vui_timing_info.as_ref()?.hrd_parameters.as_ref()?;
+	let hrd = sps
+		.rbsp
+		.vui_parameters
+		.as_ref()?
+		.vui_timing_info
+		.as_ref()?
+		.hrd_parameters
+		.as_ref()?;
 	let layer = hrd.sub_layers.get(highest).or(hrd.sub_layers.last())?;
 	// The NAL HRD's schedules come first when both are present.
 	let schedules = usize::try_from(layer.cpb_cnt_minus1).ok()? + 1;

@@ -294,7 +294,10 @@ impl Schedule {
 
 	/// Whether nothing is left to lay out: every unit sent, and the clock past its decode time.
 	pub fn is_empty(&self) -> bool {
-		self.units.is_empty() && self.horizon.is_none_or(|horizon| self.next.is_some_and(|next| next > horizon))
+		self.units.is_empty()
+			&& self
+				.horizon
+				.is_none_or(|horizon| self.next.is_some_and(|next| next > horizon))
 	}
 
 	/// Drop everything queued and start the grid afresh.
@@ -660,7 +663,11 @@ mod tests {
 			assert_eq!(u128::from(slot.pcr), rate_pcr(slot.index, rate), "slot {}", slot.index);
 			let grid = grid_pcr(slot.index);
 			let packet = TsPacket::SIZE as u128 * 8 * SYSTEM_CLOCK / u128::from(rate);
-			assert!(grid - u128::from(slot.pcr) < packet, "slot {} strays a packet off the grid", slot.index);
+			assert!(
+				grid - u128::from(slot.pcr) < packet,
+				"slot {} strays a packet off the grid",
+				slot.index
+			);
 			laid += 1 + (slot.packets.len() / TsPacket::SIZE + slot.nulls) as u128;
 		}
 	}

@@ -695,7 +695,11 @@ fn video_pes_timing(ts: &[u8]) -> Vec<(u64, u64)> {
 		if packet[1] & 0x40 == 0 || packet[3] & 0x10 == 0 {
 			continue;
 		}
-		let start = 4 + if packet[3] & 0x20 != 0 { usize::from(packet[4]) + 1 } else { 0 };
+		let start = 4 + if packet[3] & 0x20 != 0 {
+			usize::from(packet[4]) + 1
+		} else {
+			0
+		};
 		let Some(pes) = packet.get(start..).filter(|pes| pes.len() >= 19) else {
 			continue;
 		};
@@ -727,7 +731,11 @@ async fn export_decodes_where_the_source_did() {
 	let ts = drain(consumer).await;
 
 	let exported = video_pes_timing(&ts);
-	assert!(exported.len() > 100, "expected the full feed, got {} frames", exported.len());
+	assert!(
+		exported.len() > 100,
+		"expected the full feed, got {} frames",
+		exported.len()
+	);
 	// The capture ends mid-reorder, so the last frame's slot is one the encoder filled with a
 	// picture past the end. Timestamps cross MoQ in microseconds, so each is within a tick.
 	for (i, &(pts, dts)) in exported[..exported.len() - 1].iter().enumerate() {
@@ -735,7 +743,10 @@ async fn export_decodes_where_the_source_did() {
 			.range(pts - 1..=pts + 1)
 			.next()
 			.unwrap_or_else(|| panic!("frame {i} presented at {pts} is not in the source"));
-		assert!(dts.abs_diff(want) <= 2, "frame {i} decodes at {dts}, the source at {want}");
+		assert!(
+			dts.abs_diff(want) <= 2,
+			"frame {i} decodes at {dts}, the source at {want}"
+		);
 	}
 }
 
@@ -1104,7 +1115,11 @@ async fn export_splits_a_multi_frame_ac3_pes() {
 		if pid != AC3_PID || packet[3] & 0x10 == 0 {
 			continue;
 		}
-		let start = 4 + if packet[3] & 0x20 != 0 { usize::from(packet[4]) + 1 } else { 0 };
+		let start = 4 + if packet[3] & 0x20 != 0 {
+			usize::from(packet[4]) + 1
+		} else {
+			0
+		};
 		let body = &packet[start..];
 		if packet[1] & 0x40 != 0 {
 			let b = &body[9..14];
@@ -1121,7 +1136,11 @@ async fn export_splits_a_multi_frame_ac3_pes() {
 	assert_eq!(pes.len(), 3, "one PES a sync frame: {pes:?}");
 	for (k, &(pts, bytes)) in pes.iter().enumerate() {
 		assert_eq!(bytes, 128, "frame {k} carries one sync frame");
-		assert_eq!(pts, pes[0].0 + k as u64 * 2_880, "frame {k} is presented 32 ms after the last");
+		assert_eq!(
+			pts,
+			pes[0].0 + k as u64 * 2_880,
+			"frame {k} is presented 32 ms after the last"
+		);
 	}
 }
 
@@ -4012,7 +4031,11 @@ fn assert_on_time(frames: &[Frame]) -> usize {
 		if pid == 0x1fff || packet[3] & 0x10 == 0 {
 			continue;
 		}
-		let start = 4 + if packet[3] & 0x20 != 0 { usize::from(packet[4]) + 1 } else { 0 };
+		let start = 4 + if packet[3] & 0x20 != 0 {
+			usize::from(packet[4]) + 1
+		} else {
+			0
+		};
 		let pes = &packet[start.min(188)..];
 		if packet[1] & 0x40 != 0 && pes.len() >= 14 && pes[..3] == [0, 0, 1] && pes[7] & 0x80 != 0 {
 			let stamp = |b: &[u8]| {
@@ -4022,7 +4045,11 @@ fn assert_on_time(frames: &[Frame]) -> usize {
 					| i128::from(b[3]) << 7
 					| i128::from(b[4] >> 1)
 			};
-			let decode = if pes[7] & 0x40 != 0 { stamp(&pes[14..19]) } else { stamp(&pes[9..14]) };
+			let decode = if pes[7] & 0x40 != 0 {
+				stamp(&pes[14..19])
+			} else {
+				stamp(&pes[9..14])
+			};
 			let decode = first + ((decode - first as i128).rem_euclid(WRAP)) as f64;
 			units.push((pid, decode, at));
 		} else if let Some(unit) = units.iter_mut().rev().find(|unit| unit.0 == pid) {
@@ -4033,7 +4060,10 @@ fn assert_on_time(frames: &[Frame]) -> usize {
 	let mut judged = 0;
 	for &(pid, decode, end) in &units {
 		if let Some(previous) = last.insert(pid, decode) {
-			assert!(decode >= previous, "PID {pid} decodes at {decode} after a unit at {previous}");
+			assert!(
+				decode >= previous,
+				"PID {pid} decodes at {decode} after a unit at {previous}"
+			);
 		}
 		let Some(arrived) = time(end + 1) else { continue };
 		assert!(
@@ -5529,7 +5559,10 @@ async fn export_pcr_is_its_byte_position_at_the_rate() {
 	for &(index, pcr) in &pcrs {
 		let at = (index - first) as u128 * 188 * 8 * 27_000_000 / 1_000_000;
 		let off = (u128::from(pcr - base)).abs_diff(at);
-		assert!(off <= 1, "the PCR at packet {index} is {off} ticks off its byte position");
+		assert!(
+			off <= 1,
+			"the PCR at packet {index} is {off} ticks off its byte position"
+		);
 	}
 }
 
@@ -5929,7 +5962,10 @@ async fn jitter_published_after_the_tables_keeps_the_encoders_clock() {
 	for (i, step) in decode.windows(2).map(|w| w[1] - w[0]).enumerate() {
 		assert_eq!(step, FRAME_TICKS, "frame {i} does not decode one period after the last");
 	}
-	for (pts, dts) in timing.into_iter().filter(|(pts, _)| (pts / FRAME_TICKS).is_multiple_of(GOP)) {
+	for (pts, dts) in timing
+		.into_iter()
+		.filter(|(pts, _)| (pts / FRAME_TICKS).is_multiple_of(GOP))
+	{
 		assert_eq!(dts, Some(pts - FRAME_TICKS), "a keyframe decodes a period early");
 	}
 	assert_decodes_after_the_clock(&runner);

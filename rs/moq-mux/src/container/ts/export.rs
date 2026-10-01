@@ -258,7 +258,10 @@ impl Track {
 				framing: catalog::Framing::Pes,
 				..
 			}
-		) && self.descriptors.iter().any(|descriptor| descriptor.tag == AC3_DESCRIPTOR)
+		) && self
+			.descriptors
+			.iter()
+			.any(|descriptor| descriptor.tag == AC3_DESCRIPTOR)
 	}
 
 	/// The receiver's buffers for the track's PID, if the T-STD gives it any.
@@ -391,7 +394,10 @@ impl Timing {
 			None => self.framerate.map_or(0, |fps| (90_000.0 / fps).ceil() as u64),
 		};
 		let delay = u64::from(declared.depth).saturating_mul(period);
-		let lookahead = 1u64.checked_shl(declared.depth).unwrap_or(u64::MAX).saturating_mul(period);
+		let lookahead = 1u64
+			.checked_shl(declared.depth)
+			.unwrap_or(u64::MAX)
+			.saturating_mul(period);
 		(delay.min(MAX_REORDER), lookahead.min(MAX_REORDER))
 	}
 }
@@ -1642,7 +1648,14 @@ impl<E: catalog::Catalog> Export<E> {
 	}
 
 	/// Queue one unit of `name`'s packets on `pid`, decoding at `decode`, on the [`Schedule`].
-	fn push_unit(&mut self, name: &str, pid: u16, decode: Timestamp, out: Vec<u8>, keyframe: bool) -> anyhow::Result<()> {
+	fn push_unit(
+		&mut self,
+		name: &str,
+		pid: u16,
+		decode: Timestamp,
+		out: Vec<u8>,
+		keyframe: bool,
+	) -> anyhow::Result<()> {
 		let track = self.tracks.get(name).context("missing track")?;
 		if let Some(buffer) = track.buffer() {
 			self.schedule.set_buffer(pid, buffer);
@@ -2424,8 +2437,12 @@ impl<T> DecodeClock<T> {
 /// The HRD declared by the first SPS in a video rendition's avcC/hvcC.
 fn declared_hrd(stream_type: StreamType, description: &[u8]) -> Option<Hrd> {
 	match stream_type {
-		StreamType::H264 => crate::codec::h264::sps_hrd(crate::codec::h264::Avcc::parse(description).ok()?.sps.first()?),
-		StreamType::H265 => crate::codec::h265::sps_hrd(crate::codec::h265::Hvcc::parse(description).ok()?.sps.first()?),
+		StreamType::H264 => {
+			crate::codec::h264::sps_hrd(crate::codec::h264::Avcc::parse(description).ok()?.sps.first()?)
+		}
+		StreamType::H265 => {
+			crate::codec::h265::sps_hrd(crate::codec::h265::Hvcc::parse(description).ok()?.sps.first()?)
+		}
 		_ => None,
 	}
 }
