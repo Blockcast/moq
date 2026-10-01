@@ -141,6 +141,9 @@ pub struct Export<E: catalog::Catalog = ()> {
 	pcr_discontinuity: bool,
 	/// Lays the muxed packets onto the PCR grid.
 	schedule: Schedule,
+	/// Read each track from the oldest group the delay still reaches, rather than the live
+	/// edge: a test exporting a broadcast it wrote whole.
+	replay: bool,
 	/// Wakes the export when the next grid slot is due on the jitter buffer's clock.
 	slot_timer: Option<std::pin::Pin<Box<web_async::time::Sleep>>>,
 	/// Output frames ready to hand out, one per grid slot.
@@ -169,6 +172,8 @@ struct Pending {
 	frame: Frame,
 	/// How many times the source had restarted its timeline when the frame was read.
 	restart: u64,
+	/// How many times its playhead had jumped, restarts included ([`jitter::Arrival::skip`]).
+	skip: u64,
 	/// The earliest the frame could have arrived: when its source was last found empty.
 	arrived: web_async::time::Instant,
 }
@@ -301,7 +306,12 @@ impl Track {
 		description: Option<Bytes>,
 		jitter: &mut jitter::Buffer<u16, Queued>,
 	) {
-		let Pending { frame, restart, arrived } = pending;
+		let Pending {
+			frame,
+			restart,
+			skip,
+			arrived,
+		} = pending;
 		let dts = dts.filter(|&dts| dts != to_ticks(frame.timestamp));
 		let decode = dts
 			.and_then(|ticks| Timestamp::from_scale(ticks, 90_000).ok())
@@ -310,6 +320,7 @@ impl Track {
 			arrived,
 			decode,
 			restart,
+			skip,
 			sync: frame.keyframe || !matches!(self.kind, Kind::Video(_)),
 			item: Queued {
 				frame,
@@ -696,6 +707,7 @@ impl<E: catalog::Catalog> Export<E> {
 			pcr_discontinuity: false,
 			schedule: Schedule::new(Duration::ZERO),
 			slot_timer: None,
+			replay: false,
 			queue: VecDeque::new(),
 			video_start: None,
 			mux_rate: None,
@@ -716,6 +728,14 @@ impl<E: catalog::Catalog> Export<E> {
 		self.mux_rate_override = Some(mux_rate);
 		self.mux_rate = sanitize_mux_rate(mux_rate);
 		self.schedule.set_rate(self.mux_rate);
+		self
+	}
+
+	/// Read each track from the oldest group the delay still reaches instead of the live
+	/// edge, for a test that writes a broadcast whole before exporting it.
+	#[cfg(test)]
+	pub(super) fn with_replay(mut self) -> Self {
+		self.replay = true;
 		self
 	}
 
@@ -980,6 +1000,7 @@ impl<E: catalog::Catalog> Export<E> {
 						let pending = Pending {
 							frame,
 							restart: track.source.restarts(),
+							skip: track.source.skips(),
 							arrived: track.empty,
 						};
 						// A new timeline must reach the reset before tune-in alignment can drop it.
@@ -1161,7 +1182,7 @@ impl<E: catalog::Catalog> Export<E> {
 			let kind = video_kind(config, name)?;
 			let mut track = match old.remove(name) {
 				Some(track) => track,
-				None => match ExportSource::for_video(&self.source, name, config, self.delay)? {
+				None => match ExportSource::for_video(&self.source, name, config, self.delay)?.map(|s| at_edge(s, self.replay)) {
 					Some(source) => Track::new(source, kind.clone()),
 					None => continue,
 				},
@@ -1174,7 +1195,7 @@ impl<E: catalog::Catalog> Export<E> {
 			let kind = audio_kind(config, name)?;
 			let mut track = match old.remove(name) {
 				Some(track) => track,
-				None => match ExportSource::for_audio(&self.source, name, config, self.delay)? {
+				None => match ExportSource::for_audio(&self.source, name, config, self.delay)?.map(|s| at_edge(s, self.replay)) {
 					Some(source) => Track::new(source, kind.clone()),
 					None => continue,
 				},
@@ -1220,9 +1241,9 @@ impl<E: catalog::Catalog> Export<E> {
 				continue;
 			}
 			let source = if let Some(config) = catalog.video.renditions.get(name) {
-				ExportSource::for_video(&self.source, name, config, self.delay)?
+				ExportSource::for_video(&self.source, name, config, self.delay)?.map(|s| at_edge(s, self.replay))
 			} else if let Some(config) = catalog.audio.renditions.get(name) {
-				ExportSource::for_audio(&self.source, name, config, self.delay)?
+				ExportSource::for_audio(&self.source, name, config, self.delay)?.map(|s| at_edge(s, self.replay))
 			} else if mpegts.tracks.get(name).is_some_and(|t| t.verbatim.is_some()) {
 				Some(ExportSource::for_stream(&self.source, name, self.delay)?)
 			} else {
@@ -1245,10 +1266,15 @@ impl<E: catalog::Catalog> Export<E> {
 		self.jitter.dropped()
 	}
 
-	/// When the next queued frame, or grid slot while media is queued, is due.
+	/// When the next queued frame is due, or the next grid slot while media is queued or
+	/// every source has finished and the tail runs out.
 	#[cfg(test)]
 	pub(super) fn next_due(&self) -> Option<web_async::time::Instant> {
-		let slot = self.slot_due().filter(|_| self.schedule.queued()).map(|(_, at)| at);
+		let finished = !self.tracks.is_empty() && self.tracks.values().all(|track| track.finished);
+		let slot = self
+			.slot_due()
+			.filter(|_| self.schedule.queued() || finished)
+			.map(|(_, at)| at);
 		self.jitter.next_deadline().into_iter().chain(slot).min()
 	}
 
@@ -2046,6 +2072,17 @@ fn video_kind(config: &VideoConfig, name: &str) -> anyhow::Result<Kind> {
 		VideoCodec::H264(_) => Ok(Kind::Video(StreamType::H264)),
 		VideoCodec::H265(_) => Ok(Kind::Video(StreamType::H265)),
 		other => anyhow::bail!("TS export does not support video codec {other:?} (track '{name}')"),
+	}
+}
+
+/// Start a media track's source at the live edge, the newest group, so the export does not
+/// begin on a group up to a delay old and carry that lag ever after; unless `replay`.
+/// Verbatim streams are sparse, and anything of theirs ahead of the first keyframe is
+/// dropped anyway, so they keep the delay's reach.
+fn at_edge(source: ExportSource, replay: bool) -> ExportSource {
+	match replay {
+		true => source,
+		false => source.live(),
 	}
 }
 

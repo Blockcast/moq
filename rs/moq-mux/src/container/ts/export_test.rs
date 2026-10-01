@@ -82,7 +82,7 @@ async fn drain(consumer: moq_net::broadcast::Consumer) -> BytesMut {
 
 /// `drain` for an exporter built with an explicit catalog extension.
 async fn drain_with<E: tscat::Catalog>(exporter: Export<E>) -> BytesMut {
-	let mut exporter = exporter.with_delay(RECORDING_MAX_AGE);
+	let mut exporter = exporter.with_delay(RECORDING_MAX_AGE).with_replay();
 	let mut out = BytesMut::new();
 	// `while let Ok` stops on the first timeout (`Pending`: no more output).
 	while let Ok(res) = tokio::time::timeout(DRAIN, exporter.next()).await {
@@ -2670,6 +2670,7 @@ async fn export_of(consumer: &moq_net::broadcast::Consumer) -> Export<tscat::Ext
 		.await
 		.unwrap()
 		.with_delay(RECORDING_MAX_AGE)
+		.with_replay()
 }
 
 fn publish_sdt(
@@ -4955,7 +4956,8 @@ async fn export_cbr_video() -> Vec<Frame> {
 		.await
 		.unwrap()
 		.with_mux_rate(20_000_000)
-		.with_delay(RECORDING_MAX_AGE);
+		.with_delay(RECORDING_MAX_AGE)
+		.with_replay();
 	drain_frames(&mut exporter).await
 }
 
@@ -5981,7 +5983,7 @@ async fn a_skipped_group_keeps_the_clock() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
-	let mut track = broadcast
+	let track = broadcast
 		.create_track("a.aac", hang::container::track_info(hang::catalog::PRIORITY.audio))
 		.unwrap();
 	{
@@ -6029,6 +6031,53 @@ async fn a_skipped_group_keeps_the_clock() {
 		"the audio after the skip went out"
 	);
 	assert_on_time(&out);
+}
+
+/// An exporter joining a live broadcast starts at its newest group, the live edge, not at
+/// the oldest one its delay still reaches: otherwise its clock would carry that group's age,
+/// up to the delay, as latency for as long as it runs.
+#[tokio::test(start_paused = true)]
+async fn a_late_join_starts_at_the_live_edge() {
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let mut audio = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
+	let start = tokio::time::Instant::now();
+	let mut export = None;
+	let mut out = Vec::new();
+	// One-second groups of 20 ms frames; the exporter joins 5.5 s in with a 2 s delay.
+	for k in 0..400u64 {
+		tokio::time::sleep_until(start + Duration::from_millis(k * 20)).await;
+		if k % 50 == 0 && k > 0 {
+			audio.cut(None).unwrap();
+		}
+		audio
+			.write(Frame {
+				timestamp: Timestamp::from_millis(60_000 + k * 20).unwrap(),
+				duration: None,
+				payload: Bytes::from_static(&[0x21, 0x10, 0x04, 0x60]),
+				keyframe: k % 50 == 0,
+			})
+			.unwrap();
+		if k == 275 {
+			let joined = Export::new(crate::source::announced(&consumer)).await.unwrap();
+			export = Some(joined.with_delay(Duration::from_secs(2)));
+		}
+		if let Some(export) = export.as_mut() {
+			out.extend(poll_frames(export));
+		}
+	}
+	audio.finish().unwrap();
+	let mut export = export.unwrap();
+	out.extend(drain_frames(&mut export).await);
+
+	let ts: Vec<u8> = out.iter().flat_map(|f| f.payload.iter().copied()).collect();
+	let (_, pts) = collect_pes_pts(&ts);
+	assert_eq!(
+		pts.first().copied(),
+		Some((60_000 + 5_000) * 90),
+		"the export starts at the newest group"
+	);
 }
 
 /// Publish a Legacy AAC rendition named `name`.
@@ -6104,7 +6153,8 @@ async fn a_track_leaving_the_catalog_is_read_to_its_end() {
 	let mut export = Export::new(crate::source::announced(&consumer))
 		.await
 		.unwrap()
-		.with_delay(RECORDING_MAX_AGE);
+		.with_delay(RECORDING_MAX_AGE)
+		.with_replay();
 	for ms in (0..200).step_by(20) {
 		write_aac(&mut kept, ms);
 		write_aac(&mut leaving, ms);
@@ -6147,7 +6197,11 @@ async fn resume_after(finish: bool) {
 	let (mut broadcast, mut catalog) = publish();
 	let mut track = aac_rendition(&mut broadcast, &mut catalog, "a.aac");
 	let ended = source.broadcast().await.unwrap();
-	let mut export = Export::new(source.clone()).await.unwrap().with_delay(RECORDING_MAX_AGE);
+	let mut export = Export::new(source.clone())
+		.await
+		.unwrap()
+		.with_delay(RECORDING_MAX_AGE)
+		.with_replay();
 	for ms in (0..200).step_by(20) {
 		write_aac(&mut track, ms);
 	}

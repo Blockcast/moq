@@ -17,6 +17,9 @@ pub(crate) struct Arrival<T> {
 	pub decode: Timestamp,
 	/// How many times the source had restarted its timeline when the frame was read.
 	pub restart: u64,
+	/// How many times the source's playhead had jumped (a skipped group, or a restart)
+	/// when the frame was read.
+	pub skip: u64,
 	/// Whether the frame decodes without the track's earlier frames.
 	pub sync: bool,
 	pub item: T,
@@ -53,7 +56,9 @@ pub(crate) enum Push {
 /// late are dropped like any other. A source that restarts its timeline (a declared
 /// marker) has moved it, so once frames have gone out the restart opens a new generation
 /// with its own clock, anchored at that frame though never ahead of a deadline already
-/// given out. Every track's next frame runs on it: one crossing the same restart joins it
+/// given out. So does a skip after which a frame would be held more than a delay past
+/// everything queued: its timeline jumped ahead, as when the skipped groups held a marker
+/// the publisher shed. Every track's next frame runs on it: one crossing the same restart joins it
 /// when the frame lands on its clock, neither late nor held more than a delay past
 /// everything queued, and opens another otherwise. Before anything has gone out there is
 /// nothing to keep in step with, so a restart there keeps the clock. No two tracks are
@@ -107,8 +112,9 @@ struct Clock {
 struct Track<T> {
 	/// Frames in arrival order, each with its generation and deadline.
 	queue: VecDeque<(u64, Instant, T)>,
-	/// The source's restart counter at the last frame.
+	/// The source's restart and skip counters at the last frame.
 	restart: u64,
+	skip: u64,
 	/// The generation of the last frame.
 	generation: u64,
 	/// A frame was dropped, so later ones are too until the next sync frame.
@@ -142,8 +148,10 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		// A track still on an older generation may be crossing the restart another track
 		// opened the newest one for.
 		let jumped = self.tracks.get(&key).is_some_and(|track| {
-			track.restart != arrival.restart
-				&& (track.generation == generation || !self.lands(deadline, arrival.arrived))
+			let restarted = track.restart != arrival.restart
+				&& (track.generation == generation || !self.lands(deadline, arrival.arrived));
+			let leapt = track.skip != arrival.skip && deadline.is_some_and(|deadline| deadline > self.bound(arrival.arrived));
+			restarted || leapt
 		});
 		if jumped && self.released {
 			generation += 1;
@@ -164,10 +172,12 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		let track = self.tracks.entry(key).or_insert_with(|| Track {
 			queue: VecDeque::new(),
 			restart: arrival.restart,
+			skip: arrival.skip,
 			generation,
 			waiting: false,
 		});
 		track.restart = arrival.restart;
+		track.skip = arrival.skip;
 		track.generation = generation;
 		let push = match deadline {
 			_ if track.waiting && !arrival.sync => Push::Waiting,
@@ -192,10 +202,13 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 	/// Whether a frame arriving at `arrived` and due at `deadline` is on the clock: not late,
 	/// and held no more than a delay past both its arrival and everything already queued.
 	fn lands(&self, deadline: Option<Instant>, arrived: Instant) -> bool {
-		deadline.is_some_and(|deadline| {
-			let bound = arrived.max(self.horizon.unwrap_or(arrived)) + self.delay;
-			arrived <= deadline && deadline <= bound
-		})
+		deadline.is_some_and(|deadline| arrived <= deadline && deadline <= self.bound(arrived))
+	}
+
+	/// The latest a frame arriving at `arrived` may be due and still be on the clock: a delay
+	/// past both its arrival and everything already queued.
+	fn bound(&self, arrived: Instant) -> Instant {
+		arrived.max(self.horizon.unwrap_or(arrived)) + self.delay
 	}
 
 	/// Account for the slack a frame arrived with, and every [`STEER`] of decode time set the
@@ -325,6 +338,7 @@ mod tests {
 			arrived,
 			decode: ms(decode),
 			restart: 0,
+			skip: 0,
 			sync: true,
 			item,
 		}
@@ -334,6 +348,7 @@ mod tests {
 	fn after(restart: u64, arrival: Arrival<&'static str>) -> Arrival<&'static str> {
 		Arrival {
 			restart,
+			skip: restart,
 			..arrival
 		}
 	}
@@ -481,6 +496,50 @@ mod tests {
 		assert_eq!(released(&mut buffer), [("a5020", 1)]);
 	}
 
+	/// A skipped group whose timeline carried on keeps the clock: a frame it made late is
+	/// dropped, and the next on-time frame goes out on the same generation.
+	#[tokio::test(start_paused = true)]
+	async fn a_skip_keeps_the_clock() {
+		let start = Instant::now();
+		let mut buffer = Buffer::new(DELAY);
+		buffer.push(1, arrival(start, 0, "a0"));
+		tokio::time::advance(DELAY).await;
+		assert_eq!(due(&mut buffer), ["a0"]);
+
+		// Group 1 is skipped: frames from 100 ms on arrive after a 250 ms stall.
+		let stalled = start + Duration::from_millis(350);
+		tokio::time::advance(stalled - Instant::now()).await;
+		let skipped = |decode, item| Arrival {
+			skip: 1,
+			..arrival(stalled, decode, item)
+		};
+		assert_eq!(buffer.push(1, skipped(200, "a200")), Push::Late);
+		assert_eq!(buffer.push(1, skipped(300, "a300")), Push::Queued);
+		tokio::time::advance(Duration::from_millis(100)).await;
+		assert_eq!(released(&mut buffer), [("a300", 0)]);
+	}
+
+	/// A skip after which a frame would be held more than a delay past everything queued
+	/// followed a timeline that leapt ahead, as when the skipped groups held a marker the
+	/// publisher shed, so it opens a generation.
+	#[tokio::test(start_paused = true)]
+	async fn a_skip_that_leaps_ahead_opens_a_generation() {
+		let start = Instant::now();
+		let mut buffer = Buffer::new(DELAY);
+		buffer.push(1, arrival(start, 0, "a0"));
+		tokio::time::advance(DELAY).await;
+		assert_eq!(due(&mut buffer), ["a0"]);
+
+		let now = Instant::now();
+		let leapt = Arrival {
+			skip: 1,
+			..arrival(now, 5_000, "a5000")
+		};
+		assert_eq!(buffer.push(1, leapt), Push::Queued);
+		tokio::time::advance(DELAY).await;
+		assert_eq!(released(&mut buffer), [("a5000", 1)]);
+	}
+
 	/// Every frame of a generation goes out before the next generation's, even one the new
 	/// clock puts earlier.
 	#[tokio::test(start_paused = true)]
@@ -522,6 +581,7 @@ mod tests {
 					arrived,
 					decode: Timestamp::from_micros(decode.as_micros() as u64).unwrap(),
 					restart: 0,
+					skip: 0,
 					sync: true,
 					item: "v",
 				};

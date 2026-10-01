@@ -6041,7 +6041,8 @@ pub(super) mod test {
 		let mut exporter = crate::container::ts::Export::new(crate::source::announced(&consumer))
 			.await
 			.unwrap()
-			.with_delay(delay);
+			.with_delay(delay)
+			.with_replay();
 		let flags = |frame: crate::container::Frame| {
 			frame
 				.payload

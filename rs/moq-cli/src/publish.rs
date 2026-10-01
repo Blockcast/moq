@@ -680,12 +680,12 @@ mod tests {
 			.tracks
 			.insert(section.name().to_string(), section_track);
 		let mut section_producer = Producer::new(section, Container::Legacy(moq_mux::container::Kind::Data));
-		// bbb's first video keyframe is at 1.4 s; stamp the ancillary streams just after
-		// it so they clear the export's keyframe alignment (anything before the first
-		// keyframe is dropped on tune-in).
+		// The export joins each media track at its newest group, bbb's last at about
+		// 1.446 s; stamp the ancillary streams just after it so they clear the keyframe
+		// alignment (anything before the first keyframe is dropped on tune-in).
 		section_producer
 			.write(Frame {
-				timestamp: Timestamp::from_millis(1410).unwrap(),
+				timestamp: Timestamp::from_millis(1450).unwrap(),
 				duration: None,
 				payload: bytes::Bytes::from_static(CUE),
 				keyframe: true,
@@ -713,7 +713,7 @@ mod tests {
 		let mut pes_producer = Producer::new(pes, Container::Legacy(moq_mux::container::Kind::Data));
 		pes_producer
 			.write(Frame {
-				timestamp: Timestamp::from_millis(1410).unwrap(),
+				timestamp: Timestamp::from_millis(1450).unwrap(),
 				duration: None,
 				payload: bytes::Bytes::from_static(PES_PAYLOAD),
 				keyframe: true,
@@ -738,11 +738,8 @@ mod tests {
 		.await
 	}
 
-	/// The media track's full retention window, so an exporter started after publishing
-	/// can still read every retained group. These tests publish a whole feed before
-	/// exporting it, which the default
-	/// [`Duration::ZERO`] collapses to the live edge:
-	/// completeness has to be asked for, exactly as a real recorder does.
+	/// The export's delay, long enough to reach the ancillary tracks: these tests publish a
+	/// whole feed before exporting it, and the media tracks start at their newest group.
 	const RECORDING_MAX_AGE: std::time::Duration = Duration::from_secs(30);
 	/// Full CLI round-trip over the hang catalog.
 	#[tokio::test(start_paused = true)]

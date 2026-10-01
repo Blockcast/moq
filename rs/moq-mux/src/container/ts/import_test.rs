@@ -447,7 +447,8 @@ async fn import_export_import_roundtrip() {
 	let mut exporter = crate::container::ts::Export::new(crate::source::announced(&consumer))
 		.await
 		.unwrap()
-		.with_delay(RECORDING_MAX_AGE);
+		.with_delay(RECORDING_MAX_AGE)
+		.with_replay();
 	let mut out = BytesMut::new();
 	while let Ok(res) = tokio::time::timeout(DRAIN, exporter.next()).await {
 		match res.expect("exporter error") {
