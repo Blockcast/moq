@@ -1,4 +1,5 @@
-//! Fixed-delay release of several tracks' frames in one decode order.
+//! A jitter buffer that releases several tracks' frames in one decode order, each a fixed
+//! delay after its decode time.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::pin::Pin;
@@ -8,7 +9,7 @@ use std::time::Duration;
 use moq_net::Timestamp;
 use web_async::time::{Instant, Sleep};
 
-/// A frame handed to [`Release::push`].
+/// A frame handed to [`Buffer::push`].
 pub(crate) struct Arrival<T> {
 	/// When the frame was read from its source.
 	pub arrived: Instant,
@@ -21,8 +22,8 @@ pub(crate) struct Arrival<T> {
 	pub item: T,
 }
 
-/// A frame [`Release::poll_next`] let go.
-pub(crate) struct Released<K, T> {
+/// A frame [`Buffer::poll_next`] let go.
+pub(crate) struct Ready<K, T> {
 	pub track: K,
 	/// Counts up each time a track's discontinuity started a new anchor. Tracks that
 	/// cross the same discontinuity share one.
@@ -30,7 +31,7 @@ pub(crate) struct Released<K, T> {
 	pub item: T,
 }
 
-/// What [`Release::push`] did with a frame.
+/// What [`Buffer::push`] did with a frame.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Push {
 	Queued,
@@ -40,11 +41,11 @@ pub(crate) enum Push {
 	Waiting,
 }
 
-/// Releases each track's frames at a fixed delay past their decode time, like an SRT
+/// Holds each track's frames until a fixed delay past their decode time, like an SRT
 /// receiver's TSBPD, in `(deadline, track)` order across tracks.
 ///
 /// The clock is anchored at the first frame's arrival. Within one anchor the deadline
-/// order is the decode order, so two releases that saw the same frames arrive with
+/// order is the decode order, so two buffers that saw the same frames arrive with
 /// different skew, each within its deadline, emit them in the same order. A frame that
 /// arrives past its deadline would break that order, so it is dropped and counted.
 ///
@@ -56,7 +57,7 @@ pub(crate) enum Push {
 ///
 /// A zero delay holds nothing and drops nothing: each frame goes out as soon as it is
 /// read, ordered only among the frames read together.
-pub(crate) struct Release<K, T> {
+pub(crate) struct Buffer<K, T> {
 	delay: Duration,
 	/// Each generation's anchor: the first frame's arrival and decode time.
 	anchors: BTreeMap<u64, (Instant, Timestamp)>,
@@ -76,7 +77,7 @@ struct Track<T> {
 	waiting: bool,
 }
 
-impl<K: Ord + Clone, T> Release<K, T> {
+impl<K: Ord + Clone, T> Buffer<K, T> {
 	pub fn new(delay: Duration) -> Self {
 		Self {
 			delay,
@@ -88,7 +89,7 @@ impl<K: Ord + Clone, T> Release<K, T> {
 		}
 	}
 
-	/// Queue a frame for release, or drop it if it cannot make its deadline.
+	/// Queue a frame, or drop it if it cannot make its deadline.
 	pub fn push(&mut self, key: K, arrival: Arrival<T>) -> Push {
 		// A new track counts from the start, as if it had always been there.
 		let (mut generation, discontinuity) = self
@@ -171,7 +172,7 @@ impl<K: Ord + Clone, T> Release<K, T> {
 	}
 
 	/// The next frame whose deadline has come, earliest deadline first, ties by track.
-	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Released<K, T>> {
+	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Ready<K, T>> {
 		let Some((deadline, key)) = self
 			.tracks
 			.iter()
@@ -194,7 +195,7 @@ impl<K: Ord + Clone, T> Release<K, T> {
 		}
 		let track = key.clone();
 		let (_, generation, item) = self.tracks.get_mut(&track).and_then(|t| t.queue.pop_front()).unwrap();
-		Poll::Ready(Released {
+		Poll::Ready(Ready {
 			track,
 			generation,
 			item,
@@ -210,7 +211,7 @@ impl<K: Ord + Clone, T> Release<K, T> {
 			.min()
 	}
 
-	/// Whether no frame is waiting for release.
+	/// Whether no frame is waiting.
 	pub fn is_empty(&self) -> bool {
 		self.tracks.values().all(|track| track.queue.is_empty())
 	}
@@ -249,12 +250,12 @@ mod tests {
 		}
 	}
 
-	/// Every frame due by now, in release order.
-	fn due(release: &mut Release<u16, &'static str>) -> Vec<&'static str> {
+	/// Every frame due by now, in order.
+	fn due(buffer: &mut Buffer<u16, &'static str>) -> Vec<&'static str> {
 		let waiter = kio::Waiter::noop();
 		let mut out = Vec::new();
-		while let Poll::Ready(released) = release.poll_next(&waiter) {
-			out.push(released.item);
+		while let Poll::Ready(ready) = buffer.poll_next(&waiter) {
+			out.push(ready.item);
 		}
 		out
 	}
@@ -262,35 +263,35 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn releases_at_the_delay_in_decode_order() {
 		let start = Instant::now();
-		let mut release = Release::new(DELAY);
-		assert_eq!(release.push(1, arrival(start, 0, "v0")), Push::Queued);
-		assert_eq!(release.push(1, arrival(start, 40, "v40")), Push::Queued);
+		let mut buffer = Buffer::new(DELAY);
+		assert_eq!(buffer.push(1, arrival(start, 0, "v0")), Push::Queued);
+		assert_eq!(buffer.push(1, arrival(start, 40, "v40")), Push::Queued);
 		// Audio arrives later than the video, with an earlier decode time.
 		assert_eq!(
-			release.push(2, arrival(start + Duration::from_millis(30), 20, "a20")),
+			buffer.push(2, arrival(start + Duration::from_millis(30), 20, "a20")),
 			Push::Queued
 		);
 		assert_eq!(
-			release.push(2, arrival(start + Duration::from_millis(30), 40, "a40")),
+			buffer.push(2, arrival(start + Duration::from_millis(30), 40, "a40")),
 			Push::Queued
 		);
 
-		assert!(due(&mut release).is_empty(), "nothing is due before the delay");
+		assert!(due(&mut buffer).is_empty(), "nothing is due before the delay");
 		tokio::time::advance(DELAY).await;
-		assert_eq!(due(&mut release), ["v0"]);
+		assert_eq!(due(&mut buffer), ["v0"]);
 		tokio::time::advance(Duration::from_millis(20)).await;
-		assert_eq!(due(&mut release), ["a20"]);
+		assert_eq!(due(&mut buffer), ["a20"]);
 		tokio::time::advance(Duration::from_millis(20)).await;
-		assert_eq!(due(&mut release), ["v40", "a40"], "a tie goes to the lower track");
-		assert!(release.is_empty());
+		assert_eq!(due(&mut buffer), ["v40", "a40"], "a tie goes to the lower track");
+		assert!(buffer.is_empty());
 	}
 
-	/// Two releases fed the same frames with different arrival skew, every frame inside
+	/// Two buffers fed the same frames with different arrival skew, every frame inside
 	/// its deadline, emit the same order.
 	#[tokio::test(start_paused = true)]
 	async fn arrival_skew_does_not_change_the_order() {
 		let start = Instant::now();
-		let (mut early, mut late) = (Release::new(DELAY), Release::new(DELAY));
+		let (mut early, mut late) = (Buffer::new(DELAY), Buffer::new(DELAY));
 		let frames = [
 			(1, 0, "v0"),
 			(1, 40, "v40"),
@@ -320,22 +321,22 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn late_frames_are_dropped_until_a_sync_frame() {
 		let start = Instant::now();
-		let mut release = Release::new(DELAY);
-		release.push(1, arrival(start, 0, "v0"));
-		release.push(2, arrival(start, 0, "a0"));
+		let mut buffer = Buffer::new(DELAY);
+		buffer.push(1, arrival(start, 0, "v0"));
+		buffer.push(2, arrival(start, 0, "a0"));
 		let late = start + Duration::from_millis(200);
 		let video = |decode, sync, item| Arrival {
 			sync,
 			..arrival(late, decode, item)
 		};
-		assert_eq!(release.push(1, video(40, false, "v40")), Push::Late);
-		assert_eq!(release.push(1, video(200, false, "v200")), Push::Waiting);
-		assert_eq!(release.push(1, video(240, true, "v240")), Push::Queued);
-		assert_eq!(release.push(2, arrival(late, 180, "a180")), Push::Queued);
-		assert_eq!(release.dropped(), 2);
+		assert_eq!(buffer.push(1, video(40, false, "v40")), Push::Late);
+		assert_eq!(buffer.push(1, video(200, false, "v200")), Push::Waiting);
+		assert_eq!(buffer.push(1, video(240, true, "v240")), Push::Queued);
+		assert_eq!(buffer.push(2, arrival(late, 180, "a180")), Push::Queued);
+		assert_eq!(buffer.dropped(), 2);
 
 		tokio::time::advance(Duration::from_secs(1)).await;
-		assert_eq!(due(&mut release), ["v0", "a0", "a180", "v240"]);
+		assert_eq!(due(&mut buffer), ["v0", "a0", "a180", "v240"]);
 	}
 
 	/// A discontinuity re-anchors the track, and a track reaching the same discontinuity
@@ -343,9 +344,9 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_discontinuity_re_anchors() {
 		let start = Instant::now();
-		let mut release = Release::new(DELAY);
-		release.push(1, arrival(start, 5_000, "v5000"));
-		release.push(2, arrival(start, 5_000, "a5000"));
+		let mut buffer = Buffer::new(DELAY);
+		buffer.push(1, arrival(start, 5_000, "v5000"));
+		buffer.push(2, arrival(start, 5_000, "a5000"));
 
 		// The publisher restarts its timeline at zero, a second in.
 		let restart = start + Duration::from_secs(1);
@@ -353,34 +354,34 @@ mod tests {
 			discontinuity: 1,
 			..arrival(arrived, decode, item)
 		};
-		assert_eq!(release.push(1, reset(restart, 0, "v0")), Push::Queued);
+		assert_eq!(buffer.push(1, reset(restart, 0, "v0")), Push::Queued);
 		// Audio still carries its old timeline for a moment, then restarts too.
-		assert_eq!(release.push(2, arrival(restart, 6_000, "a6000")), Push::Queued);
+		assert_eq!(buffer.push(2, arrival(restart, 6_000, "a6000")), Push::Queued);
 		let later = restart + Duration::from_millis(10);
-		assert_eq!(release.push(2, reset(later, 0, "a0")), Push::Queued);
+		assert_eq!(buffer.push(2, reset(later, 0, "a0")), Push::Queued);
 
 		tokio::time::advance(Duration::from_secs(1) + DELAY).await;
-		assert_eq!(due(&mut release), ["v5000", "a5000", "v0", "a6000", "a0"]);
+		assert_eq!(due(&mut buffer), ["v5000", "a5000", "v0", "a6000", "a0"]);
 	}
 
 	/// A backlog read in one go releases a new generation after the one before it.
 	#[tokio::test(start_paused = true)]
 	async fn a_backlog_releases_generations_in_turn() {
 		let start = Instant::now();
-		let mut release = Release::new(DELAY);
-		release.push(1, arrival(start, 5_000, "v5000"));
-		release.push(1, arrival(start, 5_040, "v5040"));
+		let mut buffer = Buffer::new(DELAY);
+		buffer.push(1, arrival(start, 5_000, "v5000"));
+		buffer.push(1, arrival(start, 5_040, "v5040"));
 		let reset = Arrival {
 			discontinuity: 1,
 			..arrival(start, 0, "v0")
 		};
-		release.push(1, reset);
-		release.push(2, arrival(start, 5_020, "a5020"));
+		buffer.push(1, reset);
+		buffer.push(2, arrival(start, 5_020, "a5020"));
 
 		tokio::time::advance(DELAY).await;
-		assert_eq!(due(&mut release), ["v5000"]);
+		assert_eq!(due(&mut buffer), ["v5000"]);
 		tokio::time::advance(Duration::from_millis(40)).await;
-		assert_eq!(due(&mut release), ["a5020", "v5040", "v0"]);
+		assert_eq!(due(&mut buffer), ["a5020", "v5040", "v0"]);
 	}
 
 	/// Zero holds nothing: frames read together go out at once in decode order, and a
@@ -388,30 +389,30 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn zero_delay_releases_on_arrival() {
 		let start = Instant::now();
-		let mut release = Release::new(Duration::ZERO);
-		release.push(1, arrival(start, 0, "v0"));
-		release.push(1, arrival(start, 40, "v40"));
-		release.push(2, arrival(start, 20, "a20"));
-		assert_eq!(due(&mut release), ["v0", "a20", "v40"]);
+		let mut buffer = Buffer::new(Duration::ZERO);
+		buffer.push(1, arrival(start, 0, "v0"));
+		buffer.push(1, arrival(start, 40, "v40"));
+		buffer.push(2, arrival(start, 20, "a20"));
+		assert_eq!(due(&mut buffer), ["v0", "a20", "v40"]);
 
 		let late = start + Duration::from_secs(1);
-		assert_eq!(release.push(2, arrival(late, 40, "a40")), Push::Queued);
-		assert_eq!(due(&mut release), ["a40"]);
-		assert_eq!(release.dropped(), 0);
+		assert_eq!(buffer.push(2, arrival(late, 40, "a40")), Push::Queued);
+		assert_eq!(due(&mut buffer), ["a40"]);
+		assert_eq!(buffer.dropped(), 0);
 	}
 
 	#[tokio::test(start_paused = true)]
 	async fn clear_starts_a_fresh_clock() {
 		let start = Instant::now();
-		let mut release = Release::new(DELAY);
-		release.push(1, arrival(start, 5_000, "old"));
-		release.clear();
-		assert!(release.is_empty());
+		let mut buffer = Buffer::new(DELAY);
+		buffer.push(1, arrival(start, 5_000, "old"));
+		buffer.clear();
+		assert!(buffer.is_empty());
 
 		tokio::time::advance(Duration::from_secs(1)).await;
 		let now = Instant::now();
-		assert_eq!(release.push(1, arrival(now, 0, "new")), Push::Queued);
+		assert_eq!(buffer.push(1, arrival(now, 0, "new")), Push::Queued);
 		tokio::time::advance(DELAY).await;
-		assert_eq!(due(&mut release), ["new"]);
+		assert_eq!(due(&mut buffer), ["new"]);
 	}
 }

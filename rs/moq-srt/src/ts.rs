@@ -168,7 +168,7 @@ pub struct Subscriber {
 impl Subscriber {
 	/// Resolve the broadcast at `path` in the origin and prepare to mux it to TS.
 	///
-	/// `latency` is the muxer's release delay: each frame is muxed that long after
+	/// `latency` is the muxer's jitter-buffer delay: each frame is muxed that long after
 	/// its decode time, a frame arriving later is dropped, and a stalled group is
 	/// skipped after it. We reuse the locally configured SRT receive latency for
 	/// it, the same budget an SRT hop gives a packet. It's the configured value,

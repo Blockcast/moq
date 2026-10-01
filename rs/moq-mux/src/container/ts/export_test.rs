@@ -3568,16 +3568,16 @@ async fn drain_frames<E: tscat::Catalog>(export: &mut Export<E>) -> Vec<Frame> {
 	let mut out = Vec::new();
 	loop {
 		out.extend(poll_frames(export));
-		// Run the paused clock only as far as the next release, so a test that writes
+		// Run the paused clock only as far as the next frame due, so a test that writes
 		// more afterwards is still on time for it.
-		if let Some(deadline) = export.next_release() {
+		if let Some(deadline) = export.next_due() {
 			tokio::time::sleep_until(deadline).await;
 			continue;
 		}
 		match tokio::time::timeout(Duration::from_millis(10), export.next()).await {
 			Ok(Ok(Some(frame))) => out.push(frame),
 			Ok(Ok(None)) => break,
-			Err(_) if export.next_release().is_none() => break,
+			Err(_) if export.next_due().is_none() => break,
 			Err(_) => {}
 			Ok(Err(err)) => panic!("exporter error: {err}"),
 		}
@@ -5182,8 +5182,8 @@ impl Reordered {
 }
 
 /// Export a [`Reordered`] broadcast twice, like [`export_twice`]: the second exporter joins at
-/// [`JOIN`]. Ticks run on the paused clock as a live source's would, and both exporters release
-/// on a fixed delay. `jitter` is published at its tick when given.
+/// [`JOIN`]. Ticks run on the paused clock as a live source's would, and both exporters hold
+/// frames for a fixed delay. `jitter` is published at its tick when given.
 async fn export_reordered(
 	sps: &'static [u8],
 	pps: &'static [u8],
@@ -5336,7 +5336,7 @@ async fn declared_reorder_sizes_the_decode_clock_from_the_first_frame() {
 }
 
 /// Reordered video (each pyramid in decode order: PTS 0, 160, 80, 40, 120 ms) loses nothing on
-/// a clean path. The release deadline is on decode time, so no B-frame is stranded behind its
+/// a clean path. The deadline is on decode time, so no B-frame is stranded behind its
 /// reference or sent ahead of it, and every track interleaves in decode order.
 #[tokio::test(start_paused = true)]
 async fn reordered_video_loses_nothing_on_a_clean_path() {

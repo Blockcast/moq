@@ -43,7 +43,7 @@ use crate::catalog::{CatalogFormat, Stream};
 use crate::codec::video::Reorder;
 use crate::codec::{aac, annexb};
 use crate::container::{ExportSource, Frame};
-use crate::release::{Arrival, Push, Release, Released};
+use crate::jitter::{self, Arrival, Push};
 
 use super::adts;
 use super::catalog;
@@ -124,10 +124,10 @@ pub struct Export<E: catalog::Catalog = ()> {
 	/// How long after its decode time each frame goes out, and each source's staleness budget.
 	delay: Duration,
 	/// Holds every track's frames until `delay` past their decode time, keyed by PID.
-	release: Release<u16, Queued>,
-	/// A released frame waiting for the tail of the generation before it to go out.
-	held: Option<Released<u16, Queued>>,
-	/// Release generation of the program being muxed; a newer one rewinds it.
+	jitter: jitter::Buffer<u16, Queued>,
+	/// A frame the jitter buffer let go, waiting for the tail of the generation before it to go out.
+	held: Option<jitter::Ready<u16, Queued>>,
+	/// Jitter-buffer generation of the program being muxed; a newer one rewinds it.
 	generation: u64,
 
 	tracks: HashMap<String, Track>,
@@ -207,7 +207,7 @@ struct Pending {
 	arrived: web_async::time::Instant,
 }
 
-/// A frame waiting in the [`Release`] stage, with what it needs from the moment it was read.
+/// A frame waiting in the jitter buffer, with what it needs from the moment it was read.
 struct Queued {
 	frame: Frame,
 	/// When the frame decodes: its DTS, else its PTS.
@@ -223,7 +223,7 @@ struct Track {
 	/// The first frame, held until the program tables are built.
 	pending: Option<Pending>,
 	/// When the source was last found empty. A frame read since arrived no earlier, and
-	/// no later than it is read; the release judges it on the earlier bound, so a caller
+	/// no later than it is read; the jitter buffer judges it on the earlier bound, so a caller
 	/// that polls late (a sink sleeping to pace its writes) does not make it late.
 	empty: web_async::time::Instant,
 	/// The source's discontinuity counter the decode clock (`last_dts`, `timeline`) runs under.
@@ -246,12 +246,12 @@ struct Track {
 }
 
 impl Track {
-	/// Author the frame's decode time and queue it for release.
+	/// Author the frame's decode time and queue it in the jitter buffer.
 	///
-	/// The decode clock runs here, as frames are read, because the release deadline is
+	/// The decode clock runs here, as frames are read, because the deadline is
 	/// on decode time: reordered video arrives in decode order with PTS 0, 120, 40, 80,
 	/// so a PTS deadline would strand a B-frame behind its reference or send it first.
-	fn queue(&mut self, name: &str, pending: Pending, release: &mut Release<u16, Queued>) {
+	fn queue(&mut self, name: &str, pending: Pending, jitter: &mut jitter::Buffer<u16, Queued>) {
 		let Pending {
 			frame,
 			discontinuity,
@@ -299,8 +299,8 @@ impl Track {
 				description,
 			},
 		};
-		if release.push(self.pid, arrival) == Push::Late {
-			tracing::warn!(track = %name, dropped = release.dropped(), "frame missed its release deadline; dropped");
+		if jitter.push(self.pid, arrival) == Push::Late {
+			tracing::warn!(track = %name, dropped = jitter.dropped(), "frame missed its deadline; dropped");
 		}
 	}
 }
@@ -716,7 +716,7 @@ impl<E: catalog::Catalog> Export<E> {
 			catalog_format,
 			stale: HashSet::new(),
 			delay: Duration::ZERO,
-			release: Release::new(Duration::ZERO),
+			jitter: jitter::Buffer::new(Duration::ZERO),
 			held: None,
 			generation: 0,
 			tracks: HashMap::new(),
@@ -772,7 +772,7 @@ impl<E: catalog::Catalog> Export<E> {
 	/// Defaults to [`Duration::ZERO`].
 	pub fn with_delay(mut self, delay: Duration) -> Self {
 		self.delay = delay;
-		self.release = Release::new(delay);
+		self.jitter = jitter::Buffer::new(delay);
 		self
 	}
 
@@ -817,7 +817,7 @@ impl<E: catalog::Catalog> Export<E> {
 			si.poll(waiter);
 		}
 
-		// 2. Read every frame the sources have: into the release stage, or before the
+		// 2. Read every frame the sources have: into the jitter buffer, or before the
 		// program tables are built, one per track.
 		self.fill(waiter)?;
 
@@ -857,7 +857,7 @@ impl<E: catalog::Catalog> Export<E> {
 					}
 				}
 			}
-			// Hand the held frames to the release stage in arrival order, so the
+			// Hand the held frames to the jitter buffer in arrival order, so the
 			// earliest anchors its clock, then read on.
 			let mut held: Vec<(web_async::time::Instant, String)> = self
 				.tracks
@@ -868,12 +868,12 @@ impl<E: catalog::Catalog> Export<E> {
 			for (_, name) in held {
 				let track = self.tracks.get_mut(&name).unwrap();
 				let pending = track.pending.take().unwrap();
-				track.queue(&name, pending, &mut self.release);
+				track.queue(&name, pending, &mut self.jitter);
 			}
 			self.fill(waiter)?;
 		}
 
-		// 4. Mux each frame the release stage lets go into the open span (the first
+		// 4. Mux each frame the jitter buffer lets go into the open span (the first
 		// one carries the buffered PAT/PMT). Nothing goes out until a later
 		// timestamp measures that span: only then is it known how many bytes it
 		// carried, which is what puts the clock packets at the byte position their
@@ -884,33 +884,33 @@ impl<E: catalog::Catalog> Export<E> {
 				self.emitted_epoch = self.epoch;
 				return Poll::Ready(Ok(Some(out)));
 			}
-			let released = match self.held.take() {
-				Some(released) => released,
-				None => match self.release.poll_next(waiter) {
-					Poll::Ready(released) => released,
+			let ready = match self.held.take() {
+				Some(ready) => ready,
+				None => match self.jitter.poll_next(waiter) {
+					Poll::Ready(ready) => ready,
 					Poll::Pending => break,
 				},
 			};
-			if released.generation > self.generation {
+			if ready.generation > self.generation {
 				if !self.pending.is_empty() {
 					// A boundary ends valid media rather than reneging it.
 					// Return that tail under the old generation before adopting the new one.
 					self.emit(None)?;
-					self.held = Some(released);
+					self.held = Some(ready);
 					continue;
 				}
 				self.rewind();
-				self.generation = released.generation;
+				self.generation = ready.generation;
 			}
 			let name = self
 				.tracks
 				.iter()
-				.find(|(_, t)| t.pid == released.track)
+				.find(|(_, t)| t.pid == ready.track)
 				.map(|(name, _)| name.clone())
-				.context("released frame for an unknown PID")?;
-			self.last_timestamp = Some(released.item.frame.timestamp);
-			self.advance(released.item.decode)?;
-			self.mux(&name, released.item)?;
+				.context("frame for an unknown PID")?;
+			self.last_timestamp = Some(ready.item.frame.timestamp);
+			self.advance(ready.item.decode)?;
+			self.mux(&name, ready.item)?;
 		}
 
 		// 5. Once every track has drained, no later timestamp is coming to measure
@@ -919,7 +919,7 @@ impl<E: catalog::Catalog> Export<E> {
 		// holding its tail until the catalog closed would strand it indefinitely.
 		let drained = !self.tracks.is_empty()
 			&& self.tracks.values().all(|t| t.finished)
-			&& self.release.is_empty()
+			&& self.jitter.is_empty()
 			&& self.held.is_none();
 		if drained {
 			self.emit(None)?;
@@ -1013,7 +1013,7 @@ impl<E: catalog::Catalog> Export<E> {
 							track.pending = Some(pending);
 							break;
 						}
-						track.queue(name, pending, &mut self.release);
+						track.queue(name, pending, &mut self.jitter);
 					}
 					Poll::Ready(None) => {
 						track.finished = true;
@@ -1300,16 +1300,16 @@ impl<E: catalog::Catalog> Export<E> {
 		);
 	}
 
-	/// How many frames were dropped for missing their release deadline.
+	/// How many frames were dropped for missing their deadline.
 	#[cfg(test)]
 	pub(super) fn dropped(&self) -> u64 {
-		self.release.dropped()
+		self.jitter.dropped()
 	}
 
-	/// When the next queued frame is due for release.
+	/// When the next queued frame is due.
 	#[cfg(test)]
-	pub(super) fn next_release(&self) -> Option<web_async::time::Instant> {
-		self.release.next_deadline()
+	pub(super) fn next_due(&self) -> Option<web_async::time::Instant> {
+		self.jitter.next_deadline()
 	}
 
 	/// The discontinuity counter of the most recently returned output frame.
@@ -1349,7 +1349,7 @@ impl<E: catalog::Catalog> Export<E> {
 			self.stale.insert(name.clone());
 		}
 		// The replacement's clock starts afresh at its own first frame.
-		self.release.clear();
+		self.jitter.clear();
 		self.held = None;
 		self.generation = 0;
 		self.rewind();
@@ -1709,7 +1709,7 @@ impl<E: catalog::Catalog> Export<E> {
 	/// `ts` is the decode time of the frame about to be muxed. Passing the watermark
 	/// means the span that decode time opened is done: everything buffered since is
 	/// exactly the bytes it carried, and the distance from it measures how long it ran.
-	/// The release stage hands frames over in decode order, so only a tie, or a frame
+	/// The jitter buffer hands frames over in decode order, so only a tie, or a frame
 	/// read out of order under a zero delay, trails the watermark; it closes nothing,
 	/// and its bytes join the open span.
 	///
