@@ -299,15 +299,15 @@ harness_endpoint relay "$URL"
 # (a file has none left in it). It stops itself after its own window, so the
 # round-trip below still bounds the run.
 
-# SCHEDULE carries the rate pcr-timing.py's schedule check grades against. The
-# generated clip is muxed at $BITRATE, which is the rate the catalog records and the
-# exporter pads to. Left to estimate, the grader divides total bytes by the PCR span,
-# and any transient drags that off the true rate: an unpadded first half-second put it
-# ~3 % low over a 20 s window, which then read every correctly padded interval as off
-# schedule. A --source capture's rate is not known here, so for that the grader
-# estimates it and says so.
+# SCHEDULE carries the rate pcr-timing.py's schedule check grades against, and gates
+# on it. The generated clip is muxed at $BITRATE, which is the rate the catalog records
+# and the exporter pads to, on a constant-rate schedule from the first null packet on:
+# every interval is the bytes the rate implies, to one packet. Left to estimate, the
+# grader divides total bytes by the PCR span, and the unpadded start drags that off the
+# true rate. A --source capture's rate is not known here, so for that the grader
+# estimates it, says so, and only reports.
 SCHEDULE=()
-[[ -z "$SOURCE" ]] && SCHEDULE=(--mux-rate "$BITRATE")
+[[ -z "$SOURCE" ]] && SCHEDULE=(--mux-rate "$BITRATE" --schedule-pct-min 99)
 
 # Both halves matter and `wait` can only report one, so record each. The
 # exporter's own status is not incidental here: it decides whether the grader saw
@@ -521,7 +521,7 @@ fi
 # compliance.py grades rate in aggregate and over fixed windows, neither of which says
 # whether the bytes between consecutive PCRs are the ones the mux rate implies, so the
 # capture goes through pcr-timing.py as well. Its hard checks gate here as they do under
-# --live; pcr-schedule is a shape check, so it reports without gating unless --strict.
+# --live, and so does pcr-schedule when the rate is known (SCHEDULE).
 echo
 if ! python3 "$DIR/pcr-timing.py" "$SUB_TS" ${SCHEDULE[@]+"${SCHEDULE[@]}"} $STRICT; then
     echo >&2

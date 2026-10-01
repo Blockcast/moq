@@ -16,6 +16,12 @@ Padding, pacing, and muxing all assume a fixed delay, so the export gets one
 first. t0ms is testing whether T-STD compliance is feasible at all; record
 the result here. If it isn't, re-plan this line.
 
+Measured (2026-09-30, #4645): with the fixed-delay jitter buffer and the
+constant-rate schedule, a clean-path round trip of the generated clip passes
+the strict T-STD check at 10 Mb/s and at 2 Mb/s, where every keyframe outgrows
+a PCR interval. A burst that does not fit the delay fails the export rather
+than overrun the rate.
+
 This README owns the end-to-end proof: the #4613 netem rig (10% loss, a real
 ~10 Mb/s broadcast TS) passes the strict T-STD check, and the recipe runs
 nightly.
@@ -23,4 +29,3 @@ nightly.
 ## Required
 
 - [T-STD check](/quest/m1/tstd/check.md) - the harness grades the full buffer model instead of the transport buffer alone
-- [TS byte schedule](/quest/m1/tstd/byte-schedule.md) - PCRs sit on the byte grid the mux rate implies, paced against the fixed delay

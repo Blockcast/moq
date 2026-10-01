@@ -46,8 +46,8 @@ use crate::container::{ExportSource, Frame};
 use crate::jitter::{self, Arrival, Push};
 
 use super::adts;
-use super::schedule::{self, Schedule};
 use super::catalog;
+use super::schedule::{self, Schedule};
 
 /// PID of the single program's PMT.
 const PMT_PID: u16 = 0x1000;
@@ -241,7 +241,11 @@ impl Track {
 				}
 				let pts = to_ticks(frame.timestamp);
 				let dts = self.clock.author(pts, self.reserve.ticks, self.reserve.period());
-				((dts != pts).then_some(dts), frame.keyframe, self.source.description().cloned())
+				(
+					(dts != pts).then_some(dts),
+					frame.keyframe,
+					self.source.description().cloned(),
+				)
 			}
 			_ => (None, true, None),
 		};
@@ -1679,7 +1683,7 @@ impl<E: catalog::Catalog> Export<E> {
 	/// payload (a clock packet) repeats the counter before it (ISO 13818-1 2.4.3.3); before
 	/// anything has gone out on its PID, any value starts a valid run.
 	fn number(&mut self, packets: &mut [u8]) {
-		for packet in packets.chunks_exact_mut(TsPacket::SIZE) {
+		for packet in packets.as_chunks_mut::<{ TsPacket::SIZE }>().0 {
 			let pid = u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2]);
 			if pid == 0x1FFF {
 				continue;
@@ -2187,7 +2191,11 @@ struct DecodeClock {
 impl DecodeClock {
 	/// The DTS of a frame presented at `pts`, the next in decode order.
 	fn author(&mut self, pts: u64, reserve: u64, declared: Option<u64>) -> u64 {
-		if let Some(step) = self.previous.map(|previous| pts.abs_diff(previous)).filter(|&step| step > 0) {
+		if let Some(step) = self
+			.previous
+			.map(|previous| pts.abs_diff(previous))
+			.filter(|&step| step > 0)
+		{
 			self.period = Some(self.period.map_or(step, |period| period.min(step)));
 		}
 		self.previous = Some(pts);
@@ -2201,7 +2209,7 @@ impl DecodeClock {
 				// count back from the earliest seen as a decoder that ran all along would have.
 				let held = self.window.len();
 				let earliest = match held > depth {
-					true => self.window.drain(..held - depth).last().unwrap_or(pts),
+					true => self.window.drain(..held - depth).next_back().unwrap_or(pts),
 					false => self.window[0].saturating_sub((depth + 1 - held) as u64 * period),
 				};
 				earliest.saturating_sub(reserve % period)

@@ -69,7 +69,13 @@ impl Slot {
 	/// lead the keyframe they were written for and a reader knows each PID before its first
 	/// packet.
 	pub fn layout(&self, pmt_pid: u16, null: &[u8]) -> Vec<u8> {
-		let packets: Vec<&[u8]> = self.packets.chunks_exact(TsPacket::SIZE).collect();
+		let packets: Vec<&[u8]> = self
+			.packets
+			.as_chunks::<{ TsPacket::SIZE }>()
+			.0
+			.iter()
+			.map(|p| p.as_slice())
+			.collect();
 		let pid = |packet: &[u8]| u16::from(packet[1] & 0x1f) << 8 | u16::from(packet[2]);
 		let mut counts: HashMap<u16, u64> = HashMap::new();
 		for packet in &packets {
@@ -339,10 +345,22 @@ mod tests {
 		// Nothing past the window is settled until a later unit shows up.
 		let mut slots = Vec::new();
 		while let Some(slot) = schedule.next(Some(slot(ms(1_200)))).unwrap() {
-			slots.push((slot.index, slot.packets.len() / TsPacket::SIZE, slot.nulls, slot.keyframe));
+			slots.push((
+				slot.index,
+				slot.packets.len() / TsPacket::SIZE,
+				slot.nulls,
+				slot.keyframe,
+			));
 		}
-		assert_eq!(slots.first().map(|s| s.0), Some(36), "starts a window ahead of the unit");
-		assert!(slots.iter().all(|s| s.1 + s.2 == 39), "every slot is padded to the rate");
+		assert_eq!(
+			slots.first().map(|s| s.0),
+			Some(36),
+			"starts a window ahead of the unit"
+		);
+		assert!(
+			slots.iter().all(|s| s.1 + s.2 == 39),
+			"every slot is padded to the rate"
+		);
 		let sent: Vec<_> = slots.iter().filter(|s| s.1 > 0).collect();
 		assert_eq!(sent, [&(40, 3, 36, true)], "as late as it can go: {slots:?}");
 	}

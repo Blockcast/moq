@@ -74,6 +74,7 @@ class Scan:
     def __init__(self):
         self.pcr = []  # (packet_index, ticks, arrival_or_None, pid)
         self.packets = 0
+        self.first_null = None  # the first null packet: a padded stream's schedule starts there
         self.bad_sync = 0
         self.transport_error = 0
         self.cc_errors = []
@@ -95,6 +96,8 @@ class Scan:
         if p[1] & 0x80:
             self.transport_error += 1
         pid = ((p[1] & 0x1F) << 8) | p[2]
+        if pid == 0x1FFF and self.first_null is None:
+            self.first_null = index
 
         # ISO 13818-1 2.4.3.3 allows the counter to jump when the adaptation field sets
         # discontinuity_indicator, and allows one packet to be sent twice, repeating its
@@ -486,6 +489,11 @@ def check_schedule(scan, args):
     as a start that is not yet padded, biases every interval's error by the same amount;
     pass the rate whenever it is known.
 
+    With --mux-rate, the intervals before the first null packet are not graded: an
+    exporter pads only once its catalog records the rate, which import measures over the
+    source's first two seconds, so a subscriber that starts with the publisher begins
+    unpadded. The report counts them.
+
     Report-only unless --schedule-pct-min is given: a VBR stream has no schedule to keep,
     and `export ts` is VBR unless a mux rate is declared, so only the caller knows whether
     this property was promised.
@@ -502,11 +510,15 @@ def check_schedule(scan, args):
     on_pid = [(k, e) for k, e in enumerate(scan.pcr) if e[3] == pid]
     graded = []
     skipped = 0
+    unpadded = 0
     for (_, a), (kb, b) in zip(on_pid, on_pid[1:]):
         seconds = (b[1] - a[1]) / TICKS_PER_MS / 1000.0
         # An interval spanning a signalled new time base measures nothing, as in the value
         # check. A non-positive one is a duplicate packet (legal) or a backwards clock (the
         # value check's defect to report); neither has a rate to compare against.
+        if args.mux_rate and scan.first_null is not None and b[0] <= scan.first_null:
+            unpadded += 1
+            continue
         if kb in scan.new_base or seconds <= 0:
             skipped += 1
             continue
@@ -533,6 +545,7 @@ def check_schedule(scan, args):
         "other_pcr_pids": sorted(p for p in pids if p != pid),
         "count": len(graded),
         "skipped": skipped,
+        "unpadded_lead": unpadded,
         "rate_bps": round(rate),
         "rate_source": "declared" if args.mux_rate else "estimated",
         "aggregate_bps": round(aggregate),

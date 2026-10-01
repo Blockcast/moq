@@ -5359,7 +5359,10 @@ async fn declared_reorder_sizes_the_decode_clock_from_the_first_frame() {
 	);
 	let decode: Vec<u64> = timing.iter().map(|&(pts, dts)| dts.unwrap_or(pts)).collect();
 	for (i, step) in decode.windows(2).map(|w| w[1] - w[0]).enumerate() {
-		assert_eq!(step, FRAME_TICKS, "frame {i} does not decode one period after the last: {decode:?}");
+		assert_eq!(
+			step, FRAME_TICKS,
+			"frame {i} does not decode one period after the last: {decode:?}"
+		);
 	}
 	assert_decodes_after_the_clock(&out_late);
 }

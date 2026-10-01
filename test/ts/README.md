@@ -41,8 +41,8 @@ runs (see [CI](#ci)).
 The default arm runs `pcr-timing.py` over its capture too, after `compliance.py`,
 for the one thing the IRD model does not grade: whether the bytes between
 consecutive PCRs are the ones the mux rate implies
-([`pcr-schedule`](#byte-schedule)). It is a shape check, so it reports without
-gating unless `--strict`.
+([`pcr-schedule`](#byte-schedule)). It gates whenever the rate is known, which is
+the generated clip's.
 
 The live arm passes only when the grader's verdict *and* the publisher's exit status
 are clean. The grader can only speak for what reached it, and the sample floor
@@ -221,17 +221,22 @@ Give the rate whenever it is known. The estimate is total bytes over total time,
 so a transient biases every interval by the same amount: over a 20 s live window,
 the exporter's unpadded first half-second pulled it ~3 % low and read every padded
 interval after it as off schedule. `run.sh` passes the generated clip's rate
-(`--bitrate`), and lets the grader estimate for `--source`.
+(`--bitrate`) with `--schedule-pct-min 99`, and lets the grader estimate, and only
+report, for `--source`.
 
-The generated clip is a weak fixture for this check. It compresses to almost
-nothing, so padding dominates and no keyframe outgrows its slot: measured against
-the exporter this check was written for, 92-97 % of intervals were on schedule
-over three 20 s runs, the misses being near-empty intervals from the unpadded
-start. A real constant-rate capture is the case that
-discriminates. A 60 s cut of a 9.95 Mb/s broadcast clip round-tripped through the
-same harness came back with a median of 1,316 B between PCRs against 31,081 B
-nominal and 3.1 % of intervals within tolerance, while its aggregate rate was
-within 16 b/s of nominal:
+With the rate given, the intervals before the first null packet are not graded. The
+exporter pads only once its catalog records the rate, which import measures over the
+source's first two seconds, so a subscriber that starts with the publisher begins
+unpadded; the report counts those intervals as `unpadded_lead`.
+
+At the default 10 Mb/s the generated clip compresses to almost nothing, so padding
+dominates and no keyframe outgrows its 31 kB slot. At 2 Mb/s its 13-19 kB keyframes
+outgrow a 6 kB slot, so the exporter has to spread each over the slots before its
+DTS; CI runs that too (`just test ts --bitrate 2000000`). A real constant-rate
+capture discriminates further. A 60 s cut of a 9.95 Mb/s broadcast clip
+round-tripped through the harness before the export kept a schedule came back with
+a median of 1,316 B between PCRs against 31,081 B nominal and 3.1 % of intervals
+within tolerance, while its aggregate rate was within 16 b/s of nominal:
 
 ```bash
 just test ts --source cap.ts --duration 60 # reports the schedule, estimating the rate

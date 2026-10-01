@@ -22,8 +22,8 @@ mod adts;
 mod export;
 mod import;
 mod mux_rate;
-mod schedule;
 mod programs;
+mod schedule;
 mod si;
 
 // The `mpegts` catalog section (per-track PID + descriptors plus verbatim carriage

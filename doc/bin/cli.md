@@ -104,11 +104,17 @@ profile or channel layout ADTS cannot label is refused rather than mislabeled.
 
 A constant-rate MPEG-TS source records its multiplex rate in the catalog
 (`mpegts.muxRate`, measured off the PCR clock, null stuffing included), and
-`export ts` pads its output with null packets back to that rate so an IRD or
-groomer receives a constant-rate stream. `--mux-rate 5000000` pads to an explicit
-rate instead, including for a broadcast that recorded none. Media is never delayed
-or dropped to fit: a source that sustains more than the rate overruns it, and a
-VBR source records nothing, so export without either stays unpadded.
+`export ts` pads its output with null packets back to that rate on a constant-rate
+schedule, so an IRD or groomer recovering its clock from packet arrival can lock:
+every PCR interval carries the bytes the rate implies. `--mux-rate 5000000` pads to
+an explicit rate instead, including for a broadcast that recorded none. A frame
+goes out as late as the rate lets it while still arriving by its decode time, and a
+keyframe bigger than one 25 ms interval spreads over the intervals before it, back
+as far as `--delay`. That window adds up to the delay again to the output's
+latency, so a padded export trails the source by up to twice the delay. A burst
+that does not fit the window, or a source that sustains more than the rate, fails
+the export with an error naming both knobs. A VBR source records no rate, so
+export without one stays unpadded and adds no window.
 
 fMP4 export writes one fragment per publisher group on each track. Audio follows
 the publisher's cuts; video normally follows GOPs. Closing a group flushes it
