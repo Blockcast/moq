@@ -15,8 +15,8 @@ pub(crate) struct Arrival<T> {
 	pub arrived: Instant,
 	/// When the frame decodes, nondecreasing within a track.
 	pub decode: Timestamp,
-	/// The source's discontinuity counter when the frame was read.
-	pub discontinuity: u64,
+	/// How many times the source had restarted its timeline when the frame was read.
+	pub restart: u64,
 	/// Whether the frame decodes without the track's earlier frames.
 	pub sync: bool,
 	pub item: T,
@@ -25,7 +25,7 @@ pub(crate) struct Arrival<T> {
 /// A frame [`Buffer::poll_next`] let go.
 pub(crate) struct Ready<K, T> {
 	pub track: K,
-	/// Counts up each time a discontinuity moved the timeline, and the clock with it. Every
+	/// Counts up each time a restart moved the timeline, and the clock with it. Every
 	/// frame of one generation goes out before any frame of the next.
 	pub generation: u64,
 	pub item: T,
@@ -49,14 +49,15 @@ pub(crate) enum Push {
 /// different skew, each within its deadline, emit them in the same order. A frame that
 /// arrives past its deadline would break that order, so it is dropped and counted.
 ///
-/// A source's discontinuity (a skipped group, a declared marker) may have moved its
-/// timeline, so once frames have gone out it opens a new generation with its own clock,
-/// anchored at that frame though never ahead of a deadline already given out. Every
-/// track's next frame runs on it: one crossing the same discontinuity joins it when the
-/// frame lands on its clock, neither late nor held more than a delay past everything
-/// queued, and opens another otherwise. Before anything has gone out there is nothing to
-/// keep in step with, so a discontinuity there (a consumer skipping a stale group at join)
-/// keeps the clock. No two tracks are ever on different clocks.
+/// A skipped group leaves the timeline where it was, so it keeps the clock: frames it made
+/// late are dropped like any other. A source that restarts its timeline (a declared
+/// marker) has moved it, so once frames have gone out the restart opens a new generation
+/// with its own clock, anchored at that frame though never ahead of a deadline already
+/// given out. Every track's next frame runs on it: one crossing the same restart joins it
+/// when the frame lands on its clock, neither late nor held more than a delay past
+/// everything queued, and opens another otherwise. Before anything has gone out there is
+/// nothing to keep in step with, so a restart there keeps the clock. No two tracks are
+/// ever on different clocks.
 ///
 /// The clock follows the source's: a source clock running slower than ours would make
 /// every frame late in the end, and a faster one would hold more and more. So the clock
@@ -106,8 +107,8 @@ struct Clock {
 struct Track<T> {
 	/// Frames in arrival order, each with its generation and deadline.
 	queue: VecDeque<(u64, Instant, T)>,
-	/// The source's discontinuity counter at the last frame.
-	discontinuity: u64,
+	/// The source's restart counter at the last frame.
+	restart: u64,
 	/// The generation of the last frame.
 	generation: u64,
 	/// A frame was dropped, so later ones are too until the next sync frame.
@@ -138,10 +139,10 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		});
 		let mut generation = clock.generation;
 		let mut deadline = self.deadline(&clock, arrival.decode);
-		// A track still on an older generation may be crossing the discontinuity another
-		// track opened the newest one for.
+		// A track still on an older generation may be crossing the restart another track
+		// opened the newest one for.
 		let jumped = self.tracks.get(&key).is_some_and(|track| {
-			track.discontinuity != arrival.discontinuity
+			track.restart != arrival.restart
 				&& (track.generation == generation || !self.lands(deadline, arrival.arrived))
 		});
 		if jumped && self.released {
@@ -162,11 +163,11 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 
 		let track = self.tracks.entry(key).or_insert_with(|| Track {
 			queue: VecDeque::new(),
-			discontinuity: arrival.discontinuity,
+			restart: arrival.restart,
 			generation,
 			waiting: false,
 		});
-		track.discontinuity = arrival.discontinuity;
+		track.restart = arrival.restart;
 		track.generation = generation;
 		let push = match deadline {
 			_ if track.waiting && !arrival.sync => Push::Waiting,
@@ -323,16 +324,16 @@ mod tests {
 		Arrival {
 			arrived,
 			decode: ms(decode),
-			discontinuity: 0,
+			restart: 0,
 			sync: true,
 			item,
 		}
 	}
 
-	/// The same frame, read after its source's discontinuity counter moved to `discontinuity`.
-	fn after(discontinuity: u64, arrival: Arrival<&'static str>) -> Arrival<&'static str> {
+	/// The same frame, read after its source restarted its timeline `restart` times.
+	fn after(restart: u64, arrival: Arrival<&'static str>) -> Arrival<&'static str> {
 		Arrival {
-			discontinuity,
+			restart,
 			..arrival
 		}
 	}
@@ -431,8 +432,7 @@ mod tests {
 		assert_eq!(due(&mut buffer), ["v0", "a0", "a180", "v240"]);
 	}
 
-	/// A consumer that skips a stale group at join counts a discontinuity before anything
-	/// went out. The skip keeps the clock, so the tracks stay on one.
+	/// A restart before anything went out keeps the clock, so the tracks stay on one.
 	#[tokio::test(start_paused = true)]
 	async fn a_skip_before_the_first_release_keeps_one_clock() {
 		let start = Instant::now();
@@ -453,8 +453,8 @@ mod tests {
 		);
 	}
 
-	/// A discontinuity after frames went out opens a new generation, and every track's next
-	/// frame runs on it, whether or not that track saw the discontinuity.
+	/// A restart after frames went out opens a new generation, and every track's next frame
+	/// runs on it, whether or not that track saw the restart.
 	#[tokio::test(start_paused = true)]
 	async fn every_track_joins_a_new_generation_at_its_next_frame() {
 		let start = Instant::now();
@@ -469,7 +469,7 @@ mod tests {
 		let resume = start + Duration::from_secs(1);
 		tokio::time::advance(resume - Instant::now()).await;
 		assert_eq!(buffer.push(1, after(1, arrival(resume, 5_000, "v5000"))), Push::Queued);
-		// The audio crosses no discontinuity of its own; the data crosses the same one.
+		// The audio crosses no restart of its own; the data crosses the same one.
 		let late = resume + Duration::from_millis(10);
 		assert_eq!(buffer.push(2, arrival(late, 5_000, "a5000")), Push::Queued);
 		assert_eq!(buffer.push(3, after(1, arrival(late, 5_000, "d5000"))), Push::Queued);
@@ -521,7 +521,7 @@ mod tests {
 				let frame = Arrival {
 					arrived,
 					decode: Timestamp::from_micros(decode.as_micros() as u64).unwrap(),
-					discontinuity: 0,
+					restart: 0,
 					sync: true,
 					item: "v",
 				};

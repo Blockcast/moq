@@ -184,16 +184,16 @@ impl ExportSource {
 		self.description.as_ref()
 	}
 
-	/// The underlying consumer's playhead generation, or 0 until the
+	/// How many times the publisher declared its timeline restarted, or 0 until the
 	/// subscription resolves.
 	///
-	/// See [`Consumer::discontinuity`]. Sample it alongside each frame returned by
-	/// [`poll_read`](Self::poll_read): the frame read while the counter changes is
-	/// the first after a playhead event, so anything anchored on the media clock (a
-	/// repetition cadence, a clock grid, a pacer) has to re-anchor to it.
-	pub fn discontinuity(&self) -> u64 {
+	/// See [`Consumer::restarts`]. Sample it alongside each frame returned by
+	/// [`poll_read`](Self::poll_read): the frame read while the counter changes is the
+	/// first on the new timeline, so anything anchored on the media clock has to
+	/// re-anchor to it. A skipped group is not a restart: the timeline carries on.
+	pub fn restarts(&self) -> u64 {
 		match &self.state {
-			SourceState::Active(consumer) => consumer.discontinuity(),
+			SourceState::Active(consumer) => consumer.restarts(),
 			_ => 0,
 		}
 	}

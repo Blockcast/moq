@@ -167,7 +167,8 @@ pub struct Export<E: catalog::Catalog = ()> {
 /// A frame read from its source.
 struct Pending {
 	frame: Frame,
-	discontinuity: u64,
+	/// How many times the source had restarted its timeline when the frame was read.
+	restart: u64,
 	/// The earliest the frame could have arrived: when its source was last found empty.
 	arrived: web_async::time::Instant,
 }
@@ -191,8 +192,8 @@ struct Track {
 	/// no later than it is read; the jitter buffer judges it on the earlier bound, so a caller
 	/// that polls late (a sink sleeping to pace its writes) does not make it late.
 	empty: web_async::time::Instant,
-	/// The source's discontinuity counter the decode clock (`clock`, `timeline`) runs under.
-	discontinuity: u64,
+	/// The source's restart counter the decode clock runs under.
+	restart: u64,
 	finished: bool,
 	pid: u16,
 	kind: Kind,
@@ -214,7 +215,7 @@ impl Track {
 			source,
 			pending: None,
 			empty: web_async::time::Instant::now(),
-			discontinuity: 0,
+			restart: 0,
 			finished: false,
 			pid: 0,
 			kind,
@@ -231,10 +232,10 @@ impl Track {
 	/// reordered video arrives in decode order with PTS 0, 120, 40, 80, so a PTS deadline would
 	/// strand a B-frame behind its reference or send it first.
 	fn queue(&mut self, name: &str, pending: Pending, jitter: &mut jitter::Buffer<u16, Queued>) {
-		if pending.discontinuity != self.discontinuity {
+		if pending.restart != self.restart {
 			// The source may have restarted its timeline, so the decode clock restarts too.
 			self.release(name, jitter, true);
-			self.discontinuity = pending.discontinuity;
+			self.restart = pending.restart;
 			self.clock = DecodeClock::default();
 		}
 		let Kind::Video(stream_type) = self.kind else {
@@ -300,11 +301,7 @@ impl Track {
 		description: Option<Bytes>,
 		jitter: &mut jitter::Buffer<u16, Queued>,
 	) {
-		let Pending {
-			frame,
-			discontinuity,
-			arrived,
-		} = pending;
+		let Pending { frame, restart, arrived } = pending;
 		let dts = dts.filter(|&dts| dts != to_ticks(frame.timestamp));
 		let decode = dts
 			.and_then(|ticks| Timestamp::from_scale(ticks, 90_000).ok())
@@ -312,7 +309,7 @@ impl Track {
 		let arrival = Arrival {
 			arrived,
 			decode,
-			discontinuity,
+			restart,
 			sync: frame.keyframe || !matches!(self.kind, Kind::Video(_)),
 			item: Queued {
 				frame,
@@ -982,12 +979,12 @@ impl<E: catalog::Catalog> Export<E> {
 						}
 						let pending = Pending {
 							frame,
-							discontinuity: track.source.discontinuity(),
+							restart: track.source.restarts(),
 							arrived: track.empty,
 						};
 						// A new timeline must reach the reset before tune-in alignment can drop it.
 						if let Some(start) = video_start
-							&& !is_video && pending.discontinuity == track.discontinuity
+							&& !is_video && pending.restart == track.restart
 							&& pending.frame.timestamp < start
 						{
 							continue;
@@ -1286,7 +1283,7 @@ impl<E: catalog::Catalog> Export<E> {
 		for (name, track) in self.tracks.iter_mut() {
 			track.finished = true;
 			track.pending = None;
-			track.discontinuity = 0;
+			track.restart = 0;
 			track.clock = DecodeClock::default();
 			self.stale.insert(name.clone());
 		}

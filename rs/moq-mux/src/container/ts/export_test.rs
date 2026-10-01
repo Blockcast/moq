@@ -5971,6 +5971,66 @@ async fn jitter_published_after_the_tables_keeps_the_encoders_clock() {
 	assert_decodes_after_the_clock(&runner);
 }
 
+/// A group the consumer skips (here one that never arrives) leaves the timeline where it was,
+/// so the export keeps its clock: the program clock runs on with no break flagged, and a
+/// frame the wait made late would be dropped like any other.
+#[tokio::test(start_paused = true)]
+async fn a_skipped_group_keeps_the_clock() {
+	use crate::container::Container as _;
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let mut track = broadcast
+		.create_track("a.aac", hang::container::track_info(hang::catalog::PRIORITY.audio))
+		.unwrap();
+	{
+		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.container = Container::Legacy;
+		catalog.modify().unwrap().audio.renditions.insert("a.aac".to_string(), cfg);
+	}
+
+	let delay = Duration::from_millis(500);
+	let mut export = Export::new(crate::source::announced(&consumer))
+		.await
+		.unwrap()
+		.with_delay(delay);
+	let start = tokio::time::Instant::now();
+	let mut out = Vec::new();
+	// 100 ms groups of five 20 ms frames, a minute in; group 20 never arrives.
+	for sequence in 0..60u64 {
+		tokio::time::sleep_until(start + Duration::from_millis(sequence * 100)).await;
+		if sequence != 20 {
+			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+			for k in 0..5u64 {
+				let frame = Frame {
+					timestamp: Timestamp::from_millis(60_000 + sequence * 100 + k * 20).unwrap(),
+					duration: None,
+					payload: Bytes::from_static(&[0x21, 0x10, 0x04, 0x60]),
+					keyframe: k == 0,
+				};
+				HangContainer::Legacy(crate::container::Kind::Audio)
+					.write(&mut group, &[frame])
+					.unwrap();
+			}
+			group.finish().unwrap();
+		}
+		out.extend(poll_frames(&mut export));
+	}
+	track.finish().unwrap();
+	out.extend(drain_frames(&mut export).await);
+
+	assert_eq!(export.discontinuity(), 0, "a skipped group is not a new program clock");
+	assert_eq!(count_discontinuity(&out), 0, "no PCR break is flagged");
+	let ts: Vec<u8> = out.iter().flat_map(|f| f.payload.iter().copied()).collect();
+	let (_, audio) = collect_pes_pts(&ts);
+	assert!(
+		audio.iter().any(|&pts| pts >= (60_000 + 5_000) * 90),
+		"the audio after the skip went out"
+	);
+	assert_on_time(&out);
+}
+
 /// Publish a Legacy AAC rendition named `name`.
 fn aac_rendition(
 	broadcast: &mut moq_net::broadcast::Producer,
