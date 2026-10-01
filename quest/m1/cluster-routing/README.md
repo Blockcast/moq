@@ -3,12 +3,13 @@
 ## Goal
 
 A cluster carries each broadcast into a region once and never exposes its
-backbone to end users. Relays take an explicit edge or core role: edges
+backbone to end users. Relays take an explicit edge, core, or solo role: edges
 serve end users and spread paths over their region's cores, cores link to
-the cores of other regions over configured links with static costs, and
-routing between them stays path vector. A broadcast under overlapping
-prefixes routes to one origin deterministically. Redundancy an operator
-configures may deliver more than one copy.
+the cores of other regions over configured links with static costs, a solo
+node is a one-node region that does both, and routing between them stays
+path vector. A broadcast under overlapping prefixes routes to one origin
+deterministically. Redundancy an operator configures may deliver more than
+one copy.
 
 Non-goals: edges acting as each other's intermediates (it makes edges a
 bigger DDoS target), cache-aware route switching, and a permanently
@@ -21,8 +22,9 @@ mixed-version cluster.
 Settled in the 2026-09-30 wildcard audit (cache tiers), replacing the
 link-state and existence-split design planned earlier that day:
 
-- Two roles, edge and core. Where a region has one edge, that edge is also
-  its core. A region may have several cores, which do not link to each other.
+- Three roles: edge, core, and solo, a one-node region that serves end users
+  and links like a core. A region may have several cores, which do not link
+  to each other.
   An edge dials every core in its region over qmux on TLS (intra-region links
   are not congested) and picks one per path by rendezvous hashing, so a
   broadcast crosses into a region once. An edge never re-advertises one
@@ -118,7 +120,7 @@ Once every child has landed:
 
 ## Required
 
-- [Edge and core](/quest/m1/cluster-routing/roles.md) - relays take an explicit edge or core role; edges spread paths over their region's cores and are never transit
+- [Edge and core](/quest/m1/cluster-routing/roles.md) - relays take an explicit edge, core, or solo role; edges spread paths over their region's cores and are never transit
 - [Selection](/quest/m1/cluster-routing/selection.md) - a broadcast under overlapping prefixes routes to one origin deterministically, and same-epoch origins are one source
 - [Path hunting](/quest/m1/cluster-routing/path-hunting.md) - per-origin seqnos on cluster links end stale re-announces without breaking seamless failover
 - [Between clusters](/quest/m1/cluster-routing/inter-cluster.md) - announcements crossing a cluster boundary stay path vector with cluster ids as hops

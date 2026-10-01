@@ -2,11 +2,13 @@
 
 ## Goal
 
-A relay runs as an edge or a core, and a cluster built from them carries
-each broadcast into a region once. An edge serves end users, dials every core
-in its region, spreads paths over those cores by rendezvous hashing, and is
-never transit between cores. A core serves only cluster peers, dials the
-cores of the regions it links to, and never dials an edge.
+A relay runs as an edge, a core, or solo, and a cluster built from them
+carries each broadcast into a region once. An edge serves end users, dials
+every core in its region, spreads paths over those cores by rendezvous
+hashing, and is never transit between cores. A core serves only cluster
+peers, dials the cores of the regions it links to, and never dials an edge.
+A solo node is a whole region on its own: it serves end users and links like
+a core.
 
 ## Plan
 
@@ -15,7 +17,15 @@ Decided in the 2026-09-30 wildcard audit (cache tiers):
 - The role is the node's own `cluster.role`, explicit, from config or
   alongside the peer list the connect API returns. A relay whose links
   contradict its role (an edge linked to another edge, a core dialing an
-  edge) fails at startup. Where a region has one edge, that edge is its core.
+  edge) fails at startup.
+- A region with one node runs it as `solo`. It accepts clients like an edge
+  and links like a core: it dials the cores and solo nodes of the regions it
+  links to, re-publishes routes learned from one link to the others, and
+  never links an edge. Every link rule, the startup check included, treats
+  it as a core. Its region gives up the shield, which is the operator's
+  trade for running one node; a core stays clients-refused with no flag to
+  open it. (Chosen over a core that accepts clients, which puts the shield
+  behind a second knob.)
 - A relay with no role is a legacy peer and links any peer, as before roles.
   A core accepts and dials a legacy peer as a core-grade link, and an edge
   never links one. This is what lets an operator migrate one region at a
@@ -40,13 +50,15 @@ Decided in the 2026-09-30 wildcard audit (cache tiers):
   per-path spread across equally ranked cores is
   [Selection](/quest/m1/cluster-routing/selection.md)'s.
 
-Test: a two-region cluster (two edges and two cores in one region, one core
-in the other) in `rs/moq-relay/tests`, where subscribers on both edges of a
-region cause one cross-region subscription per broadcast, a route from one
+Test: a two-region cluster (two edges and two cores in one region, a solo
+node in the other) in `rs/moq-relay/tests`, where subscribers on both edges of
+a region cause one cross-region subscription per broadcast, a route from one
 core never reaches another through an edge, a client dialing a core is
-refused, and losing a core moves only its paths.
+refused, a client on the solo node gets a broadcast published on an edge,
+and losing a core moves only its paths.
 
-Public API: a relay config field for the role and a TLS qmux URL scheme.
+Public API: a relay config field for the role (`edge`, `core`, or `solo`)
+and a TLS qmux URL scheme.
 Wire: none expected.
 
 ## Related
