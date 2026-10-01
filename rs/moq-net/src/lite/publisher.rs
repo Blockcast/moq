@@ -921,6 +921,12 @@ impl AnnounceRun {
 				if let Some(hold) = &mut self.hold
 					&& let Poll::Ready((suffix, hops, cost)) = hold.poll_due(waiter)
 				{
+					// The cursor may still be holding a change to this route: if it no
+					// longer stands, keep holding until that change arrives.
+					if !origin.carries(&suffix, &hops) {
+						hold.hold(suffix, hops, cost);
+						continue;
+					}
 					tracing::debug!(route = %origin.absolute(&suffix), "announce after hold-down");
 					self.start(stream, suffix, hops, cost)?;
 					continue;
@@ -2140,8 +2146,13 @@ mod announce_test {
 	impl Held {
 		async fn new() -> Self {
 			// Deliver route changes at once: the session's hold is what this checks.
+			Self::with_update_hold(Duration::ZERO).await
+		}
+
+		/// Over an origin whose cursors hold a changed route for `update_hold`.
+		async fn with_update_hold(update_hold: Duration) -> Self {
 			let origin = crate::origin::Config {
-				update_hold: Duration::ZERO,
+				update_hold,
 				..crate::origin::Config::new(Hop::new(1).unwrap())
 			}
 			.produce();
@@ -2254,6 +2265,40 @@ mod announce_test {
 		match h.wire.take_announces().as_slice() {
 			[lite::AnnounceBroadcast::EndedId { id: 0 }] => {}
 			other => panic!("expected only the retraction, got {other:?}"),
+		}
+		h.assert_idle();
+	}
+
+	/// A held route withdrawn while the origin's cursor still holds the change is
+	/// not released at the deadline: it waits for the change and advertises what
+	/// survives.
+	#[tokio::test(start_paused = true)]
+	async fn held_route_withdrawn_behind_the_cursor_hold_is_never_sent() {
+		let mut h = Held::with_update_hold(crate::origin::DEFAULT_UPDATE_HOLD).await;
+		let _last = h.origin.announce("cam", route(&[9, 7], 3)).unwrap();
+
+		// The cursor delivers the switch to relay 6 after its hold; we retract.
+		h.best = None;
+		tokio::time::sleep(crate::origin::DEFAULT_UPDATE_HOLD + Duration::from_millis(100)).await;
+		match h.wire.take_announces().as_slice() {
+			[lite::AnnounceBroadcast::EndedId { id: 0 }] => {}
+			other => panic!("expected the retraction, got {other:?}"),
+		}
+
+		// Relay 6 goes too, just before our hold ends; the cursor holds that change
+		// past our deadline.
+		tokio::time::sleep(HOLD_DOWN - Duration::from_millis(200)).await;
+		h.fallback = None;
+		tokio::time::sleep(crate::origin::DEFAULT_UPDATE_HOLD).await;
+		h.assert_idle();
+
+		// Relay 7 survives its own hold-down.
+		tokio::time::sleep(HOLD_DOWN).await;
+		match h.wire.take_announces().as_slice() {
+			[lite::AnnounceBroadcast::Active { hops, .. }] => {
+				assert_eq!(hops, &lite::HopsRef::literal(chain(&[9, 7])));
+			}
+			other => panic!("expected relay 7's route, got {other:?}"),
 		}
 		h.assert_idle();
 	}
