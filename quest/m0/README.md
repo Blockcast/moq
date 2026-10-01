@@ -45,7 +45,6 @@ Published API or wire breaks still land on dev; each quest's Plan says so.
 - [Request caps](/quest/m0/request-caps.md) - lite message sizes, IETF request IDs, and per-session announces and subscriptions are bounded
 - [noq reassembly cap](/quest/m0/noq-reassembly-cap.md) - noq carries quinn's stream reassembly cap and the connection receive window is finite by default
 - [qmux reset race](/quest/m0/qmux-reset-race.md) - qmux handles RESET_STREAM under one lock instead of panicking
-- [Path hunting](/quest/m0/path-hunting.md) - a withdrawn path is retracted about once per relay instead of hunting stale alternatives, with a hold-down on route updates and no wire change
 - [Shared fronts](/quest/m0/shared-fronts.md) - viewer sessions share a front, so fronts scale with peers, not viewers
 - [Revalidate overflow](/quest/m0/revalidate-overflow.md) - no auth duration can overflow a deadline and abort the relay
 - [Wildcard](/quest/m0/wildcard/README.md) - a relay resolves subscriptions against advertised prefixes, a service claims the prefix it could serve and refuses the rest instead of enumerating broadcasts, and the browser player treats a covering claim as availability
