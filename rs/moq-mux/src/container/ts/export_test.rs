@@ -615,9 +615,9 @@ async fn export_import_h265_keeps_suffix_sei_on_its_picture() {
 
 /// A real broadcast contribution feed (Ateme Kyrion, H.264 1080i with ~86 B-frames)
 /// must come out of the exporter with an authored decode timeline. The importer publishes
-/// the reorder depth as the catalog `jitter`, and the exporter sizes its decode-clock reserve
-/// from it, so the video PES carry a DTS that is both strictly increasing and never after the
-/// PTS in decode order. Also assert the reorder was real (non-monotonic PTS in the source).
+/// the reorder depth as the catalog `jitter`, and the exporter authors a decode timeline from it,
+/// so the video PES carry a DTS that is both strictly increasing and never after the PTS in
+/// decode order. Also assert the reorder was real (non-monotonic PTS in the source).
 #[tokio::test(start_paused = true)]
 async fn export_bframe_video_authors_dts() {
 	let data = include_bytes!("test_data/scte35/kyrion_dirtystart.ts");
@@ -671,12 +671,71 @@ async fn export_bframe_video_authors_dts() {
 	// The exporter authored a decode timeline (the decode clock trails the PTS).
 	assert!(authored > 0, "no DTS authored for a B-frame stream");
 	// Strictly increasing (removes the `+igndts` requirement) and never after presentation
-	// (the catalog jitter sized the reserve to the reorder depth).
+	// (the catalog jitter bounds how far ahead the decode clock looks).
 	for (i, win) in effective.windows(2).enumerate() {
 		assert!(win[1] > win[0], "DTS not strictly increasing at frame {i}: {win:?}");
 	}
 	for (i, (&d, &p)) in effective.iter().zip(pts.iter()).enumerate() {
 		assert!(d <= p, "DTS {d} after PTS {p} at frame {i}");
+	}
+}
+
+/// `(PTS, DTS)` of every video PES start, in transport (decode) order. Read raw, so a capture
+/// that starts before its PMT still counts.
+fn video_pes_timing(ts: &[u8]) -> Vec<(u64, u64)> {
+	let stamp = |b: &[u8]| {
+		u64::from((b[0] >> 1) & 7) << 30
+			| u64::from(b[1]) << 22
+			| u64::from(b[2] >> 1) << 15
+			| u64::from(b[3]) << 7
+			| u64::from(b[4] >> 1)
+	};
+	let mut out = Vec::new();
+	for packet in ts.as_chunks::<188>().0 {
+		if packet[1] & 0x40 == 0 || packet[3] & 0x10 == 0 {
+			continue;
+		}
+		let start = 4 + if packet[3] & 0x20 != 0 { usize::from(packet[4]) + 1 } else { 0 };
+		let Some(pes) = packet.get(start..).filter(|pes| pes.len() >= 19) else {
+			continue;
+		};
+		if pes[..3] != [0, 0, 1] || !(0xe0..=0xef).contains(&pes[3]) || pes[7] & 0x80 == 0 {
+			continue;
+		}
+		let pts = stamp(&pes[9..14]);
+		let dts = if pes[7] & 0x40 != 0 { stamp(&pes[14..19]) } else { pts };
+		out.push((pts, dts));
+	}
+	out
+}
+
+/// The export decodes a broadcast feed exactly where its encoder did. The Kyrion capture is
+/// field-coded 1080i, two fields a frame, with B-frames: the decode clock steps a field at a
+/// time, so a held-back picture count would decode it half as early as a frame-coded stream,
+/// and its leading pictures would bunch one tick apart.
+#[tokio::test(start_paused = true)]
+async fn export_decodes_where_the_source_did() {
+	let data = include_bytes!("test_data/scte35/kyrion_dirtystart.ts");
+	let source: std::collections::BTreeMap<u64, u64> = video_pes_timing(data).into_iter().collect();
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
+	import.decode(&BytesMut::from(&data[..])).unwrap();
+	import.finish().unwrap();
+	let ts = drain(consumer).await;
+
+	let exported = video_pes_timing(&ts);
+	assert!(exported.len() > 100, "expected the full feed, got {} frames", exported.len());
+	// The capture ends mid-reorder, so the last frame's slot is one the encoder filled with a
+	// picture past the end. Timestamps cross MoQ in microseconds, so each is within a tick.
+	for (i, &(pts, dts)) in exported[..exported.len() - 1].iter().enumerate() {
+		let (_, &want) = source
+			.range(pts - 1..=pts + 1)
+			.next()
+			.unwrap_or_else(|| panic!("frame {i} presented at {pts} is not in the source"));
+		assert!(dts.abs_diff(want) <= 2, "frame {i} decodes at {dts}, the source at {want}");
 	}
 }
 
@@ -832,11 +891,10 @@ async fn export_pcr_wraps_below_zero_at_start() {
 	}
 }
 
-/// Every rendition decodes after the clock, not just the PCR track: a second
-/// rendition with a deeper reorder (catalog `jitter`) authors its DTS further
-/// behind the PTS, and the spans close on those decode times.
+/// Every rendition decodes after the clock, not just the PCR track, whatever `jitter` each
+/// declares.
 #[tokio::test(start_paused = true)]
-async fn export_pcr_respects_every_renditions_reserve() {
+async fn export_pcr_respects_every_rendition() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
@@ -858,8 +916,7 @@ async fn export_pcr_respects_every_renditions_reserve() {
 		catalog.modify().unwrap().video.renditions.insert(name.to_string(), cfg);
 		Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data))
 	};
-	// "a" gets the lowest PID and so carries the PCR, with the tiny default
-	// reserve; "b" declares a 100 ms reorder depth.
+	// "a" gets the lowest PID and so carries the PCR; "b" declares a 100 ms `jitter`.
 	let mut a = make("a.avc1", None);
 	let mut b = make("b.avc1", Some(Duration::from_millis(100)));
 
@@ -2708,8 +2765,8 @@ async fn reordered_video_keeps_the_table_cadence() {
 	assert_eq!(export.discontinuity(), 0, "a reorder is not a rewind");
 	assert_eq!(count_pid(&out, 0x0000), 10, "PAT once per 500ms slot, not per reorder");
 	assert_eq!(count_pid(&out, 0x0011), 3, "SDT once per 2s slot, not per reorder");
-	// The SPS declares no reorder depth, so the first B-frame grows the reserve. It is read
-	// a delay ahead of the first PCR, so the clock starts on the grown reserve and never
+	// The SPS declares no reorder depth, so the first B-frame grows the reorder delay. It is
+	// read a delay ahead of the first PCR, so the clock starts on the grown delay and never
 	// steps back.
 	assert_eq!(count_discontinuity(&out), 0, "a reorder does not restart the clock");
 }
@@ -4428,14 +4485,15 @@ async fn si_reordered_frames_earn_no_emission_credit() {
 		.unwrap();
 	assert_eq!(rig.media(2_400, 0x0011).await, 0, "a reordered frame earns no credit");
 
-	// The floor measures from the 2.5s anchor: not due at 3.4s, due at 3.5s.
-	assert_eq!(rig.media(3_400, 0x0011).await, 0, "not due within the floor");
-	assert_eq!(
-		rig.media(3_500, 0x0011).await,
-		1,
-		"the deferred revision rides the frame at the floor"
-	);
-	assert_eq!(rig.media(3_600, 0x0011).await, 0, "and only that one");
+	// The floor measures from the 2.5s anchor: not due at 3.4s, due at 3.5s. Since the reorder,
+	// each frame waits for one read past its reorder span before its DTS is known, so count
+	// across the reads that let each frame out.
+	let early = rig.media(3_400, 0x0011).await + rig.media(3_500, 0x0011).await + rig.media(3_600, 0x0011).await;
+	assert_eq!(early, 0, "not due within the floor");
+	let floor = rig.media(3_700, 0x0011).await + rig.media(3_800, 0x0011).await;
+	assert_eq!(floor, 1, "the deferred revision rides the frame at the floor");
+	let later = rig.media(3_900, 0x0011).await + rig.media(4_000, 0x0011).await;
+	assert_eq!(later, 0, "and only that one");
 	assert_eq!(rig.exporter.discontinuity(), 0, "B-frame reordering is not a rewind");
 }
 
@@ -4461,9 +4519,9 @@ async fn si_anchor_survives_a_zero_interval_reorder() {
 		"the 1s emission, and the anchor advancing to 3s"
 	);
 	// A reordered frame steps back behind the anchor, into the previous 1s slot;
-	// zero interval still emits. It decodes just after the 3s frame, so it shares that
-	// frame's last slot and waits with it.
+	// zero interval still emits. It waits for a read past its reorder span, which lets it out.
 	assert_eq!(rig.media(2_900, 0x0011).await, 0, "the reordered frame waits");
+	let reordered = rig.media(3_100, 0x0011).await;
 
 	// The catalog raises the interval to 1s. The grid slot must be the 3s anchor's,
 	// not the reordered 2.9s emission's.
@@ -4480,9 +4538,12 @@ async fn si_anchor_survives_a_zero_interval_reorder() {
 		.interval = Some(Duration::from_secs(1));
 	// The decode clock catches up on the reorder over the next frames, so count the
 	// emissions across them rather than per frame.
-	let held = rig.media(3_400, 0x0011).await + rig.media(3_900, 0x0011).await;
+	let held = reordered + rig.media(3_400, 0x0011).await + rig.media(3_900, 0x0011).await;
 	assert_eq!(held, 1, "only the reordered emission, still in the anchor's slot");
-	let due = rig.media(4_000, 0x0011).await + rig.media(4_100, 0x0011).await + rig.media(4_200, 0x0011).await;
+	let due = rig.media(4_000, 0x0011).await
+		+ rig.media(4_100, 0x0011).await
+		+ rig.media(4_200, 0x0011).await
+		+ rig.media(4_300, 0x0011).await;
 	assert_eq!(due, 1, "the 4s table, once");
 	assert_eq!(rig.exporter.discontinuity(), 0, "B-frame reordering is not a rewind");
 }
@@ -4719,7 +4780,7 @@ async fn a_frame_on_a_slot_boundary_finishes_before_it_decodes() {
 			inline: true,
 		});
 		cfg.container = Container::Legacy;
-		// A whole number of frames of reserve, so each DTS is an earlier frame's PTS.
+		// Each DTS is an earlier frame's PTS.
 		cfg.jitter = Some(Duration::from_millis(80));
 		catalog
 			.modify()
@@ -5170,9 +5231,9 @@ async fn export_stuffing_keeps_the_fractional_remainder() {
 	assert!(clocked.nulls > 0, "no null stuffing was emitted");
 }
 
-// The decode clock follows the stream's reordering: its reserve comes from the catalog `jitter`,
-// else the depth the SPS declares, else the reordering muxed so far, and it keeps following all
-// three after the program tables are written.
+// The decode clock follows the stream's reordering: its delay comes from the depth the SPS
+// declares and the reordering muxed so far, its lookahead also from the catalog `jitter`, and it
+// keeps following all three after the program tables are written.
 
 /// Display offsets within a group, in decode order: a closed GOP with one B-frame per reference.
 /// A B-frame lands one frame below the high-water mark.
@@ -5421,9 +5482,9 @@ fn assert_decodes_after_the_clock(frames: &[Frame]) {
 }
 
 /// With no `jitter`, an SPS that declares its reorder depth at a fixed frame rate sizes the
-/// reserve from the first keyframe: every B-frame decodes at or before it is presented from the
-/// start, and an exporter whose B-frames arrive behind the audio covering them renders the same
-/// bytes as one that sees each tick whole.
+/// reorder delay from the first keyframe: every B-frame decodes at or before it is presented
+/// from the start, and an exporter whose B-frames arrive behind the audio covering them renders
+/// the same bytes as one that sees each tick whole.
 #[tokio::test(start_paused = true)]
 async fn declared_reorder_sizes_the_decode_clock_from_the_first_frame() {
 	let mut rig = Reordered::new(
@@ -5453,8 +5514,8 @@ async fn declared_reorder_sizes_the_decode_clock_from_the_first_frame() {
 
 	let timing = video_timing(&out_late, ..);
 	assert_decodes_before_presenting(&timing);
-	// Depth 1 at 25 fps, plus one tick of reserve: every frame decodes one period after the
-	// last, the keyframe a whole reserve before it is presented.
+	// Depth 1 at 25 fps: every frame decodes one period after the last, in the slot of the
+	// next presentation time a period early.
 	let (pts, dts) = timing[1];
 	assert_eq!(
 		pts,
@@ -5463,8 +5524,8 @@ async fn declared_reorder_sizes_the_decode_clock_from_the_first_frame() {
 	);
 	assert_eq!(
 		dts,
-		Some(REORDERED_BASE * FRAME_TICKS - 1),
-		"the first P-frame already runs on the declared reserve"
+		Some(REORDERED_BASE * FRAME_TICKS),
+		"the first P-frame already runs on the declared depth"
 	);
 	let decode: Vec<u64> = timing.iter().map(|&(pts, dts)| dts.unwrap_or(pts)).collect();
 	for (i, step) in decode.windows(2).map(|w| w[1] - w[0]).enumerate() {
@@ -5502,11 +5563,11 @@ async fn reordered_video_loses_nothing_on_a_clean_path() {
 		"every video frame went out"
 	);
 	// The SPS declares no reorder depth, but the first pyramid is read a delay ahead of
-	// the first PCR, so the reserve it grows never steps the clock back.
+	// the first PCR, so the reorder delay it grows never steps the clock back.
 	assert_eq!(
 		count_discontinuity(&out),
 		0,
-		"the reserve settled before the clock started"
+		"the reorder delay settled before the clock started"
 	);
 	let decode = pes_decode_in_order(&out);
 	assert!(
@@ -5515,14 +5576,14 @@ async fn reordered_video_loses_nothing_on_a_clean_path() {
 	);
 }
 
-/// With nothing declared, the reserve grows to the deepest reordering muxed so far. This is the
-/// one path where it depends on when an exporter joined: a joiner that has muxed only shallow
-/// groups runs a shallower clock than a runner that saw a deep one before the join, until the
-/// deep structure recurs. From then on the two render the same bytes.
+/// With nothing declared, the reorder delay grows to the deepest reordering muxed so far. This
+/// is the one path where it depends on when an exporter joined: a joiner that has muxed only
+/// shallow groups runs a shallower clock than a runner that saw a deep one before the join,
+/// until the deep structure recurs. From then on the two render the same bytes.
 #[tokio::test(start_paused = true)]
 async fn undeclared_reorder_converges_after_its_deepest_reorder() {
 	// The runner sees a pyramid in group 2; the joiner, arriving at group 5, first in group 7.
-	// Group 9 repeats it on the settled reserve.
+	// Group 9 repeats it on the settled delay.
 	let (runner, joiner) = export_reordered(SPS, PPS, &[2, 7, 9], None).await;
 	let keyframes: Vec<Timestamp> = joiner.iter().filter(|f| f.keyframe).map(|f| f.timestamp).collect();
 	let deepest = reordered_at(8 * GOP);
@@ -5545,27 +5606,25 @@ async fn undeclared_reorder_converges_after_its_deepest_reorder() {
 	}
 }
 
-/// A `jitter` first published after the program tables sizes the decode clock from then on,
-/// so the running exporter renders what a joiner that found it in its first catalog renders.
+/// A `jitter` bounds how far ahead the decode clock looks, not how early it decodes: published
+/// after the program tables, it leaves the encoder's spacing alone, and the running exporter
+/// renders what a joiner that found it in its first catalog renders.
 #[tokio::test(start_paused = true)]
-async fn jitter_published_after_the_tables_raises_the_reserve() {
+async fn jitter_published_after_the_tables_keeps_the_encoders_clock() {
 	let jitter = Duration::from_millis(80);
 	let (runner, joiner) = export_reordered(SPS, PPS, &[], Some((2 * GOP, jitter))).await;
 	let keyframes: Vec<Timestamp> = joiner.iter().filter(|f| f.keyframe).map(|f| f.timestamp).collect();
 	assert_only_continuity_differs(&runner, &joiner, keyframes[1]);
 
-	// Every keyframe after the publish decodes a full `jitter` ahead of its presentation.
-	let ticks = 80 * 90;
-	let keyframe_timing: Vec<(u64, Option<u64>)> = video_timing(&runner, reordered_at(3 * GOP)..)
-		.into_iter()
-		.filter(|(pts, _)| (pts / FRAME_TICKS).is_multiple_of(GOP))
-		.collect();
-	assert!(
-		keyframe_timing.len() > 3,
-		"too few keyframes to judge: {keyframe_timing:?}"
-	);
-	for (pts, dts) in keyframe_timing {
-		assert_eq!(dts, Some(pts - ticks), "keyframe at {pts} ignores the published jitter");
+	// One B-frame per reference: every frame decodes a period after the last, a period early.
+	let timing = video_timing(&runner, reordered_at(3 * GOP)..);
+	assert_decodes_before_presenting(&timing);
+	let decode: Vec<u64> = timing.iter().map(|&(pts, dts)| dts.unwrap_or(pts)).collect();
+	for (i, step) in decode.windows(2).map(|w| w[1] - w[0]).enumerate() {
+		assert_eq!(step, FRAME_TICKS, "frame {i} does not decode one period after the last");
+	}
+	for (pts, dts) in timing.into_iter().filter(|(pts, _)| (pts / FRAME_TICKS).is_multiple_of(GOP)) {
+		assert_eq!(dts, Some(pts - FRAME_TICKS), "a keyframe decodes a period early");
 	}
 	assert_decodes_after_the_clock(&runner);
 }

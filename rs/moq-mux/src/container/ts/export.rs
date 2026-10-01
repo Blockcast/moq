@@ -197,14 +197,10 @@ struct Track {
 	/// PMT ES-level descriptors to re-announce, captured verbatim on import (language,
 	/// registration, ...). Empty for non-TS sources; AC-3/E-AC-3 then synthesize one.
 	descriptors: Vec<catalog::Descriptor>,
-	/// Authors each video frame's DTS from its PTS.
-	clock: DecodeClock,
-	/// High-water mark of the timestamps read within this rendition, which sizes the
-	/// video [`Reserve`] from how far a reordered frame lands below it.
-	timeline: Option<Timestamp>,
-	/// Decode-clock reserve: how far ahead of its PTS each frame decodes. Only video sizes it;
-	/// every other kind holds [`DEFAULT_DTS_RESERVE`].
-	reserve: Reserve,
+	/// Authors each video frame's DTS, holding the frames until it can.
+	clock: DecodeClock<(Pending, Option<Bytes>)>,
+	/// What the catalog and the SPS declare about the video's reordering.
+	timing: Timing,
 	/// How long a receiver takes to pass one of its packets on ([`drain`]), so its last
 	/// packet has to arrive that long before it decodes.
 	drain: Duration,
@@ -223,55 +219,58 @@ impl Track {
 			kind,
 			descriptors: Vec::new(),
 			clock: DecodeClock::default(),
-			timeline: None,
-			reserve: Reserve::default(),
+			timing: Timing::default(),
 			drain: Duration::ZERO,
 		}
 	}
 
-	/// Author the frame's decode time and queue it in the jitter buffer.
+	/// Queue a frame read from the source in the jitter buffer, once its decode time is known.
 	///
-	/// The decode clock runs here, as frames are read, because the deadline is
-	/// on decode time: reordered video arrives in decode order with PTS 0, 120, 40, 80,
-	/// so a PTS deadline would strand a B-frame behind its reference or send it first.
+	/// The decode clock runs here, as frames are read, because the deadline is on decode time:
+	/// reordered video arrives in decode order with PTS 0, 120, 40, 80, so a PTS deadline would
+	/// strand a B-frame behind its reference or send it first.
 	fn queue(&mut self, name: &str, pending: Pending, jitter: &mut jitter::Buffer<u16, Queued>) {
+		if pending.discontinuity != self.discontinuity {
+			// The source may have restarted its timeline, so the decode clock restarts too.
+			self.release(name, jitter, true);
+			self.discontinuity = pending.discontinuity;
+			self.clock = DecodeClock::default();
+		}
+		let Kind::Video(stream_type) = self.kind else {
+			return self.push(name, pending, None, None, jitter);
+		};
+		if pending.frame.keyframe {
+			self.timing.describe(stream_type, self.source.description(), name);
+		}
+		let pts = to_ticks(pending.frame.timestamp);
+		self.clock.push((pending, self.source.description().cloned()), pts);
+		self.release(name, jitter, false);
+	}
+
+	/// Queue every held video frame whose DTS is settled, or all of them when `flush`.
+	fn release(&mut self, name: &str, jitter: &mut jitter::Buffer<u16, Queued>, flush: bool) {
+		let (delay, lookahead) = self.timing.reorder();
+		let lookahead = lookahead.max(self.timing.jitter);
+		while let Some(((pending, description), dts)) = self.clock.pop(lookahead, delay, flush) {
+			self.push(name, pending, Some(dts), description, jitter);
+		}
+	}
+
+	/// Queue a frame decoding at `dts` (90 kHz ticks), else at its PTS.
+	fn push(
+		&mut self,
+		name: &str,
+		pending: Pending,
+		dts: Option<u64>,
+		description: Option<Bytes>,
+		jitter: &mut jitter::Buffer<u16, Queued>,
+	) {
 		let Pending {
 			frame,
 			discontinuity,
 			arrived,
 		} = pending;
-		if discontinuity != self.discontinuity {
-			// The source may have restarted its timeline, so the decode clock restarts too.
-			self.discontinuity = discontinuity;
-			self.clock = DecodeClock::default();
-			self.timeline = None;
-		}
-
-		let (dts, sync, description) = match self.kind {
-			Kind::Video(stream_type) => {
-				if frame.keyframe {
-					self.reserve.describe(stream_type, self.source.description(), name);
-				}
-				if let Some(timeline) = self.timeline
-					&& frame.timestamp < timeline
-				{
-					let gap = to_ticks(timeline) - to_ticks(frame.timestamp);
-					self.reserve.observe(gap, name);
-				} else {
-					self.reserve.peak();
-				}
-				let pts = to_ticks(frame.timestamp);
-				let dts = self.clock.author(pts, self.reserve.ticks, self.reserve.period());
-				(
-					(dts != pts).then_some(dts),
-					frame.keyframe,
-					self.source.description().cloned(),
-				)
-			}
-			_ => (None, true, None),
-		};
-		self.timeline = Some(self.timeline.map_or(frame.timestamp, |last| last.max(frame.timestamp)));
-
+		let dts = dts.filter(|&dts| dts != to_ticks(frame.timestamp));
 		let decode = dts
 			.and_then(|ticks| Timestamp::from_scale(ticks, 90_000).ok())
 			.unwrap_or(frame.timestamp);
@@ -279,7 +278,7 @@ impl Track {
 			arrived,
 			decode,
 			discontinuity,
-			sync,
+			sync: frame.keyframe || !matches!(self.kind, Kind::Video(_)),
 			item: Queued {
 				frame,
 				decode,
@@ -293,56 +292,24 @@ impl Track {
 	}
 }
 
-/// A video rendition's decode-clock reserve in 90 kHz ticks: how far each frame's DTS runs
-/// behind its PTS. It must exceed the rendition's reordering for `DTS <= PTS` to hold.
-///
-/// The catalog `jitter` (the importer's max PTS - DTS) sizes it when published. Otherwise the
-/// reorder depth the SPS declares sizes it, at the SPS's fixed picture rate or the catalog
-/// `framerate`, so two exporters agree on it from their first keyframe. Otherwise it holds
-/// [`DEFAULT_DTS_RESERVE`]. Reordering deeper than all of those raises it further
-/// ([`Self::observe`]).
-///
-/// It never shrinks: that would step the decode clock forward past frames already read.
-struct Reserve {
-	/// The catalog `jitter`, in ticks.
-	jitter: Option<u64>,
+/// What a video rendition declares about its reordering, which bounds its [`DecodeClock`].
+#[derive(Default)]
+struct Timing {
+	/// The catalog `jitter` in 90 kHz ticks: the most any frame decodes before it is presented.
+	jitter: u64,
 	/// The catalog `framerate`: the picture period for an SPS that declares no fixed rate.
 	framerate: Option<f64>,
 	/// The avcC/hvcC [`Self::declared`] was read from.
 	description: Option<Bytes>,
 	declared: Option<Reorder>,
-	/// The reserve covering the deepest reordering muxed so far.
-	observed: u64,
-	/// Frames muxed since the one that set the rendition's high-water mark.
-	since_peak: u64,
-	/// The reserve in effect.
-	ticks: u64,
 }
 
-impl Default for Reserve {
-	fn default() -> Self {
-		Self {
-			jitter: None,
-			framerate: None,
-			description: None,
-			declared: None,
-			observed: 0,
-			since_peak: 0,
-			ticks: DEFAULT_DTS_RESERVE,
-		}
-	}
-}
-
-impl Reserve {
+impl Timing {
 	/// Take the rendition's timing from a catalog snapshot, before or after the program
 	/// tables are written.
-	fn configure(&mut self, config: &VideoConfig, name: &str) {
-		self.jitter = config
-			.jitter
-			.map(|t| (t.as_micros() * 90_000 / 1_000_000) as u64)
-			.filter(|&ticks| ticks > 0);
+	fn configure(&mut self, config: &VideoConfig) {
+		self.jitter = config.jitter.map_or(0, |t| (t.as_micros() * 90_000 / 1_000_000) as u64);
 		self.framerate = config.framerate.filter(|fps| fps.is_finite() && *fps > 0.0);
-		self.settle(name, "catalog");
 	}
 
 	/// Read the reorder depth from the codec config a keyframe is carried with.
@@ -352,70 +319,27 @@ impl Reserve {
 		}
 		self.description = description.cloned();
 		self.declared = description.and_then(|d| declared_reorder(stream_type, d));
-		self.settle(name, "sps");
+		tracing::debug!(track = %name, reorder = ?self.reorder(), "video reordering declared");
 	}
 
-	/// Account for a frame muxed `gap` ticks below the rendition's high-water mark.
+	/// The least reorder delay and lookahead the SPS declares, in ticks, so two exporters agree
+	/// on them from their first keyframe whatever reordering each has seen.
 	///
-	/// This is the one path where the reserve depends on when an exporter joined rather than on
-	/// what the stream declares: a joiner adopts the depth only once it has muxed the deepest
-	/// reordering itself, and until then its DTS and PCR differ from an exporter that has. It
-	/// fires only when the catalog and the SPS both undercount the stream's reordering (or
-	/// declare none), and each growth is logged.
-	///
-	/// The decode clock steps at least one tick per frame, so a frame decoded `k` frames after
-	/// the one that set the high-water mark needs `k` ticks beyond its gap.
-	fn observe(&mut self, gap: u64, name: &str) {
-		self.since_peak += 1;
-		let covering = gap.saturating_add(self.since_peak).min(MAX_DTS_RESERVE);
-		if covering > self.observed {
-			self.observed = covering;
-			self.settle(name, "observed");
-		}
-	}
-
-	/// Account for a frame at or above the rendition's high-water mark.
-	fn peak(&mut self) {
-		self.since_peak = 0;
-	}
-
-	/// The picture period in ticks the SPS or the catalog `framerate` declares.
-	fn period(&self) -> Option<u64> {
-		match self.declared?.period {
-			Some((units, scale)) => Some(units.saturating_mul(90_000).div_ceil(scale)),
-			None => Some((90_000.0 / self.framerate?).ceil() as u64),
-		}
-		.filter(|&period| period > 0)
-	}
-
-	fn settle(&mut self, name: &str, source: &'static str) {
-		// As in [`Self::observe`], a reordered frame needs a tick for each frame decoded between
-		// it and the one above it; the declared depth stands in for that count.
-		let period = self.period();
-		let declared = self.declared.and_then(|reorder| {
-			let period = period?;
-			let depth = u64::from(reorder.depth);
-			let ticks = depth.saturating_mul(period).saturating_add(depth.max(1));
-			Some(ticks.min(MAX_DTS_RESERVE))
-		});
-		let target = self
-			.jitter
-			.or(declared)
-			.unwrap_or(DEFAULT_DTS_RESERVE)
-			.max(self.observed);
-		if target > self.ticks {
-			if source == "observed" {
-				tracing::warn!(
-					track = %name,
-					from = self.ticks,
-					to = target,
-					"reordering deeper than the catalog or SPS declares; raising the video DTS reserve"
-				);
-			} else {
-				tracing::info!(track = %name, from = self.ticks, to = target, source, "raising the video DTS reserve");
-			}
-			self.ticks = target;
-		}
+	/// The delay is the SPS's depth in pictures, at its picture period or the catalog
+	/// `framerate`'s. A frame can be presented up to `2^depth - 1` pictures below one decoded
+	/// before it (a B-pyramid that deep), which bounds the lookahead the catalog `jitter`
+	/// gives when it is not published.
+	fn reorder(&self) -> (u64, u64) {
+		let Some(declared) = self.declared else {
+			return (0, 0);
+		};
+		let period = match declared.period {
+			Some((units, scale)) => units.saturating_mul(90_000).div_ceil(scale),
+			None => self.framerate.map_or(0, |fps| (90_000.0 / fps).ceil() as u64),
+		};
+		let delay = u64::from(declared.depth).saturating_mul(period);
+		let lookahead = 1u64.checked_shl(declared.depth).unwrap_or(u64::MAX).saturating_mul(period);
+		(delay.min(MAX_REORDER), lookahead.min(MAX_REORDER))
 	}
 }
 
@@ -1011,6 +935,10 @@ impl<E: catalog::Catalog> Export<E> {
 					}
 				}
 			}
+			// Nothing more can come in below the frames still held for their DTS.
+			if track.finished && !waiting_for_header {
+				track.release(name, &mut self.jitter, true);
+			}
 		}
 		Ok(())
 	}
@@ -1122,7 +1050,7 @@ impl<E: catalog::Catalog> Export<E> {
 			// after the tables still sizes the decode clock.
 			for (name, config) in catalog.video.renditions.iter() {
 				if let Some(track) = self.tracks.get_mut(name) {
-					track.reserve.configure(config, name);
+					track.timing.configure(config);
 				}
 			}
 			return Ok(());
@@ -1170,7 +1098,7 @@ impl<E: catalog::Catalog> Export<E> {
 			};
 			track.kind = kind;
 			track.drain = drain(video_rate(config, name));
-			track.reserve.configure(config, name);
+			track.timing.configure(config);
 			self.refresh(name, track, pids[name], track_descriptors(&mpegts, name));
 		}
 		for (name, config) in catalog.audio.renditions.iter() {
@@ -1286,7 +1214,6 @@ impl<E: catalog::Catalog> Export<E> {
 			track.pending = None;
 			track.discontinuity = 0;
 			track.clock = DecodeClock::default();
-			track.timeline = None;
 			self.stale.insert(name.clone());
 		}
 		// The replacement's clock starts afresh at its own first frame.
@@ -1886,16 +1813,11 @@ fn pcr_packet(pid: u16, ticks: u64) -> anyhow::Result<Vec<u8>> {
 const PES_OPTIONAL_LEN: usize = 3 + 5;
 /// Extra bytes when the optional region also carries a DTS (5 DTS bytes).
 const PES_DTS_LEN: usize = 5;
-/// Fallback decode-clock reserve in 90 kHz ticks when neither the catalog `jitter` nor the SPS
-/// sizes one. At 16 ticks (~0.18 ms) it is just a strict-monotonic nudge: it keeps DTS strictly
-/// increasing across reordered (B-frame) decode order (the `ffplay -fflags +igndts` fix) but
-/// does not keep `DTS <= PTS` until reordering raises it. See [`author_dts`] and [`Reserve`].
-const DEFAULT_DTS_RESERVE: u64 = 16;
-
-/// Largest reserve an SPS or observed reordering can raise a track to (2 s): far past any real
-/// reorder depth, so a corrupt SPS or a timestamp stepping back within a timeline cannot drag
-/// the PCR back without bound.
-const MAX_DTS_RESERVE: u64 = 2 * 90_000;
+/// Largest reorder delay or lookahead an SPS or observed reordering can raise a video decode
+/// clock to (2 s, in 90 kHz ticks): far past any real reorder depth, so a corrupt SPS or a
+/// timestamp stepping back within a timeline cannot hold frames or drag the DTS back without
+/// bound.
+const MAX_REORDER: u64 = 2 * 90_000;
 
 /// Whether `timestamp` has crossed into a later repetition slot than `last`.
 ///
@@ -2234,65 +2156,95 @@ fn ensure_raw(container: &Container, kind: &str, name: &str) -> anyhow::Result<(
 /// A video rendition's decode clock: a decode timestamp (DTS) for each frame from its PTS.
 ///
 /// [`Frame`] carries only a presentation timestamp and frames reach the muxer in decode order,
-/// so a B-frame stream arrives with non-monotonic PTS and no decode time. The clock hands out
-/// the presentation times in display order, `depth` frames late, the way a decoder's reorder
-/// buffer of that depth would (ffmpeg's `pts_buffer`): with depth 2, decode-order PTS 0, 120,
-/// 40, 80 decode at -80, -40, 0, 40, one frame period apart. `depth` is how many frame periods
-/// fit in the track's [`Reserve`]; the remainder of the reserve backs every DTS off a little
-/// further. So a reference frame decodes a whole reserve before it is presented and a B-frame
-/// keeps its own slot rather than bunching one tick behind its reference.
+/// so a B-frame stream arrives with non-monotonic PTS and no decode time. An encoder decodes
+/// the n-th frame in decode order at the n-th presentation time, a fixed reorder delay early,
+/// so that is the DTS authored here: with decode-order PTS 0, 120, 40, 80 and a delay of one
+/// 40 ms frame, the frames decode at -40, 0, 40, 80. It keeps the encoder's own spacing, a
+/// frame's or a field's, through any switch between frame and field coding, and the delay is
+/// a time, the least that keeps every DTS at or before its PTS (or the SPS's declared depth,
+/// when that is more). On a source muxed that way this is its DTS, frame for frame.
 ///
-/// The period is the one the stream declares, else the smallest step seen between consecutive
-/// PTS. Without either the clock runs a reserve behind the PTS. A DTS that would not advance
-/// (reordering deeper than the reserve) is nudged one tick past the last, so the clock stays
-/// strictly increasing either way. Ticks are continuous (unwrapped) 90 kHz, so the clock never
-/// wraps mid-stream; the 33-bit wire wrap happens once at emission.
-#[derive(Default)]
-struct DecodeClock {
-	/// Presentation times read but not yet handed out, ascending.
-	window: Vec<u64>,
+/// A frame's slot is settled once no frame still to come can be presented before it. A later
+/// frame decodes after this one, and is presented at most the catalog `jitter` after it
+/// decodes, so the slot is settled once the highest PTS read is that far past it. Frames wait
+/// here until then, as long as the reordering spans and well inside the jitter buffer's delay.
+/// Without a `jitter`, the SPS's depth bounds it, and so does how far a frame was presented
+/// below the highest PTS read before it. A frame that still comes in below a settled slot
+/// (reordering deeper than all of those) is nudged one tick past the last DTS, so the clock
+/// stays strictly increasing.
+///
+/// Ticks are continuous (unwrapped) 90 kHz, so the clock never wraps mid-stream; the 33-bit
+/// wire wrap happens once at emission.
+struct DecodeClock<T> {
+	/// Frames read but not yet given a DTS, in decode order, with their PTS.
+	held: VecDeque<(T, u64)>,
+	/// The held frames' PTS, ascending: the slots they decode in, in turn.
+	slots: Vec<u64>,
+	/// The highest PTS read.
+	high: Option<u64>,
+	/// The furthest a frame was presented below the highest PTS read before it, plus a tick.
+	reach: u64,
+	/// The reorder delay in effect. It never shrinks: that would step the clock back.
+	delay: u64,
 	/// The last DTS handed out.
 	last: Option<u64>,
-	/// The previous frame's PTS, to measure the frame period.
-	previous: Option<u64>,
-	/// The smallest positive step seen between consecutive PTS.
-	period: Option<u64>,
 }
 
-impl DecodeClock {
-	/// The DTS of a frame presented at `pts`, the next in decode order.
-	fn author(&mut self, pts: u64, reserve: u64, declared: Option<u64>) -> u64 {
-		if let Some(step) = self
-			.previous
-			.map(|previous| pts.abs_diff(previous))
-			.filter(|&step| step > 0)
-		{
-			self.period = Some(self.period.map_or(step, |period| period.min(step)));
+impl<T> Default for DecodeClock<T> {
+	fn default() -> Self {
+		Self {
+			held: VecDeque::new(),
+			slots: Vec::new(),
+			high: None,
+			reach: 0,
+			delay: 0,
+			last: None,
 		}
-		self.previous = Some(pts);
+	}
+}
 
-		let dts = match declared.or(self.period) {
-			Some(period) => {
-				let depth = (reserve / period) as usize;
-				let at = self.window.partition_point(|&p| p < pts);
-				self.window.insert(at, pts);
-				// Until the window holds `depth + 1` frames, the earliest is still to come, so
-				// count back from the earliest seen as a decoder that ran all along would have.
-				let held = self.window.len();
-				let earliest = match held > depth {
-					true => self.window.drain(..held - depth).next_back().unwrap_or(pts),
-					false => self.window[0].saturating_sub((depth + 1 - held) as u64 * period),
-				};
-				earliest.saturating_sub(reserve % period)
+impl<T> DecodeClock<T> {
+	/// Hold the next frame in decode order, presented at `pts`.
+	fn push(&mut self, item: T, pts: u64) {
+		if let Some(high) = self.high
+			&& pts < high
+		{
+			self.reach = self.reach.max(high - pts + 1).min(MAX_REORDER);
+		}
+		self.high = Some(self.high.map_or(pts, |high| high.max(pts)));
+		let at = self.slots.partition_point(|&slot| slot <= pts);
+		self.slots.insert(at, pts);
+		self.held.push_back((item, pts));
+	}
+
+	/// The next frame and its DTS, once its slot is settled `lookahead` past (the catalog
+	/// `jitter`), or at once when `flush`. `floor` is the least reorder delay, in ticks.
+	fn pop(&mut self, lookahead: u64, floor: u64, flush: bool) -> Option<(T, u64)> {
+		let high = self.high?;
+		let lookahead = lookahead.max(self.reach);
+		let settled = |slot: u64| flush || high >= slot.saturating_add(lookahead);
+		if !settled(*self.slots.first()?) {
+			return None;
+		}
+		// Every settled frame bounds the delay, so one decoding later never steps it back.
+		let mut delay = self.delay.max(floor);
+		for (&slot, (_, pts)) in self.slots.iter().zip(&self.held) {
+			if !settled(slot) {
+				break;
 			}
-			None => pts.saturating_sub(reserve),
-		};
+			delay = delay.max(slot.saturating_sub(*pts));
+		}
+		self.delay = delay.min(MAX_REORDER);
+
+		let slot = self.slots.remove(0);
+		let (item, _) = self.held.pop_front()?;
+		let dts = slot.saturating_sub(self.delay);
 		let dts = match self.last {
 			Some(last) if dts <= last => last + 1,
 			_ => dts,
 		};
 		self.last = Some(dts);
-		dts
+		Some((item, dts))
 	}
 }
 
@@ -2315,20 +2267,28 @@ mod tests {
 
 	use moq_net::Timestamp;
 
-	use super::{
-		DEFAULT_DTS_RESERVE, DecodeClock, PCR_INTERVAL, PSI_INTERVAL, due, is_complete_section, si_due, slot,
-		slot_ticks,
-	};
+	use super::{DecodeClock, PCR_INTERVAL, PSI_INTERVAL, due, is_complete_section, si_due, slot, slot_ticks};
 
 	fn ms(value: u64) -> Timestamp {
 		Timestamp::from_millis(value).unwrap()
 	}
 
-	/// Push a decode-order PTS stream (90 kHz, 25 fps declared) through the decode clock with a
-	/// given reserve and return the DTS per frame.
-	fn run_clock(pts: &[u64], reserve: u64) -> Vec<u64> {
+	/// Push a decode-order PTS stream (90 kHz) through the decode clock under a catalog
+	/// `jitter` and a declared reorder `floor`, flushing at the end, and return the DTS per
+	/// frame.
+	fn run_clock(pts: &[u64], jitter: u64, floor: u64) -> Vec<u64> {
 		let mut clock = DecodeClock::default();
-		pts.iter().map(|&p| clock.author(p, reserve, Some(3_600))).collect()
+		let mut dts = vec![0; pts.len()];
+		for (i, &p) in pts.iter().enumerate() {
+			clock.push(i, p);
+			while let Some((i, d)) = clock.pop(jitter, floor, false) {
+				dts[i] = d;
+			}
+		}
+		while let Some((i, d)) = clock.pop(jitter, floor, true) {
+			dts[i] = d;
+		}
+		dts
 	}
 
 	/// Decode-order PTS for a constant-frame-rate display timeline with `b` B-frames between
@@ -2349,36 +2309,30 @@ mod tests {
 		out
 	}
 
-	#[test]
-	fn dts_is_monotonic_across_reorder() {
-		// 25 fps, 10 s offset. Even with the tiny fallback reserve the decode timeline is
-		// strictly increasing (the `+igndts` fix); it just may sit above PTS for B-frames.
-		for b in [1, 3, 5] {
-			let pts = decode_order(40, b, 3_600, 10_000_000);
-			let dts = run_clock(&pts, DEFAULT_DTS_RESERVE);
-
-			// The fixture genuinely reorders (PTS dips in decode order).
-			assert!(pts.windows(2).any(|w| w[1] < w[0]), "b={b}: stream must reorder PTS");
-			for (i, win) in dts.windows(2).enumerate() {
-				assert!(win[1] > win[0], "b={b}: DTS not strictly increasing at {i}: {win:?}");
-			}
-		}
+	/// How an encoder times `pts`: the n-th frame decodes at the n-th presentation time, a
+	/// fixed `delay` early. Returns the DTS and the catalog `jitter` an importer would publish.
+	fn source_dts(pts: &[u64], delay: u64) -> (Vec<u64>, u64) {
+		let mut slots = pts.to_vec();
+		slots.sort();
+		let dts: Vec<u64> = slots.iter().map(|slot| slot - delay).collect();
+		let jitter = pts.iter().zip(&dts).map(|(p, d)| p - d).max().unwrap();
+		(dts, jitter)
 	}
 
 	#[test]
-	fn sufficient_reserve_keeps_dts_under_pts() {
-		// With a reserve covering the reorder span (the catalog `jitter` carries it), the decode
-		// timeline is both strictly increasing and never after the PTS.
-		let dur = 3_600;
+	fn dts_is_monotonic_across_reorder() {
+		// 25 fps, 10 s offset. Even with nothing declared, the decode timeline is strictly
+		// increasing (the `+igndts` fix), and past the first reordered frames it stays at or
+		// before the PTS.
 		for b in [1, 3, 5] {
-			let reserve = (b as u64 + 1) * dur; // one frame past the b-frame run
-			let pts = decode_order(40, b, dur, 10_000_000);
-			let dts = run_clock(&pts, reserve);
-
+			let pts = decode_order(40, b, 3_600, 10_000_000);
+			assert!(pts.windows(2).any(|w| w[1] < w[0]), "b={b}: stream must reorder PTS");
+			let dts = run_clock(&pts, 0, 0);
 			for (i, win) in dts.windows(2).enumerate() {
 				assert!(win[1] > win[0], "b={b}: DTS not strictly increasing at {i}: {win:?}");
 			}
-			for (i, (&d, &p)) in dts.iter().zip(pts.iter()).enumerate() {
+			let settled = 2 * (b + 1);
+			for (i, (&d, &p)) in dts.iter().zip(pts.iter()).enumerate().skip(settled) {
 				assert!(d <= p, "b={b}: DTS {d} after PTS {p} at {i}");
 			}
 		}
@@ -2391,7 +2345,7 @@ mod tests {
 		// only at emission, so here the authored DTS keeps climbing past 1 << 33.
 		let wrap = 1u64 << 33;
 		let pts = decode_order(40, 3, 3_600, wrap - 20 * 3_600);
-		let dts = run_clock(&pts, DEFAULT_DTS_RESERVE);
+		let dts = run_clock(&pts, 0, 0);
 
 		assert!(pts.iter().any(|&p| p >= wrap), "test must cross the wrap boundary");
 		for (i, win) in dts.windows(2).enumerate() {
@@ -2403,45 +2357,68 @@ mod tests {
 	}
 
 	#[test]
-	fn dts_without_reorder_trails_pts_by_the_reserve() {
-		// A monotonic (no-B) stream stays strictly increasing and one reserve under its PTS.
+	fn dts_without_reorder_is_the_pts() {
 		let pts: Vec<u64> = (0..40).map(|i| 10_000_000 + i * 3_600).collect();
-		let dts = run_clock(&pts, DEFAULT_DTS_RESERVE);
-
-		for (i, win) in dts.windows(2).enumerate() {
-			assert!(win[1] > win[0], "DTS not strictly increasing at {i}: {win:?}");
-		}
-		for (i, (&d, &p)) in dts.iter().zip(pts.iter()).enumerate() {
-			assert_eq!(d, p - DEFAULT_DTS_RESERVE, "DTS should trail PTS by the reserve at {i}");
-		}
+		assert_eq!(run_clock(&pts, 0, 0), pts);
 	}
 
-	/// B-frames decode a frame period apart, not one tick behind their reference.
+	/// Given the catalog `jitter` and the SPS's reorder depth, a reordered stream decodes
+	/// exactly as its encoder timed it, a frame period apart.
 	#[test]
-	fn reordered_dts_is_frame_spaced() {
+	fn reordered_dts_is_the_encoders() {
 		let dur = 3_600;
 		for b in [1, 2, 3] {
-			let reserve = b as u64 * dur + 1;
 			let pts = decode_order(40, b, dur, 10_000_000);
-			let dts = run_clock(&pts, reserve);
-			for (i, win) in dts.windows(2).enumerate() {
-				assert_eq!(win[1] - win[0], dur, "b={b}: DTS not one frame apart at {i}: {dts:?}");
-			}
-			for (i, (&d, &p)) in dts.iter().zip(pts.iter()).enumerate() {
-				assert!(d <= p, "b={b}: DTS {d} after PTS {p} at {i}");
-			}
+			let (source, jitter) = source_dts(&pts, dur);
+			assert_eq!(run_clock(&pts, jitter, dur), source, "b={b}");
+		}
+	}
+
+	/// A field-coded passage decodes a field apart and a frame-coded one a frame apart: the
+	/// reorder delay is a time, so a switch between them does not squeeze the timeline.
+	#[test]
+	fn a_switch_to_field_coding_keeps_the_encoders_spacing() {
+		let frame = 3_600;
+		let mut pts = decode_order(10, 2, frame, 10_000_000);
+		// Then each picture is two fields, a reference pair ahead of the B pairs it predicts.
+		let start = pts.iter().max().unwrap() + frame;
+		for g in 0..10u64 {
+			let reference = start + (g * 3 + 2) * frame;
+			let pair = |at: u64| [at, at + frame / 2];
+			pts.extend(pair(reference));
+			pts.extend(pair(reference - 2 * frame));
+			pts.extend(pair(reference - frame));
+		}
+		let (source, jitter) = source_dts(&pts, frame);
+		assert_eq!(run_clock(&pts, jitter, frame), source);
+	}
+
+	/// An open GOP's leading pictures, read after the keyframe they precede in presentation,
+	/// decode a slot apart rather than one tick behind it.
+	#[test]
+	fn leading_pictures_decode_a_slot_apart() {
+		let frame = 3_600;
+		let base = 10_000_000;
+		// The keyframe is presented after three leading B-frames.
+		let mut pts = vec![base + 3 * frame, base, base + frame, base + 2 * frame];
+		pts.extend(decode_order(10, 2, frame, base + 3 * frame).into_iter().skip(1));
+		let (source, jitter) = source_dts(&pts, frame);
+		let dts = run_clock(&pts, jitter, frame);
+		assert_eq!(dts, source);
+		for (i, win) in dts.windows(2).enumerate() {
+			assert!(win[1] - win[0] >= frame, "DTS less than a frame apart at {i}: {dts:?}");
 		}
 	}
 
 	#[test]
-	fn author_dts_is_join_independent_at_a_peak() {
+	fn dts_is_join_independent_at_a_peak() {
 		// An exporter that has been running and one that just joined author the same decode
 		// timeline from any frame whose PTS leads everything decoded before it. A keyframe is
-		// exactly that (export only ever tunes in on one), so the monotonic bump cannot fire
-		// there and the state carried across the join stops mattering.
+		// exactly that (export only ever tunes in on one).
 		for b in [1, 3, 5] {
 			let pts = decode_order(40, b, 3_600, 10_000_000);
-			let running = run_clock(&pts, DEFAULT_DTS_RESERVE);
+			let (_, jitter) = source_dts(&pts, 3_600);
+			let running = run_clock(&pts, jitter, 3_600);
 
 			let mut peaks = 0;
 			for k in 1..pts.len() {
@@ -2449,7 +2426,7 @@ mod tests {
 					continue;
 				}
 				peaks += 1;
-				let fresh = run_clock(&pts[k..], DEFAULT_DTS_RESERVE);
+				let fresh = run_clock(&pts[k..], jitter, 3_600);
 				assert_eq!(
 					&running[k..],
 					&fresh[..],
