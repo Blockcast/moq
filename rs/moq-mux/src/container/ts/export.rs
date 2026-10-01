@@ -871,7 +871,7 @@ impl<E: catalog::Catalog> Export<E> {
 			self.last_timestamp = Some(ready.item.frame.timestamp);
 			let decode = ready.item.decode.as_nanos();
 			self.mux(&name, ready.item)?;
-			self.lay(Some(schedule::slot(decode)))?;
+			self.lay(Some(schedule::due(decode)))?;
 		}
 
 		// 5. Once every track has drained, nothing more can ride the slots still open, so
@@ -1700,7 +1700,7 @@ impl<E: catalog::Catalog> Export<E> {
 	/// The clock packet for grid slot `index`.
 	///
 	/// The value runs one slot behind the boundary, so the bytes of slot `index` are timed
-	/// up to its boundary: a unit due in that slot decodes no earlier ([`schedule::slot`]).
+	/// up to its boundary: a unit due in that slot decodes no earlier ([`schedule::due`]).
 	/// Back off through the 33-bit wrap rather than saturating: a timeline that starts in
 	/// its first slot would otherwise clamp to zero and break the uniform step. The wire
 	/// field is a circular clock, so the masked wrapped value is the correct mod-2^33
