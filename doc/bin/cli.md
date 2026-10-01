@@ -180,6 +180,16 @@ id. Requires the `capture` feature; on Linux that needs the ALSA headers for
 the microphone, and `--display` and `pipewire:` cameras also need the
 `pipewire` feature (links libpipewire).
 
+On Windows, display and window capture use Windows.Graphics.Capture and
+require Windows 10 2004 (build 19041) or newer. Cursor capture follows the
+capture configuration. The system capture border stays visible unless the OS
+supports borderless capture and grants access. Frames are converted to NV12
+on the GPU; software encoding reads them back. Windows application capture
+and system audio are separate capabilities, not enabled by this backend.
+Windows `display:N` selectors are enumeration indices; switching from Desktop
+Duplication to WGC can change which monitor a saved selector names. Run
+`moq devices` again and reselect the intended display after upgrading.
+
 ## Transcode
 
 ```bash
