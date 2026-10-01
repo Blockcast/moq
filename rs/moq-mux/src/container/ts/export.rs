@@ -161,9 +161,6 @@ pub struct Export<E: catalog::Catalog = ()> {
 	/// Generation of the last returned frame, updated only at the output boundary.
 	emitted_epoch: u64,
 	pcr_discontinuity: bool,
-	/// Back-off of the last PCR emitted ([`Self::pcr_at`]), so a reserve that grows past it
-	/// flags the next one as a new time base.
-	pcr_reserve: Option<u64>,
 	/// TS packets muxed into the span that is still open.
 	pending: Vec<u8>,
 	/// Offsets into [`pending`](Self::pending) where a keyframe's packets begin, so
@@ -177,12 +174,10 @@ pub struct Export<E: catalog::Catalog = ()> {
 	pcr_cc: Option<u8>,
 	/// Media time the next span's bytes are transmitted from ([`Export::emit`]).
 	clock: Option<Timestamp>,
-	/// Earliest media timestamp muxed into the open span: the decode time its bytes
-	/// have to arrive before, so it bounds how far the clock may run.
+	/// Earliest decode time muxed into the open span: what its bytes have to arrive
+	/// before, so it bounds how far the clock may run.
 	low: Option<Timestamp>,
-	/// Media timestamp that opened the current span. Reordered (B-frame) timestamps
-	/// step backwards all the time, so a span closes on a timestamp passing this
-	/// high-water mark rather than on every frame.
+	/// Decode time that opened the current span, which closes on a later one.
 	watermark: Option<Timestamp>,
 	/// The rate to pad the output to with null packets, in bits per second: the
 	/// builder override when set, else the catalog's recorded multiplex rate, else
@@ -204,16 +199,19 @@ pub struct Export<E: catalog::Catalog = ()> {
 	video_start: Option<Timestamp>,
 }
 
-/// A frame read before the program tables are built.
+/// A frame read from its source.
 struct Pending {
 	frame: Frame,
 	discontinuity: u64,
+	/// The earliest the frame could have arrived: when its source was last found empty.
 	arrived: web_async::time::Instant,
 }
 
 /// A frame waiting in the [`Release`] stage, with what it needs from the moment it was read.
 struct Queued {
 	frame: Frame,
+	/// When the frame decodes: its DTS, else its PTS.
+	decode: Timestamp,
 	/// Authored decode timestamp, as [`PesUnit::dts`].
 	dts: Option<u64>,
 	/// The avcC/hvcC the frame was read under, for video.
@@ -224,6 +222,10 @@ struct Track {
 	source: ExportSource,
 	/// The first frame, held until the program tables are built.
 	pending: Option<Pending>,
+	/// When the source was last found empty. A frame read since arrived no earlier, and
+	/// no later than it is read; the release judges it on the earlier bound, so a caller
+	/// that polls late (a sink sleeping to pace its writes) does not make it late.
+	empty: web_async::time::Instant,
 	/// The source's discontinuity counter the decode clock (`last_dts`, `timeline`) runs under.
 	discontinuity: u64,
 	finished: bool,
@@ -292,6 +294,7 @@ impl Track {
 			sync,
 			item: Queued {
 				frame,
+				decode,
 				dts,
 				description,
 			},
@@ -303,8 +306,7 @@ impl Track {
 }
 
 /// A video rendition's decode-clock reserve in 90 kHz ticks: how far each frame's DTS runs
-/// behind its PTS. It must exceed the rendition's reordering for `DTS <= PTS` to hold, and
-/// [`Export::pcr_at`] backs the clock off by the largest one.
+/// behind its PTS. It must exceed the rendition's reordering for `DTS <= PTS` to hold.
 ///
 /// The catalog `jitter` (the importer's max PTS - DTS) sizes it when published. Otherwise the
 /// reorder depth the SPS declares sizes it, at the SPS's fixed picture rate or the catalog
@@ -312,8 +314,7 @@ impl Track {
 /// [`DEFAULT_DTS_RESERVE`]. Reordering deeper than all of those raises it further
 /// ([`Self::observe`]).
 ///
-/// It never shrinks: that would step the decode clock forward past frames already muxed and
-/// the PCR ahead of DTS values already sent.
+/// It never shrinks: that would step the decode clock forward past frames already read.
 struct Reserve {
 	/// The catalog `jitter`, in ticks.
 	jitter: Option<u64>,
@@ -732,7 +733,6 @@ impl<E: catalog::Catalog> Export<E> {
 			epoch: 0,
 			emitted_epoch: 0,
 			pcr_discontinuity: false,
-			pcr_reserve: None,
 			pending: Vec::new(),
 			keyframes: Vec::new(),
 			queue: VecDeque::new(),
@@ -908,9 +908,8 @@ impl<E: catalog::Catalog> Export<E> {
 				.find(|(_, t)| t.pid == released.track)
 				.map(|(name, _)| name.clone())
 				.context("released frame for an unknown PID")?;
-			let timestamp = released.item.frame.timestamp;
-			self.last_timestamp = Some(timestamp);
-			self.advance(timestamp)?;
+			self.last_timestamp = Some(released.item.frame.timestamp);
+			self.advance(released.item.decode)?;
 			self.mux(&name, released.item)?;
 		}
 
@@ -1001,7 +1000,7 @@ impl<E: catalog::Catalog> Export<E> {
 						let pending = Pending {
 							frame,
 							discontinuity: track.source.discontinuity(),
-							arrived: web_async::time::Instant::now(),
+							arrived: track.empty,
 						};
 						// A new timeline must reach the reset before tune-in alignment can drop it.
 						if let Some(start) = video_start
@@ -1020,7 +1019,10 @@ impl<E: catalog::Catalog> Export<E> {
 						track.finished = true;
 						break;
 					}
-					Poll::Pending => break,
+					Poll::Pending => {
+						track.empty = web_async::time::Instant::now();
+						break;
+					}
 				}
 			}
 		}
@@ -1265,6 +1267,7 @@ impl<E: catalog::Catalog> Export<E> {
 			self.stale.remove(name);
 			track.source = source;
 			track.finished = false;
+			track.empty = web_async::time::Instant::now();
 		}
 		Ok(())
 	}
@@ -1284,6 +1287,7 @@ impl<E: catalog::Catalog> Export<E> {
 			Track {
 				source,
 				pending: None,
+				empty: web_async::time::Instant::now(),
 				discontinuity: 0,
 				finished: false,
 				pid,
@@ -1565,6 +1569,7 @@ impl<E: catalog::Catalog> Export<E> {
 	fn mux(&mut self, name: &str, queued: Queued) -> anyhow::Result<()> {
 		let Queued {
 			frame,
+			decode,
 			dts,
 			description,
 		} = queued;
@@ -1578,7 +1583,6 @@ impl<E: catalog::Catalog> Export<E> {
 			aac.program_config.take();
 		}
 		let is_video = matches!(kind, Kind::Video(_));
-		let timestamp = frame.timestamp;
 		let keyframe = frame.keyframe;
 
 		// Build the elementary-stream payload for this frame. Video needs the
@@ -1696,17 +1700,18 @@ impl<E: catalog::Catalog> Export<E> {
 			self.keyframes.push(self.pending.len());
 		}
 		self.pending.extend_from_slice(&out);
-		self.low = Some(self.low.map_or(timestamp, |low| low.min(timestamp)));
+		self.low = Some(self.low.map_or(decode, |low| low.min(decode)));
 		Ok(())
 	}
 
 	/// Close the open span if `ts` passes the watermark, laying its bytes out.
 	///
-	/// `ts` belongs to the frame about to be muxed. Passing the watermark means the
-	/// span that timestamp opened is done: everything buffered since is exactly the
-	/// bytes it carried, and the distance from it measures how long it ran. A
-	/// reordered (B-frame) timestamp that trails the watermark closes nothing, and
-	/// its bytes join the open span, which is where they are transmitted anyway.
+	/// `ts` is the decode time of the frame about to be muxed. Passing the watermark
+	/// means the span that decode time opened is done: everything buffered since is
+	/// exactly the bytes it carried, and the distance from it measures how long it ran.
+	/// The release stage hands frames over in decode order, so only a tie, or a frame
+	/// read out of order under a zero delay, trails the watermark; it closes nothing,
+	/// and its bytes join the open span.
 	///
 	/// This is why nothing goes out on arrival, and why it can't. A span's bytes
 	/// have to reach a receiver before the units in it decode, so they ride the
@@ -1740,17 +1745,13 @@ impl<E: catalog::Catalog> Export<E> {
 	/// assert. Each frame is stamped at its own slot boundary, so a pacing caller
 	/// releases the clock at the instant it asserts rather than when the media that
 	/// revealed it arrived. And the interval ends at the span's earliest media
-	/// timestamp, so every byte precedes the decode time of the unit it belongs to.
+	/// decode time, so every byte precedes the decode time of the unit it belongs to.
 	///
-	/// The PES units cannot carry the clock themselves. Frames arrive in decode
-	/// order, so the authored DTS is a saw: a reference frame leaps a whole reorder
-	/// span ahead and each B-frame nudges one tick past it. A PCR sampled from it
-	/// freezes and jumps, and no downstream CBR stage can repair that, because a
-	/// groomer can only place the clock samples it receives. So the PCR asserts its
-	/// own uniform ramp instead: absolute grid slots on the media timeline (shared by
-	/// every exporter of the broadcast, like [`due`]), each backed off by the largest
-	/// decode-clock reserve of any track so every PES unit, whichever rendition it
-	/// belongs to, decodes at or after the clock that precedes it.
+	/// The PES units cannot carry the clock themselves: a PCR sampled from the DTS
+	/// would step with the frame cadence, and no downstream CBR stage can repair
+	/// that, because a groomer can only place the clock samples it receives. So the
+	/// PCR asserts its own uniform ramp instead: absolute grid slots on the media
+	/// timeline (shared by every exporter of the broadcast, like [`due`]).
 	fn emit(&mut self, span: Option<u128>) -> anyhow::Result<()> {
 		self.span_counters = None;
 		let bytes = std::mem::take(&mut self.pending);
@@ -1911,28 +1912,17 @@ impl<E: catalog::Catalog> Export<E> {
 
 	/// The clock packet for grid slot `index`, and record that the slot is served.
 	///
-	/// The value backs off by the largest reserve of any track, not just the PCR
-	/// track's: every rendition's PES must decode at or after the clock, and each
-	/// video track backs its DTS off by its own [`Reserve`]. A reserve that grows steps
-	/// the clock back with it, which only a new time base allows (ISO 13818-1 2.4.3.4),
-	/// so that PCR sets `discontinuity_indicator`. The DTS already sent stay ahead of
-	/// the clock values sent with them, and [`author_dts`] keeps every later DTS above
-	/// those. Back off through the 33-bit wrap rather than saturating: a timeline that
-	/// starts inside the reserve would otherwise clamp its first slots to zero and break
-	/// the uniform step. The wire field is a circular clock, so the masked wrapped value
-	/// is the correct mod-2^33 back-off.
+	/// The value runs one slot behind the boundary. A receiver times the bytes
+	/// between two clock packets by interpolating their values, and the bytes after
+	/// the last boundary in a span run on toward the next one, past the span's decode
+	/// time; the slot of slack keeps every byte ahead of the unit it belongs to. Back
+	/// off through the 33-bit wrap rather than saturating: a timeline that starts in
+	/// its first slot would otherwise clamp to zero and break the uniform step. The
+	/// wire field is a circular clock, so the masked wrapped value is the correct
+	/// mod-2^33 back-off.
 	fn pcr_at(&mut self, index: u128, before: Option<u8>) -> anyhow::Result<Vec<u8>> {
 		let pcr_pid = self.psi.as_ref().context("PSI not built")?.pcr_pid;
-		let reserve = self
-			.tracks
-			.values()
-			.map(|t| t.reserve.ticks)
-			.max()
-			.unwrap_or(DEFAULT_DTS_RESERVE);
-		let ticks = slot_ticks(index, PCR_INTERVAL).wrapping_sub(reserve);
-		if self.pcr_reserve.replace(reserve).is_some_and(|last| reserve > last) {
-			self.pcr_discontinuity = true;
-		}
+		let ticks = slot_ticks(index, PCR_INTERVAL).wrapping_sub(slot_ticks(1, PCR_INTERVAL));
 		// Nothing has gone out on this PID yet, so there is no counter to repeat and
 		// any value starts a valid run; take the one before the next to be used.
 		let cc = match before {

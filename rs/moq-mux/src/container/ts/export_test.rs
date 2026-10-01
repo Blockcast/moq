@@ -739,12 +739,11 @@ async fn export_pcr_is_a_uniform_ramp() {
 	}
 }
 
-/// A timeline that starts inside the decode-clock reserve backs the PCR off
-/// through the 33-bit wrap instead of saturating at zero: the grid step stays
-/// uniform from the very first slot (saturation would emit 0 then 2234, and a
-/// large catalog jitter would freeze several leading PCRs at zero).
+/// A timeline that starts in its first slot backs the PCR off through the 33-bit
+/// wrap instead of saturating at zero: the grid step stays uniform from the very
+/// first slot (saturation would emit 0 then 0 again).
 #[tokio::test(start_paused = true)]
-async fn export_pcr_wraps_below_the_reserve_at_start() {
+async fn export_pcr_wraps_below_zero_at_start() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
@@ -810,30 +809,29 @@ async fn export_pcr_wraps_below_the_reserve_at_start() {
 			head = Some(base);
 		}
 		// The frame is paced at the slot its last leading clock asserts (plus the
-		// reserve), which is the newest slot that has begun by then.
+		// slot of slack), which is the newest slot that has begun by then.
 		let Some(base) = head else { continue };
 		let slot_ticks = frame.timestamp.as_micros() / 25_000 * 25_000 * 90 / 1_000;
 		assert_eq!(
 			base,
-			(slot_ticks as u64).wrapping_sub(16) & WIRE,
+			(slot_ticks as u64).wrapping_sub(2250) & WIRE,
 			"pacing off value, at {i}"
 		);
 	}
 
 	const WIRE: u64 = (1 << 33) - 1;
 	assert!(pcrs.len() >= 2, "expected at least two grid slots, got {pcrs:?}");
-	// Slot 0 minus the 16-tick default reserve, mod 2^33.
-	assert_eq!(pcrs[0], WIRE - 15, "slot 0 backs off through the wrap: {pcrs:?}");
+	// Slot 0 minus one 2250-tick slot, mod 2^33.
+	assert_eq!(pcrs[0], WIRE - 2249, "slot 0 backs off through the wrap: {pcrs:?}");
 	// Every step is exactly one 25 ms slot (2250 ticks) in the circular clock.
 	for (i, w) in pcrs.windows(2).enumerate() {
 		assert_eq!(w[1].wrapping_sub(w[0]) & WIRE, 2250, "step off the grid at {i}: {w:?}");
 	}
 }
 
-/// The clock backs off by the largest reserve of any track, not just the PCR
-/// track's: a second rendition with a deeper reorder (catalog `jitter`) authors
-/// its DTS further behind the PTS, and a clock respecting only the PCR track's
-/// reserve would run ahead of those frames' decode times.
+/// Every rendition decodes after the clock, not just the PCR track: a second
+/// rendition with a deeper reorder (catalog `jitter`) authors its DTS further
+/// behind the PTS, and the spans close on those decode times.
 #[tokio::test(start_paused = true)]
 async fn export_pcr_respects_every_renditions_reserve() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -4401,14 +4399,16 @@ async fn si_reordered_frames_earn_no_emission_credit() {
 	assert_eq!(rig.media(2_500, 0x0011).await, 1, "the lead emission closes");
 
 	// The next revision arrives on a frame stepping back behind the 2.5s anchor,
-	// like a B-frame emitted in decode order: no elapsed time, no emission.
+	// like a B-frame emitted in decode order: no elapsed time, no emission. It still
+	// decodes after the frame before it, so it closes the span the prior revision
+	// rode, and its own span carries nothing.
 	rig.si_track
 		.write_frame(Timestamp::ZERO, Bytes::from(section(2)))
 		.unwrap();
-	assert_eq!(rig.media(2_400, 0x0011).await, 0, "a reordered frame earns no credit");
+	assert_eq!(rig.media(2_400, 0x0011).await, 1, "only the prior revision closes");
 
 	// The floor measures from the 2.5s anchor: not due at 3.4s, due at 3.5s.
-	assert_eq!(rig.media(3_400, 0x0011).await, 1, "only the prior revision closes");
+	assert_eq!(rig.media(3_400, 0x0011).await, 0, "a reordered frame earns no credit");
 	assert_eq!(
 		rig.media(3_500, 0x0011).await,
 		0,
@@ -4436,8 +4436,8 @@ async fn si_anchor_survives_a_zero_interval_reorder() {
 	assert_eq!(rig.media(1_000, 0x0011).await, 0, "the first span stays buffered");
 	assert_eq!(rig.media(3_000, 0x0011).await, 1, "the anchor advances to 3s");
 	// A reordered frame steps back behind the anchor, into the previous 1s slot;
-	// zero interval still emits.
-	assert_eq!(rig.media(2_900, 0x0011).await, 0, "the reordered span stays open");
+	// zero interval still emits. It decodes after the 3s frame, so it closes that span.
+	assert_eq!(rig.media(2_900, 0x0011).await, 1, "the 3s span closes");
 
 	// The catalog raises the interval to 1s. The grid slot must be the 3s anchor's,
 	// not the reordered 2.9s emission's.
@@ -4452,11 +4452,7 @@ async fn si_anchor_survives_a_zero_interval_reorder() {
 		.get_mut(&0x42)
 		.unwrap()
 		.interval = Some(Duration::from_secs(1));
-	assert_eq!(
-		rig.media(3_400, 0x0011).await,
-		2,
-		"both zero-interval frames close together"
-	);
+	assert_eq!(rig.media(3_400, 0x0011).await, 1, "the reordered span closes");
 	assert_eq!(rig.media(3_900, 0x0011).await, 0, "still in the anchor's slot");
 	assert_eq!(rig.media(4_000, 0x0011).await, 0, "the due table enters the open span");
 	assert_eq!(rig.media(4_100, 0x0011).await, 1, "the next span closes the due table");
@@ -5186,18 +5182,22 @@ impl Reordered {
 }
 
 /// Export a [`Reordered`] broadcast twice, like [`export_twice`]: the second exporter joins at
-/// [`JOIN`], and both are drained after every tick. `jitter` is published at its tick when given.
+/// [`JOIN`]. Ticks run on the paused clock as a live source's would, and both exporters release
+/// on a fixed delay. `jitter` is published at its tick when given.
 async fn export_reordered(
 	sps: &'static [u8],
 	pps: &'static [u8],
 	pyramid: &'static [u64],
 	jitter: Option<(u64, Duration)>,
 ) -> (Vec<Frame>, Vec<Frame>) {
+	let delay = Duration::from_millis(500);
 	let mut rig = Reordered::new(sps, pps, pyramid);
-	let mut a = Export::new(rig.source.clone()).await.unwrap();
+	let mut a = rig.export(delay).await;
+	let start = tokio::time::Instant::now();
 	let mut b = None;
 	let (mut out_a, mut out_b) = (Vec::new(), Vec::new());
 	for tick in 0..TICKS {
+		tokio::time::sleep_until(start + Duration::from_micros(tick * VIDEO_US)).await;
 		if let Some((at, jitter)) = jitter
 			&& at == tick
 		{
@@ -5206,12 +5206,12 @@ async fn export_reordered(
 		rig.video(tick);
 		while rig.audio_before(tick + 1) {}
 
-		out_a.extend(drain_frames(&mut a).await);
+		out_a.extend(poll_frames(&mut a));
 		if let Some(b) = b.as_mut() {
-			out_b.extend(drain_frames(b).await);
+			out_b.extend(poll_frames(b));
 		}
 		if tick + 1 == JOIN {
-			b = Some(Export::new(rig.source.clone()).await.unwrap());
+			b = Some(Export::new(rig.source.clone()).await.unwrap().with_delay(delay));
 		}
 	}
 	rig.finish();
