@@ -70,7 +70,7 @@ QUIC studies there on that rule.
 - [Data track clock](/quest/m1/data-track-clock.md) - JSON and binary data tracks stamp on the catalog's clock at write time, matching the media's anchored clock
 - [Go and Dart doc samples](/quest/m1/doc-samples-go-dart.md) - Go and Dart doc samples compile against their wrappers
 - [Publishing requires a timestamp](/quest/m1/publish-timestamp.md) - every Rust and binding publish API takes a timestamp; nothing fills in now for the caller
-- [JS publishing requires a timestamp](/quest/m1/js-publish-timestamp.md) - the same in @moq/json, @moq/binary, and @moq/net
+- [JS publishing requires a timestamp](/quest/m1/js-publish-timestamp.md) - the same in @moq/json, @moq/flate, and @moq/net
 - [Plan: untimed peer objects](/quest/m1/plan-untimed-objects.md) - decide what a frame's timestamp is when a moq-transport or pre-lite-05 peer sends none
 - [Data consumer timestamps](/quest/m1/data-consumer-timestamps.md) - json and binary consumers return each value's timestamp, in Rust and every binding
 - [Nested data configs](/quest/m1/data-config-nesting.md) - docs nest `BinaryConfig`/`JsonConfig` in an application section instead of flattening it

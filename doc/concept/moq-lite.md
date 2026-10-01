@@ -273,7 +273,8 @@ substituting a local default. Media tracks explicitly use 30 seconds so a
 segmented egress can still find its segments.
 
 IETF carries this value as MAX\_CACHE\_DURATION, received on every supported draft
-and sent from draft 17 onward. Drafts 14–16 remain receive-only for compatibility
+and sent from draft 17 onward. A relay reads it from FETCH\_OK as well as SUBSCRIBE\_OK, so a track it
+only fetches still learns its window. Drafts 14–16 remain receive-only for compatibility
 with older implementations. This is an approximate mapping: IETF measures wall
 time, while max age uses media timestamps and always keeps the newest group.
 EXPIRES describes subscription lifetime and does not set retention.

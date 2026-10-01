@@ -1291,6 +1291,7 @@ where
 				},
 				end_of_track,
 				end_location,
+				properties: Default::default(),
 			})
 			.await?;
 

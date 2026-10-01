@@ -3145,8 +3145,11 @@ where
 		let end = (end.group == sequence).then_some(end.object);
 
 		// Only a track nothing has subscribed to yet takes this info, as SUBSCRIBE_OK would
-		// have set it.
-		let info = track::Info::default().with_timescale(Timescale::MICRO);
+		// have set it. FETCH_OK carries the same Track Properties, so the retention window
+		// comes from it.
+		let info = track::Info::default()
+			.with_timescale(Timescale::MICRO)
+			.with_max_age(ok.properties.max_cache_duration);
 		let mut producer = match request.accept(info) {
 			Ok(producer) => producer,
 			// Already served by a concurrent fetch, or the track closed.
@@ -7532,6 +7535,7 @@ mod joining_fetch_tests {
 				group_order: GroupOrder::Ascending,
 				end_of_track: false,
 				end_location: ietf::Location { group: 4, object: 2 },
+				properties: Default::default(),
 			},
 			version,
 		)
@@ -7801,6 +7805,7 @@ mod joining_fetch_tests {
 					group: GROUP + 1,
 					object: 0,
 				},
+				properties: Default::default(),
 			},
 			VERSION,
 		);
@@ -7840,6 +7845,70 @@ mod joining_fetch_tests {
 		assert!(fetch.await.is_err(), "the accepted group was aborted");
 	}
 
+	/// A group FETCH for a track nothing subscribed to takes its retention window from
+	/// FETCH_OK's properties, as a subscription would from SUBSCRIBE_OK's.
+	#[tokio::test(start_paused = true)]
+	async fn a_group_fetch_takes_fetch_ok_max_age() {
+		const GROUP: u64 = 4;
+		const MAX_AGE: Duration = Duration::from_secs(12);
+
+		for version in [Version::Draft17, Version::Draft19] {
+			let ok = message_bytes(
+				ietf::FetchOk::ID,
+				&ietf::FetchOk {
+					request_id: None,
+					group_order: GroupOrder::Ascending,
+					end_of_track: false,
+					end_location: ietf::Location {
+						group: GROUP + 1,
+						object: 0,
+					},
+					properties: ietf::Properties {
+						max_cache_duration: Some(MAX_AGE),
+						..Default::default()
+					},
+				},
+				version,
+			);
+
+			let session = ScriptedSession::per_stream_reset(vec![ok]);
+			let (tasks, _task_set) = crate::util::TaskSet::new();
+			let subscriber = Subscriber::new(
+				crate::time::Clock::tokio(),
+				session.clone(),
+				crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				Control::new(None, false),
+				None,
+				peer::PeerSetup::default(),
+				crate::Hop::new(1).unwrap(),
+				None,
+				version,
+				tasks,
+				Default::default(),
+			);
+
+			// A track the publisher has not accepted, so the fetch supplies its info.
+			let broadcast = crate::broadcast::Info::new().produce();
+			let reserved = broadcast.reserve_track("video").unwrap();
+			let dynamic = reserved.dynamic();
+			let track = broadcast.consume().track("video").unwrap();
+			let mut fetch = std::pin::pin!(track.fetch_group(GROUP, None));
+			assert!(futures::poll!(fetch.as_mut()).is_pending());
+			let request = dynamic.requested_group().await.expect("no group requested");
+
+			subscriber
+				.clone()
+				.run_group_fetch(Path::new("broadcast").to_owned(), "video".into(), request, None)
+				.await;
+
+			let info = tokio::time::timeout(Duration::from_secs(1), track.query())
+				.await
+				.expect("the fetch installed the track info")
+				.expect("info");
+			assert_eq!(info.max_age, Some(MAX_AGE), "{version}");
+		}
+	}
+
 	/// A cache miss for a group's tail asks upstream from the frame the reader wants and
 	/// numbers what arrives from there, so a publisher that evicted the prefix can answer.
 	#[tokio::test(start_paused = true)]
@@ -7858,6 +7927,7 @@ mod joining_fetch_tests {
 					group: GROUP + 1,
 					object: 0,
 				},
+				properties: Default::default(),
 			},
 			VERSION,
 		);
