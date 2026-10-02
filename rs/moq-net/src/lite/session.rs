@@ -24,29 +24,48 @@ pub(crate) struct SessionStart<S: crate::transport::poll::Session> {
 /// the session, so the caller can inspect the advertised path (and gate on it) before
 /// serving. lite-05+ only.
 ///
-/// Blocks on the peer's Setup Stream, which every lite-05+ endpoint opens at startup.
-/// Almost always the first unidirectional stream; any other uni stream that races
-/// ahead of it is `STOP_SENDING`-ed and skipped (we don't support proactive uni
-/// PUBLISH, so nothing legitimate precedes the SETUP today). The eventual home for
-/// out-of-order tolerance is the full session loop with deferred origin binding.
+/// Other uni streams racing ahead of SETUP are held for the normal session
+/// classifier. QUIC stream credit bounds the held queue.
 ///
-/// Pass the returned [`Setup`] to [`start`] as its `peer_setup` so PROBE gating still
-/// resolves without re-reading the (consumed) stream.
+/// Pass the result to [`start`] as its `peer_setup` so capability gating resolves
+/// without re-reading SETUP, and every held stream is handed back to the driver.
 pub async fn accept_setup<S: crate::transport::poll::Session>(
 	session: &mut S,
 	version: Version,
-) -> Result<Setup, Error> {
+) -> Result<AcceptedSetup<S>, Error> {
+	let mut early = Vec::new();
 	loop {
 		let stream = session.accept_uni().await.map_err(Error::from_transport)?;
 		let mut reader = Reader::new(stream, version);
-
-		match reader.decode::<DataType>().await? {
-			DataType::Setup => return reader.decode::<Setup>().await,
-			// A non-SETUP uni stream this early is unexpected (GROUP needs a prior
-			// subscribe). Reject it and keep waiting rather than failing the session.
-			_ => reader.abort(&Error::UnexpectedStream),
+		let kind = match reader.decode_peek::<u64>().await {
+			Ok(kind) => kind,
+			Err(
+				Error::Cancel
+				| Error::Stream(_)
+				| Error::Remote(_)
+				| Error::Transport(_)
+				| Error::Decode(crate::DecodeError::Short),
+			) => continue,
+			Err(err) => return Err(err),
+		};
+		if kind != DataType::Setup as u64 {
+			early.push(reader);
+			continue;
 		}
+		reader.decode::<DataType>().await?;
+		return Ok(AcceptedSetup {
+			setup: reader.decode().await?,
+			early,
+		});
 	}
+}
+
+/// The peer's pre-read SETUP and the streams held until it arrived.
+pub struct AcceptedSetup<S: crate::transport::poll::Session> {
+	/// The SETUP decoded before origin binding.
+	pub setup: Setup,
+	/// Streams with their type still buffered for the session classifier.
+	pub early: Vec<Reader<S::RecvStream, Version>>,
 }
 
 /// Everything one moq-lite session needs to start.
@@ -85,7 +104,7 @@ pub struct Config<S: crate::transport::poll::Session> {
 	/// The peer's SETUP, when it was already read before [`start`] (e.g. a server that
 	/// gated on the client's path via [`accept_setup`]). Seeds the peer-setup slot so
 	/// the Setup Stream isn't expected again. `None` reads it from the wire as usual.
-	pub peer_setup: Option<Setup>,
+	pub peer_setup: Option<AcceptedSetup<S>>,
 }
 
 /// Start a lite session.
@@ -151,9 +170,12 @@ where
 	// When the caller already read it (a gated server accept), seed the slot so the
 	// Setup stream isn't expected on the wire again.
 	let peer_setup_slot = PeerSetup::default();
-	if let Some(setup) = peer_setup {
-		peer_setup_slot.set(setup);
-	}
+	let early = if let Some(accepted) = peer_setup {
+		peer_setup_slot.set(accepted.setup);
+		accepted.early
+	} else {
+		Vec::new()
+	};
 	let peer_setup = peer_setup_slot;
 
 	// GOAWAY wiring: the public Session holds one half (send trigger, received
@@ -196,7 +218,7 @@ where
 		goaway: Some(SendGoaway::new(runtime, session.clone(), goaway, version)),
 		session_stream: setup_stream,
 		publisher,
-		subscriber: SubscriberDriver::new(subscriber),
+		subscriber: SubscriberDriver::new(subscriber, early),
 		session,
 	};
 
@@ -520,6 +542,47 @@ impl<S: crate::transport::poll::Session> SendGoaway<S> {
 					}
 				}
 				SendGoawayState::Enforce(enforce) => return enforce.poll(waiter),
+			}
+		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::coding::Encode;
+
+	#[tokio::test(start_paused = true)]
+	async fn duplicate_setup_closes_the_session() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			for complete in [false, true] {
+				let mut first = Vec::new();
+				DataType::Setup.encode(&mut first, version).unwrap();
+				if complete {
+					Setup::default().encode(&mut first, version).unwrap();
+				}
+				let session = crate::lite::test_transport::ScriptedSession::new(Vec::new())
+					.with_incoming_unis(vec![first.clone(), first]);
+				let log = session.log.clone();
+				let mut started = start(Config {
+					runtime: crate::time::Clock::tokio(),
+					session,
+					setup_stream: None,
+					publish: None,
+					subscribe: None,
+					peer_hop: None,
+					version,
+					our_setup: Setup::default(),
+					peer_setup: None,
+				})
+				.unwrap();
+				let _ = started.driver.poll(&kio::Waiter::noop());
+				assert!(
+					log.closes()
+						.iter()
+						.any(|(code, _)| *code == SessionError::ProtocolViolation.to_code()),
+					"{version:?}, complete={complete}: duplicate SETUP must close the session"
+				);
 			}
 		}
 	}
