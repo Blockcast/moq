@@ -21,7 +21,7 @@ the same type in
 Callers in the repository (js/hang catalog, js/publish, js/room) pass their
 clock's now explicitly. Update `doc/lib/js/{json,flate,net}.md`.
 
-Public API: breaking, on `dev`. Wire: none.
+Public API: breaking. Wire: none.
 
 ## Required
 

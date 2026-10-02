@@ -43,7 +43,7 @@ moq-ffi's json/flate consumers return the timestamp too, and the py, swift,
 kt, go, and dart wrappers and `doc/lib/*` follow. JS is
 [JS data consumer timestamps](/quest/m1/js-data-consumer-timestamps.md).
 
-Public API: breaking, on `dev`. Wire: none.
+Public API: breaking. Wire: none.
 
 ## Required
 

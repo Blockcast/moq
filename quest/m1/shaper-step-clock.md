@@ -2,7 +2,7 @@
 
 ## Goal
 
-On `dev`, `moq-shaper`'s `a_step_gets_worse_part_way_through` asserts on a
+`moq-shaper`'s `a_step_gets_worse_part_way_through` asserts on a
 paused or mock clock, not wall-clock latency, so a loaded runner cannot fail it.
 
 ## Plan

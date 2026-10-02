@@ -67,6 +67,19 @@ Decided (2026-10-02):
   second publish before the next cut conflicts; and a ruleset bypass for the
   workflow token.
 
+Decided (2026-10-02, after #4737 and #4738 opened):
+
+- ✅ Releases stay patch-only for now, so no cut follows the flip: a cut
+  would carry trunk's breaking changes into `release` and force minor bumps.
+  The back-merge workflow, script, recipe, and alert entry ship in both PRs
+  as identical files, so `release` back-merges from its first publish.
+- ✅ The Cloudflare docs and demo builds track `release`. The maintainer
+  switches them in the dashboard during step 4.
+- ✅ #4605 (noq reassembly cap, part 1) is retargeted to trunk, then
+  backported to `release` once it merges.
+- ✅ The `dev` PR merges first; the `main` PR merges immediately before
+  step 4, which needs the maintainer's explicit go-ahead.
+
 Sequence:
 
 1. dev-sync ([#4720](https://github.com/moq-dev/moq/pull/4720)) lands.
@@ -74,15 +87,19 @@ Sequence:
    `platform`, and `quest` push filters name `main` and `release`,
    unpinned `workflow_run` checkouts pin the triggering `head_sha`, the
    back-merge workflow, docs pin `release`.
-3. A small PR on `main`: publish triggers move to `release`; cache writers
-   keep `main`, so they stop running there.
+3. A small PR on `main`: publish triggers move to `release`, and the
+   back-merge workflow lands identical to trunk's; cache writers keep
+   `main`, so they stop running there.
 4. Admin, back to back, run by the agent only after the maintainer's
    go-ahead in chat: rename `main` to `release`, rename `dev` to `main`, set
-   the default branch, create the `release` ruleset, delete the `dev`
-   ruleset, retarget open PRs. Release-plz PRs (such as #4596) stay on
-   `release`. Dry-run first and show the PR list with each PR's class.
+   the default branch, create the `release` ruleset, drop linear history
+   from the default-branch ruleset, delete the `dev` ruleset, retarget open
+   PRs. Release-plz PRs (such as #4596) stay on
+   `release`. Dry-run first and show the PR list with each PR's class. The
+   maintainer points the Cloudflare docs and demo builds at `release`.
 5. Verify: a no-op push to `main` publishes nothing; release-plz runs on
    `release`; a chained publish builds `release` while trunk differs; the
-   back-merges of two publishes without a cut between both land on `main`.
+   back-merges of two patch publishes on `release`, without a cut between,
+   both land on `main`.
 
 Public API: none. Wire: none. Contributors see the new branch model.

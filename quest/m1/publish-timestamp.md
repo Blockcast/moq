@@ -61,7 +61,7 @@ fill `Timestamp::now()` (moq-net's clock, not the broadcast's), and moq-mux's
 The broadcast-clock input was requested by OneTooMany, who align KLV and
 MAVLink-derived telemetry with video.
 
-Public API: breaking, on `dev`. Wire: none here; absence on the wire lands
+Public API: breaking. Wire: none here; absence on the wire lands
 with the untimed implementation quests.
 
 ## Required
