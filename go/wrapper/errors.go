@@ -53,7 +53,7 @@ var (
 	ErrCancelled = ffi.ErrMoqErrorCancelled
 	// ErrClosed is returned when the session or stream has closed; IsShutdown treats it as a graceful stop.
 	ErrClosed = ffi.ErrMoqErrorClosed
-	// ErrBusy is returned when a configuration setter races an in-flight connect, listen, or accept.
+	// ErrBusy is returned when a request setter or CertFingerprints races an in-flight accept.
 	ErrBusy = ffi.ErrMoqErrorBusy
 	// ErrConnect is returned when establishing a client session fails.
 	ErrConnect = ffi.ErrMoqErrorConnect
@@ -83,6 +83,8 @@ var (
 	ErrUnresolvableBroadcast = ffi.ErrMoqErrorUnresolvableBroadcast
 	// ErrLog is returned when installing or configuring the native log subscriber fails.
 	ErrLog = ffi.ErrMoqErrorLog
+	// ErrConfig is returned when Dial or Listen is given a value the native side cannot use.
+	ErrConfig = ffi.ErrMoqErrorConfig
 )
 
 // IsShutdown reports whether err is the expected result of a graceful shutdown

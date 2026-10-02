@@ -115,8 +115,8 @@ func TestProducerTakesTheTrack(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer snapshot.Finish()
-	if _, err := track.Name(); !errors.Is(err, moq.ErrClosed) {
-		t.Fatalf("Name after take = %v, want ErrClosed", err)
+	if _, err := track.Demand(); !errors.Is(err, moq.ErrClosed) {
+		t.Fatalf("Demand after take = %v, want ErrClosed", err)
 	}
 }
 

@@ -37,7 +37,7 @@ func startRelay(t *testing.T, ctx context.Context, addr string) *relay {
 
 	r := &relay{server: server, addr: server.LocalAddr()}
 	go func() {
-		for req, err := range server.Requests(ctx) {
+		for req, err := range server.All(ctx) {
 			if err != nil {
 				return
 			}

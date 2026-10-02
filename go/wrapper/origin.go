@@ -80,9 +80,9 @@ func (d *OriginDynamic) RequestedBroadcast(ctx context.Context) (*BroadcastReque
 	return &BroadcastRequest{inner: inner}, nil
 }
 
-// Requests ranges over requested broadcasts until the stream errors or the loop
+// All ranges over requested broadcasts until the stream errors or the loop
 // breaks.
-func (d *OriginDynamic) Requests(ctx context.Context) iter.Seq2[*BroadcastRequest, error] {
+func (d *OriginDynamic) All(ctx context.Context) iter.Seq2[*BroadcastRequest, error] {
 	return bridge.Seq(ctx, d.RequestedBroadcast)
 }
 
