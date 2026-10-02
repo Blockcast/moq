@@ -49,12 +49,16 @@ work no child does:
 - A layers guide under `doc/lib` mapping net, media, json, flate, audio, and video to
   each language's module, linked from every binding page.
 - The bindings section of the following release's upgrade page: old call to
-  new call per language.
+  new call per language, including every rename the children made (#4697:
+  `subscribe` to `consume`, Go's `All(ctx)` iterators and `ConnectionStatus*`
+  constants, Kotlin and Dart `announced().updates()`, config records in place
+  of setters and named parameters).
 - `just test interop --all` green on the finished line.
 
 ## Required
 
 - [Net](/quest/m1/ffi-shape/net.md) - client and server take config records, snapshots are records, and the verbs match moq-net
+- [Request accept](/quest/m1/ffi-shape/request-accept.md) - a request's origins are `accept()` arguments, removing the last root setters
 - [Media](/quest/m1/ffi-shape/media.md) - catalog, import, and container consume move under `media`
 - [Codecs](/quest/m1/ffi-shape/codec.md) - audio and video encoders and decoders move under their own namespaces with one constructor shape
 
