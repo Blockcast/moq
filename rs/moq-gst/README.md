@@ -37,20 +37,20 @@ The `moq-gst` flake output bundles the plugin with wrappers around `gst-inspect-
 
 ```bash
 # Inspect: list moqsink + moqsrc. (Or one-shot: `nix run github:moq-dev/moq/release#moq-gst -- moq`.)
-nix shell github:moq-dev/moq#moq-gst --command gst-inspect-1.0 moq
+nix shell github:moq-dev/moq/release#moq-gst --command gst-inspect-1.0 moq
 
 # Subscribe to the always-on public test broadcast and render to a window.
 # moqsrc emits one pad per rendition (video_0, audio_0, ...); link the one(s) you
 # want by name. A bare `moqsrc ! decodebin3 ! ...` only links the first pad offered,
 # which on a video+audio broadcast may be the audio pad (so a video sink shows nothing).
-nix shell github:moq-dev/moq#moq-gst --command gst-launch-1.0 -v -e \
+nix shell github:moq-dev/moq/release#moq-gst --command gst-launch-1.0 -v -e \
   moqsrc name=s url=https://cdn.moq.dev/demo broadcast=bbb.hang \
   s.video_0 ! queue ! decodebin3 ! videoconvert ! autovideosink \
   s.audio_0 ! queue ! decodebin3 ! audioconvert ! autoaudiosink
 
 # Publish your own broadcast on the public anon relay (then sub to it from anywhere).
 curl -fsSL https://vid.moq.dev/bbb.mp4 -o bbb.mp4
-nix shell github:moq-dev/moq#moq-gst --command gst-launch-1.0 -v -e \
+nix shell github:moq-dev/moq/release#moq-gst --command gst-launch-1.0 -v -e \
   multifilesrc location=bbb.mp4 loop=true ! parsebin name=parse \
     parse. ! queue ! identity sync=true ! mux.sink_0 \
     parse. ! queue ! identity sync=true ! mux.sink_1 \
