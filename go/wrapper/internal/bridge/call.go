@@ -123,7 +123,7 @@ func releaseHandle[T Handle](val T) {
 // yields (nil, err) once if a call fails, and stops cleanly when Next returns nil
 // (the stream ended) or when the consumer breaks out of the range loop.
 //
-//	for frame, err := range consumer.Frames(ctx) {
+//	for frame, err := range consumer.All(ctx) {
 //	    if err != nil {
 //	        if moq.IsShutdown(err) { break }
 //	        return err

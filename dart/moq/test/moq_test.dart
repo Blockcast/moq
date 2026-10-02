@@ -19,11 +19,15 @@ Future<AnnounceEvent> nextRoute(AnnounceConsumer announced) async {
 void main() {
   test('connects, announces, subscribes, and delivers a frame', () async {
     final relay = MoqOriginProducer(config: MoqOriginConfig());
-    final server = MoqServer();
-    server.setBind(addr: '127.0.0.1:0');
-    server.setTlsGenerate(hostnames: ['localhost']);
-    server.setPublish(origin: relay);
-    server.setConsume(origin: relay);
+    final server = MoqServer(
+      config: MoqServerConfig(
+        bind: '127.0.0.1:0',
+        tls: MoqServerTls(generate: ['localhost']),
+        quic: MoqQuicConfig(),
+        publish: relay,
+        consume: relay,
+      ),
+    );
     final address = await server.listen().timeout(timeout);
 
     final accepted = () async {
@@ -39,7 +43,7 @@ void main() {
     final serverSession = await accepted;
     expect(client.bandwidth(), isA<MoqBandwidth>());
 
-    final announcement = client.announcements().firstWhere(
+    final announcement = client.announced().updates().firstWhere(
       (event) => event is AnnounceEventStart,
     );
     final broadcast = relay.createBroadcast(path: 'live');
@@ -58,7 +62,7 @@ void main() {
 
     // Routed subscriptions pull their source lazily when the consumer is first read.
     final nextGroup = consumer.nextGroup();
-    await track.used().timeout(timeout);
+    await track.demand().used().timeout(timeout);
 
     final producer = track.appendGroup();
     producer.writeFrame(
@@ -105,7 +109,7 @@ void main() {
     ).timeout(timeout);
     final serverSession = await accepted;
 
-    final announcement = client.announcements().firstWhere(
+    final announcement = client.announced().updates().firstWhere(
       (event) => event is AnnounceEventStart,
     );
     final broadcast = server.createBroadcast('live');
@@ -132,6 +136,16 @@ void main() {
         ),
       ),
       throwsArgumentError,
+    );
+  });
+
+  test('an invalid config fails before dialing', () {
+    expect(
+      Moq.connect(
+        'https://localhost',
+        options: const ConnectOptions(versions: ['moq-lite-99']),
+      ),
+      throwsA(isA<ConfigMoqException>()),
     );
   });
 

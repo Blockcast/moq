@@ -692,14 +692,6 @@ impl MoqTrackProducer {
 
 #[uniffi::export]
 impl MoqTrackProducer {
-	/// Return the name of this track.
-	pub fn name(&self) -> Result<String, MoqError> {
-		let _guard = crate::ffi::enter();
-		let guard = self.inner.lock().unwrap();
-		let track = guard.as_ref().ok_or(MoqError::Closed)?;
-		Ok(track.name().to_string())
-	}
-
 	/// Create a handler for uncached group fetches on this track.
 	///
 	/// Hold the returned object for as long as cache misses should wait to be
@@ -711,25 +703,9 @@ impl MoqTrackProducer {
 		Ok(Arc::new(MoqTrackDynamic::new(track.dynamic())))
 	}
 
-	/// A watch-only handle to whether this track has subscribers.
+	/// A watch-only handle to this track's name and whether it has subscribers.
 	pub fn demand(&self) -> Result<Arc<MoqTrackDemand>, MoqError> {
 		Ok(MoqTrackDemand::new(self.track_demand()?))
-	}
-
-	/// Wait until this track has at least one active consumer.
-	///
-	/// Prefer [`demand`](Self::demand), a handle that can wait without borrowing this producer.
-	pub async fn used(&self) -> Result<(), MoqError> {
-		let track = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.clone();
-		crate::ffi::detached(async move { track.used().await }).await
-	}
-
-	/// Wait until this track has no active consumers.
-	///
-	/// Prefer [`demand`](Self::demand), a handle that can wait without borrowing this producer.
-	pub async fn unused(&self) -> Result<(), MoqError> {
-		let track = self.inner.lock().unwrap().as_ref().ok_or(MoqError::Closed)?.clone();
-		crate::ffi::detached(async move { track.unused().await }).await
 	}
 
 	/// Create a consumer that reads from this producer's track.

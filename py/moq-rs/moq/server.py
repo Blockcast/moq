@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Sequence
 
-from moq_ffi import MoqRequest, MoqServer, MoqTransport
+from moq_ffi import MoqQuicConfig, MoqRequest, MoqServer, MoqServerConfig, MoqServerTls, MoqTransport
 
 from .origin import OriginProducer
 from .publish import BroadcastProducer
@@ -119,7 +119,7 @@ class Server:
             "127.0.0.1:4443",
             tls_generate=["localhost"],
             publish=origin,
-            subscribe=origin,
+            consume=origin,
         )
     """
 
@@ -130,42 +130,36 @@ class Server:
         tls_cert: Sequence[str] = (),
         tls_key: Sequence[str] = (),
         tls_generate: Sequence[str] = (),
+        versions: Sequence[str] = (),
+        max_streams: int | None = None,
         publish: OriginProducer | None = None,
-        subscribe: OriginProducer | None = None,
+        consume: OriginProducer | None = None,
     ) -> None:
-        self._bind = bind
-        self._tls_cert = list(tls_cert)
-        self._tls_key = list(tls_key)
-        self._tls_generate = list(tls_generate)
-
         # If neither origin is provided, create a shared internal one.
-        if publish is None and subscribe is None:
-            self._origin: OriginProducer | None = OriginProducer()
-            self._publish_origin: OriginProducer | None = self._origin
-            self._consume_origin: OriginProducer | None = self._origin
-        else:
-            self._origin = None
-            self._publish_origin = publish
-            self._consume_origin = subscribe
+        if publish is None and consume is None:
+            publish = consume = OriginProducer()
+        self._publish_origin = publish
+
+        self._config = MoqServerConfig(
+            bind=bind,
+            versions=list(versions),
+            tls=MoqServerTls(cert=list(tls_cert), key=list(tls_key), generate=list(tls_generate)),
+            quic=MoqQuicConfig(max_streams=max_streams),
+            publish=None if publish is None else publish._inner,
+            consume=None if consume is None else consume._inner,
+        )
 
         self._inner: MoqServer | None = None
         self._local_addr: str | None = None
 
     async def __aenter__(self):
-        self._inner = MoqServer()
-        self._inner.set_bind(self._bind)
-        if self._tls_cert:
-            self._inner.set_tls_cert(self._tls_cert)
-        if self._tls_key:
-            self._inner.set_tls_key(self._tls_key)
-        if self._tls_generate:
-            self._inner.set_tls_generate(self._tls_generate)
-        if self._publish_origin is not None:
-            self._inner.set_publish(self._publish_origin._inner)
-        if self._consume_origin is not None:
-            self._inner.set_consume(self._consume_origin._inner)
-
-        self._local_addr = await self._inner.listen()
+        self._inner = MoqServer(self._config)
+        try:
+            self._local_addr = await self._inner.listen()
+        except BaseException:
+            self._inner.cancel()
+            self._inner = None
+            raise
         return self
 
     async def __aexit__(self, *exc) -> None:

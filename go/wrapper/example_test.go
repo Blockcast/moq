@@ -85,7 +85,7 @@ func ExampleClient_Session_stats() {
 	defer client.Close()
 
 	stats := client.Session().Stats()
-	fmt.Println("rtt:", stats.RttUs)
+	fmt.Println("rtt:", stats.RTT)
 }
 
 // Publish a video track with catalog hints known before the first keyframe.
@@ -119,7 +119,7 @@ func ExampleListen() {
 }
 
 // Drive the accept loop directly to decide which sessions to admit.
-func ExampleServer_Requests() {
+func ExampleServer_All() {
 	ctx := context.Background()
 
 	server, err := moq.Listen(ctx, "127.0.0.1:4443", moq.WithTLSGenerate("localhost"))
@@ -128,7 +128,7 @@ func ExampleServer_Requests() {
 	}
 	defer server.Close()
 
-	for req, err := range server.Requests(ctx) {
+	for req, err := range server.All(ctx) {
 		if err != nil {
 			if moq.IsShutdown(err) {
 				break

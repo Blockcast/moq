@@ -8,7 +8,7 @@ moq-ffi and every wrapper, so the root namespace has no setters left.
 
 ## Plan
 
-[Net](/quest/m1/ffi-shape/net.md) (#4697) replaced every other root setter
+#4697 replaced every other root setter
 with config records but left these two. moq-net's server request takes its
 origins through consuming `with_publisher`/`with_subscriber` builders before
 `ok()`; a shared FFI handle can't consume itself, so the origins move onto

@@ -171,8 +171,8 @@ func (c *SnapshotConsumer) Next(ctx context.Context) (*stdjson.RawMessage, error
 	return &decoded, nil
 }
 
-// Values ranges over reconstructed JSON values until the track ends.
-func (c *SnapshotConsumer) Values(ctx context.Context) iter.Seq2[*stdjson.RawMessage, error] {
+// All ranges over reconstructed JSON values until the track ends.
+func (c *SnapshotConsumer) All(ctx context.Context) iter.Seq2[*stdjson.RawMessage, error] {
 	return bridge.Seq(ctx, c.Next)
 }
 
@@ -209,8 +209,8 @@ func (c *StreamConsumer) Next(ctx context.Context) (*stdjson.RawMessage, error) 
 	return &decoded, nil
 }
 
-// Values ranges over every JSON record until the track ends.
-func (c *StreamConsumer) Values(ctx context.Context) iter.Seq2[*stdjson.RawMessage, error] {
+// All ranges over every JSON record until the track ends.
+func (c *StreamConsumer) All(ctx context.Context) iter.Seq2[*stdjson.RawMessage, error] {
 	return bridge.Seq(ctx, c.Next)
 }
 

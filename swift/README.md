@@ -26,11 +26,11 @@ SPM resolves `MoqFFI` (and its prebuilt `MoqFFI.xcframework`, attached to the ma
 ```swift
 import Moq
 
-let client = Client()
+let client = try Client()
 let session = try await client.connect(to: "https://relay.example.com")
 
 // session.publish and session.consume are always populated: by whatever
-// origin you wired via setPublish / setConsume before connect, or by a fresh
+// origin you passed as Client(publish:consume:), or by a fresh
 // auto-created one. The duplex no-config path (the typical client) shares one
 // origin between both sides.
 let announced = try session.consume.announced(prefix: "demos/", filter: "*/camera")

@@ -23,9 +23,9 @@ func (s *Session) Closed(ctx context.Context) error {
 }
 
 // Status blocks until the connection status differs from the one this session
-// last reported. A client session reports StatusConnected first (the connect it
-// was built from), then follows the reconnect loop: StatusDisconnected while
-// redialing, StatusMigrating during a GOAWAY handover. It returns an error once
+// last reported. A client session reports ConnectionStatusConnected first (the connect it
+// was built from), then follows the reconnect loop: ConnectionStatusDisconnected while
+// redialing, ConnectionStatusMigrating during a GOAWAY handover. It returns an error once
 // the connection stops for good. A server-accepted session's only transition is
 // terminal, so Status waits for the close and returns its reason. Cancelling ctx
 // gives up waiting and shuts the session down.
@@ -40,7 +40,7 @@ func (s *Session) Status(ctx context.Context) (ConnectionStatus, error) {
 // Epoch is the connection epoch: 1 for the connect that built this session, one
 // more on each reconnect. A server-accepted session stays at 1.
 //
-// Pair it with Status to log each reconnect by number: a StatusConnected whose
+// Pair it with Status to log each reconnect by number: a ConnectionStatusConnected whose
 // Epoch grew is a reconnect. Like Status, it reports the current state, so a
 // drop that reconnects between reads is coalesced away.
 func (s *Session) Epoch() uint64 {
@@ -49,7 +49,7 @@ func (s *Session) Epoch() uint64 {
 
 // Stats snapshots the current connection statistics.
 func (s *Session) Stats() ConnectionStats {
-	return s.inner.Stats()
+	return connectionStatsFromFFI(s.inner.Stats())
 }
 
 // Bandwidth is the session's bandwidth allocator. Every call returns a handle

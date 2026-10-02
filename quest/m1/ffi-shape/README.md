@@ -57,7 +57,6 @@ work no child does:
 
 ## Required
 
-- [Net](/quest/m1/ffi-shape/net.md) - client and server take config records, snapshots are records, and the verbs match moq-net
 - [Request accept](/quest/m1/ffi-shape/request-accept.md) - a request's origins are `accept()` arguments, removing the last root setters
 - [Media](/quest/m1/ffi-shape/media.md) - catalog, import, and container consume move under `media`
 - [Codecs](/quest/m1/ffi-shape/codec.md) - audio and video encoders and decoders move under their own namespaces with one constructor shape

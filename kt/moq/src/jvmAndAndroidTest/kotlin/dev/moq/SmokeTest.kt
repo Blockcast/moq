@@ -52,9 +52,6 @@ private fun opusHead(): ByteArray =
         0,
     )
 
-/** Wall-clock bound on polling for a configuration race, so a regression fails instead of hanging. */
-private const val CONFIG_RACE_TIMEOUT_NS = 10_000_000_000L
-
 class SmokeTest {
     @Test
     fun `stream abort preserves protocol details`() = runTest {
@@ -80,7 +77,7 @@ class SmokeTest {
     @Test
     fun `connect fails fast and surfaces a MoqException`() = runTest {
         val ex = assertFailsWith<MoqException> {
-            Moq.connect("https://localhost:0/test", tlsVerify = false, reconnect = false)
+            Moq.connect("https://localhost:0/test", ClientConfig(tls = ClientTls(insecure = true), once = true))
         }
         assertTrue(
             ex.isShutdown || ex is MoqException.Connect || ex is MoqException.Url,
@@ -90,22 +87,23 @@ class SmokeTest {
 
     /**
      * The WebSocket fallback knobs reach the native client: a QUIC-only dial with
-     * no head start still fails fast, and a negative delay is refused up front
-     * rather than wrapping into an enormous one.
+     * no head start still fails fast, and an invalid value is refused up front
+     * as a config error rather than at the dial.
      */
     @Test
     fun `connect accepts the websocket fallback knobs`() = runTest {
         assertFailsWith<MoqException> {
             Moq.connect(
                 "https://localhost:0/test",
-                tlsVerify = false,
-                reconnect = false,
-                websocketEnabled = false,
-                websocketDelay = 0.milliseconds,
+                ClientConfig(
+                    tls = ClientTls(insecure = true),
+                    once = true,
+                    websocket = WebSocketConfig(enabled = false, delayUs = 0uL),
+                ),
             )
         }
-        assertFailsWith<IllegalArgumentException> {
-            Moq.connect("https://localhost:0/test", websocketDelay = (-1).milliseconds)
+        assertFailsWith<MoqException.Config> {
+            Moq.connect("https://localhost:0/test", ClientConfig(versions = listOf("moq-lite-99")))
         }
     }
 
@@ -139,6 +137,15 @@ class SmokeTest {
             maxUs = 10_000_000uL,
             timeoutUs = 0uL,
         )
+        val client: ClientConfig = ClientConfig(
+            tls = ClientTls(insecure = true),
+            quic = QuicConfig(maxStreams = 4096uL),
+            websocket = WebSocketConfig(enabled = false),
+            backoff = backoff,
+        )
+        val server: ServerConfig = ServerConfig(tls = ServerTls(generate = listOf("localhost")))
+        assertEquals(4096uL, client.quic.maxStreams)
+        assertEquals(listOf("localhost"), server.tls.generate)
         val status: ConnectionStatus = ConnectionStatus.CONNECTED
         assertEquals(4_000_000uL, hint.bitrate)
         assertEquals(8u, snapshot.deltaRatio)
@@ -334,7 +341,7 @@ class SmokeTest {
 
     @Test
     fun `server listens, publishes, and streams requests`() = runTest {
-        Server.listen("127.0.0.1:0", tlsGenerate = listOf("localhost")).use { server ->
+        Server.listen(ServerConfig(bind = "127.0.0.1:0", tls = ServerTls(generate = listOf("localhost")))).use { server ->
             assertTrue(server.localAddr.startsWith("127.0.0.1:"), "bound: ${server.localAddr}")
 
             val fingerprints = server.certFingerprints()
@@ -350,12 +357,12 @@ class SmokeTest {
 
     @Test
     fun `closing a server releases its port`() = runTest {
-        val first = Server.listen("127.0.0.1:0", tlsGenerate = listOf("localhost"))
+        val first = Server.listen(ServerConfig(bind = "127.0.0.1:0", tls = ServerTls(generate = listOf("localhost"))))
         val addr = first.localAddr
         first.close()
 
         // No retry: close() released the listening socket before returning.
-        Server.listen(addr, tlsGenerate = listOf("localhost")).use { rebound ->
+        Server.listen(ServerConfig(bind = addr, tls = ServerTls(generate = listOf("localhost")))).use { rebound ->
             assertEquals(addr, rebound.localAddr)
         }
     }
@@ -410,7 +417,7 @@ class SmokeTest {
                 broadcast.announce(Route())
                 consumer.announcedBroadcast("cam").available()
 
-                val listed = consumer.announcements()
+                val listed = consumer.announced(AnnounceConfig()).updates()
                     .takeWhile { it !is AnnounceEventLive }
                     .map { (it as AnnounceEventStart).announce.prefix }
                     .toList()
@@ -478,38 +485,20 @@ class SmokeTest {
     }
 
     /**
-     * Configuration must apply or fail: a setter racing an in-flight connect
-     * throws [MoqException.Busy], and one after [Client.cancel] throws
-     * [MoqException.Cancelled]. Mirrors `test_client_setters_fail_after_cancel`
-     * in `py/moq-rs/tests/test_server.py`.
+     * Cancelling the client aborts a connect parked on a server that never
+     * accepts, and the connect reports it as [MoqException.Cancelled].
      */
     @Test
-    fun `client setters are busy during connect and cancelled after`() = runTest {
-        Server.listen("127.0.0.1:0", tlsGenerate = listOf("localhost")).use { server ->
-            val client = Client()
-            client.setTlsVerify(false)
-            client.setBind("127.0.0.1:0")
+    fun `client cancel aborts a pending connect`() = runTest {
+        Server.listen(ServerConfig(bind = "127.0.0.1:0", tls = ServerTls(generate = listOf("localhost")))).use { server ->
             // A reconnecting client would redial instead of failing the connect.
-            client.setReconnect(false)
+            val client = Client(ClientConfig(bind = "127.0.0.1:0", tls = ClientTls(insecure = true), once = true))
 
-            // Nothing accepts the request, so connect parks holding the client lock.
             // runCatching, because a failed `async` would cancel the test scope
             // before `await` ever reported it.
             val connect = async { runCatching { client.connect("https://${server.localAddr}") } }
-
-            // The lock is taken on the ffi runtime thread, so poll until it is.
-            val deadline = System.nanoTime() + CONFIG_RACE_TIMEOUT_NS
-            var busy: Throwable? = null
-            while (busy == null && System.nanoTime() < deadline) {
-                busy = runCatching { client.setTlsVerify(false) }.exceptionOrNull()
-                yield()
-            }
-            assertTrue(busy is MoqException.Busy, "expected Busy while connecting, got: $busy")
-            assertFailsWith<MoqException.Busy> { client.setBind("127.0.0.1:0") }
-
+            yield()
             client.cancel()
-            assertFailsWith<MoqException.Cancelled> { client.setTlsVerify(true) }
-            assertFailsWith<MoqException.Cancelled> { client.setBind("127.0.0.1:0") }
 
             val connected = connect.await().exceptionOrNull()
             assertTrue(connected is MoqException.Cancelled, "expected a cancelled connect, got: $connected")

@@ -29,7 +29,11 @@ func (b *BroadcastConsumer) SubscribeTrack(
 	name string,
 	subscription *Subscription,
 ) (*TrackConsumer, error) {
-	inner, err := b.inner.SubscribeTrack(ctx, name, subscription)
+	sub, err := subscriptionFFI(subscription)
+	if err != nil {
+		return nil, err
+	}
+	inner, err := b.inner.SubscribeTrack(ctx, name, sub)
 	if err != nil {
 		return nil, err
 	}
@@ -70,7 +74,7 @@ func (b *BroadcastConsumer) FetchMediaGroup(
 
 // SubscribeMedia subscribes to a media track, decoded with the given container.
 // subscription tunes delivery priority, group range, and
-// the max age; pass nil for defaults. Raise Subscription.MaxAgeUs to
+// the max age; pass nil for defaults. Raise Subscription.MaxAge to
 // buffer instead of skipping a stalled group.
 func (b *BroadcastConsumer) SubscribeMedia(
 	ctx context.Context,
@@ -78,7 +82,11 @@ func (b *BroadcastConsumer) SubscribeMedia(
 	container Container,
 	subscription *Subscription,
 ) (*MediaConsumer, error) {
-	inner, err := b.inner.SubscribeMedia(ctx, name, container, subscription)
+	sub, err := subscriptionFFI(subscription)
+	if err != nil {
+		return nil, err
+	}
+	inner, err := b.inner.SubscribeMedia(ctx, name, container, sub)
 	if err != nil {
 		return nil, err
 	}
@@ -162,8 +170,8 @@ func (m *MediaConsumer) Next(ctx context.Context) (*MediaFrame, error) {
 	return bridge.Call(ctx, m.inner.Cancel, m.inner.Next)
 }
 
-// Frames ranges over frames until the track ends or the loop breaks.
-func (m *MediaConsumer) Frames(ctx context.Context) iter.Seq2[*MediaFrame, error] {
+// All ranges over frames until the track ends or the loop breaks.
+func (m *MediaConsumer) All(ctx context.Context) iter.Seq2[*MediaFrame, error] {
 	return bridge.Seq(ctx, m.Next)
 }
 
@@ -188,8 +196,8 @@ func (m *MediaGroupConsumer) Next(ctx context.Context) (*MediaFrame, error) {
 	return bridge.Call(ctx, m.inner.Cancel, m.inner.Next)
 }
 
-// Frames ranges over decoded frames until the group ends or the loop breaks.
-func (m *MediaGroupConsumer) Frames(ctx context.Context) iter.Seq2[*MediaFrame, error] {
+// All ranges over decoded frames until the group ends or the loop breaks.
+func (m *MediaGroupConsumer) All(ctx context.Context) iter.Seq2[*MediaFrame, error] {
 	return bridge.Seq(ctx, m.Next)
 }
 
@@ -210,11 +218,12 @@ func (g *GroupConsumer) Sequence() uint64 {
 
 // ReadFrame returns the next timestamped frame, or (nil, nil) when the group ends.
 func (g *GroupConsumer) ReadFrame(ctx context.Context) (*Frame, error) {
-	return bridge.Call(ctx, g.inner.Cancel, g.inner.ReadFrame)
+	frame, err := bridge.Call(ctx, g.inner.Cancel, g.inner.ReadFrame)
+	return frameFromFFI(frame), err
 }
 
-// Frames ranges over timestamped frames until the group ends or the loop breaks.
-func (g *GroupConsumer) Frames(ctx context.Context) iter.Seq2[*Frame, error] {
+// All ranges over timestamped frames until the group ends or the loop breaks.
+func (g *GroupConsumer) All(ctx context.Context) iter.Seq2[*Frame, error] {
 	return bridge.Seq(ctx, g.ReadFrame)
 }
 
@@ -270,23 +279,35 @@ func (t *TrackConsumer) NextGroup(ctx context.Context) (*GroupConsumer, error) {
 // Cancelling the context cancels this consumer, not just this call: see
 // package docs.
 func (t *TrackConsumer) ReadFrame(ctx context.Context) (*Frame, error) {
-	return bridge.Call(ctx, t.inner.Cancel, t.inner.ReadFrame)
+	frame, err := bridge.Call(ctx, t.inner.Cancel, t.inner.ReadFrame)
+	return frameFromFFI(frame), err
 }
 
 // RecvDatagram returns the next best-effort datagram in arrival order, or
 // (nil, nil) when the track ends.
 func (t *TrackConsumer) RecvDatagram(ctx context.Context) (*Datagram, error) {
-	return bridge.Call(ctx, t.inner.Cancel, t.inner.RecvDatagram)
+	datagram, err := bridge.Call(ctx, t.inner.Cancel, t.inner.RecvDatagram)
+	return datagramFromFFI(datagram), err
 }
 
 // Info returns the publisher-side track properties learned during subscription.
 func (t *TrackConsumer) Info() (TrackInfo, error) {
-	return t.inner.Info()
+	info, err := t.inner.Info()
+	if err != nil {
+		return TrackInfo{}, err
+	}
+	return trackInfoFromFFI(info), nil
 }
 
-// Update changes this subscriber's delivery preferences.
-func (t *TrackConsumer) Update(subscription Subscription) {
-	t.inner.Update(subscription)
+// Update changes this subscriber's delivery preferences. It fails only on a
+// negative MaxAge.
+func (t *TrackConsumer) Update(subscription Subscription) error {
+	sub, err := subscription.ffi()
+	if err != nil {
+		return err
+	}
+	t.inner.Update(sub)
+	return nil
 }
 
 // Groups ranges over groups in sequence order.
@@ -320,8 +341,8 @@ func (a *AudioConsumer) Next(ctx context.Context) (*AudioFrame, error) {
 	return bridge.Call(ctx, a.inner.Cancel, a.inner.Next)
 }
 
-// Frames ranges over audio frames until the track ends or the loop breaks.
-func (a *AudioConsumer) Frames(ctx context.Context) iter.Seq2[*AudioFrame, error] {
+// All ranges over audio frames until the track ends or the loop breaks.
+func (a *AudioConsumer) All(ctx context.Context) iter.Seq2[*AudioFrame, error] {
 	return bridge.Seq(ctx, a.Next)
 }
 
@@ -351,8 +372,8 @@ func (v *VideoConsumer) Next(ctx context.Context) (*VideoDecodedFrame, error) {
 	return &VideoDecodedFrame{inner: res}, nil
 }
 
-// Frames ranges over decoded frames until the track ends or the loop breaks.
-func (v *VideoConsumer) Frames(ctx context.Context) iter.Seq2[*VideoDecodedFrame, error] {
+// All ranges over decoded frames until the track ends or the loop breaks.
+func (v *VideoConsumer) All(ctx context.Context) iter.Seq2[*VideoDecodedFrame, error] {
 	return bridge.Seq(ctx, v.Next)
 }
 
@@ -413,8 +434,8 @@ func (c *CatalogConsumer) Next(ctx context.Context) (*Catalog, error) {
 	return bridge.Call(ctx, c.inner.Cancel, c.inner.Next)
 }
 
-// Updates ranges over catalog updates until the track ends or the loop breaks.
-func (c *CatalogConsumer) Updates(ctx context.Context) iter.Seq2[*Catalog, error] {
+// All ranges over catalog updates until the track ends or the loop breaks.
+func (c *CatalogConsumer) All(ctx context.Context) iter.Seq2[*Catalog, error] {
 	return bridge.Seq(ctx, c.Next)
 }
 

@@ -95,11 +95,13 @@ func (r *Request) Cancel() {
 type ServerOption func(*serverConfig)
 
 type serverConfig struct {
-	tlsCert     []string
-	tlsKey      []string
-	tlsGenerate []string
-	publish     *OriginProducer
-	subscribe   *OriginProducer
+	tlsCert        []string
+	tlsKey         []string
+	tlsGenerate    []string
+	versions       []string
+	quicMaxStreams *uint64
+	publish        *OriginProducer
+	consume        *OriginProducer
 }
 
 // WithTLSCert sets paths to TLS certificate chains.
@@ -117,24 +119,35 @@ func WithTLSGenerate(hostnames ...string) ServerOption {
 	return func(c *serverConfig) { c.tlsGenerate = hostnames }
 }
 
+// WithServerVersions restricts the protocol versions accepted, spelled like
+// "moq-lite-03". By default every supported version is accepted.
+func WithServerVersions(versions ...string) ServerOption {
+	accepted := append([]string(nil), versions...)
+	return func(c *serverConfig) { c.versions = accepted }
+}
+
+// WithServerQUICMaxStreams caps the concurrent QUIC streams each peer may open
+// toward this server (default 1024).
+func WithServerQUICMaxStreams(maxStreams uint64) ServerOption {
+	return func(c *serverConfig) { c.quicMaxStreams = &maxStreams }
+}
+
 // WithServerPublishOrigin sets the origin whose broadcasts are served to
 // incoming sessions. Omit both origin options to get a shared internal origin.
 func WithServerPublishOrigin(o *OriginProducer) ServerOption {
 	return func(c *serverConfig) { c.publish = o }
 }
 
-// WithServerSubscribeOrigin sets the origin that receives broadcasts published
+// WithServerConsumeOrigin sets the origin that receives broadcasts published
 // by incoming sessions.
-func WithServerSubscribeOrigin(o *OriginProducer) ServerOption {
-	return func(c *serverConfig) { c.subscribe = o }
+func WithServerConsumeOrigin(o *OriginProducer) ServerOption {
+	return func(c *serverConfig) { c.consume = o }
 }
 
 // Server accepts incoming sessions with automatic origin wiring.
 type Server struct {
 	inner         *ffi.MoqServer
-	origin        *OriginProducer
 	publishOrigin *OriginProducer
-	consumeOrigin *OriginProducer
 	localAddr     string
 	closeOnce     sync.Once
 }
@@ -145,39 +158,34 @@ func Listen(ctx context.Context, bind string, opts ...ServerOption) (*Server, er
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-
-	s := &Server{}
-	if cfg.publish == nil && cfg.subscribe == nil {
-		s.origin = NewOriginProducer()
-		s.publishOrigin = s.origin
-		s.consumeOrigin = s.origin
-	} else {
-		s.publishOrigin = cfg.publish
-		s.consumeOrigin = cfg.subscribe
+	if cfg.publish == nil && cfg.consume == nil {
+		shared := NewOriginProducer()
+		cfg.publish = shared
+		cfg.consume = shared
 	}
 
-	inner := ffi.NewMoqServer()
-	err := inner.SetBind(bind)
-	if err == nil && len(cfg.tlsCert) > 0 {
-		err = inner.SetTlsCert(cfg.tlsCert)
+	config := ffi.MoqServerConfig{
+		Bind:     &bind,
+		Versions: cfg.versions,
+		Tls: ffi.MoqServerTls{
+			Cert:     cfg.tlsCert,
+			Key:      cfg.tlsKey,
+			Generate: cfg.tlsGenerate,
+		},
+		Quic: ffi.MoqQuicConfig{MaxStreams: cfg.quicMaxStreams},
 	}
-	if err == nil && len(cfg.tlsKey) > 0 {
-		err = inner.SetTlsKey(cfg.tlsKey)
+	if cfg.publish != nil {
+		config.Publish = &cfg.publish.inner
 	}
-	if err == nil && len(cfg.tlsGenerate) > 0 {
-		err = inner.SetTlsGenerate(cfg.tlsGenerate)
+	if cfg.consume != nil {
+		config.Consume = &cfg.consume.inner
 	}
-	if err == nil && s.publishOrigin != nil {
-		err = inner.SetPublish(&s.publishOrigin.inner)
-	}
-	if err == nil && s.consumeOrigin != nil {
-		err = inner.SetConsume(&s.consumeOrigin.inner)
-	}
+
+	inner, err := ffi.NewMoqServer(config)
 	if err != nil {
-		inner.Cancel()
 		return nil, err
 	}
-	s.inner = inner
+	s := &Server{inner: inner, publishOrigin: cfg.publish}
 
 	addr, err := bridge.Call(ctx, inner.Cancel, inner.Listen)
 	if err != nil {
@@ -222,9 +230,9 @@ func (s *Server) Accept(ctx context.Context) (*Request, error) {
 	return &Request{inner: *res}, nil
 }
 
-// Requests ranges over incoming requests until the server stops or the loop
+// All ranges over incoming requests until the server stops or the loop
 // breaks. Each request must be answered with Accept or Reject.
-func (s *Server) Requests(ctx context.Context) iter.Seq2[*Request, error] {
+func (s *Server) All(ctx context.Context) iter.Seq2[*Request, error] {
 	return func(yield func(*Request, error) bool) {
 		for {
 			req, err := s.Accept(ctx)
@@ -249,7 +257,7 @@ func (s *Server) Requests(ctx context.Context) iter.Seq2[*Request, error] {
 //
 // To inspect or reject requests, range over Requests instead:
 //
-//	for req, err := range server.Requests(ctx) {
+//	for req, err := range server.All(ctx) {
 //	    if err != nil {
 //	        return err
 //	    }

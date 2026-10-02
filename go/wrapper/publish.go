@@ -233,7 +233,11 @@ func (b *BroadcastProducer) EncodeVideo(input VideoEncoderInput, output VideoEnc
 // codec validation. info sets track properties (priority, cache, timescale);
 // pass nil for defaults.
 func (b *BroadcastProducer) PublishTrack(name string, info *TrackInfo) (*TrackProducer, error) {
-	inner, err := b.inner.PublishTrack(name, info)
+	ffiInfo, err := trackInfoFFI(info)
+	if err != nil {
+		return nil, err
+	}
+	inner, err := b.inner.PublishTrack(name, ffiInfo)
 	if err != nil {
 		return nil, err
 	}
@@ -283,8 +287,8 @@ func (d *BroadcastDynamic) RequestedTrack(ctx context.Context) (*TrackRequest, e
 	return &TrackRequest{inner: inner}, nil
 }
 
-// Requests ranges over subscriber-requested tracks until the dynamic source ends.
-func (d *BroadcastDynamic) Requests(ctx context.Context) iter.Seq2[*TrackRequest, error] {
+// All ranges over subscriber-requested tracks until the dynamic source ends.
+func (d *BroadcastDynamic) All(ctx context.Context) iter.Seq2[*TrackRequest, error] {
 	return bridge.Seq(ctx, d.RequestedTrack)
 }
 
@@ -314,7 +318,11 @@ func (r *TrackRequest) Dynamic() (*TrackDynamic, error) {
 
 // Accept accepts the request as a raw track. For media, use PublishAudioOnTrack or PublishVideoOnTrack.
 func (r *TrackRequest) Accept(info *TrackInfo) (*TrackProducer, error) {
-	inner, err := r.inner.Accept(info)
+	ffiInfo, err := trackInfoFFI(info)
+	if err != nil {
+		return nil, err
+	}
+	inner, err := r.inner.Accept(ffiInfo)
 	if err != nil {
 		return nil, err
 	}
@@ -358,7 +366,11 @@ func (m *MediaProducer) Unused(ctx context.Context) error {
 // WriteFrame appends frame to the media track. The importer derives keyframe status from
 // the bitstream, so a Frame carries only the payload and its timestamp.
 func (m *MediaProducer) WriteFrame(frame Frame) error {
-	return m.inner.WriteFrame(frame)
+	f, err := frame.ffi()
+	if err != nil {
+		return err
+	}
+	return m.inner.WriteFrame(f)
 }
 
 // Flush records a local encoder's frame handoff on the broadcast media clock.
@@ -492,28 +504,13 @@ type TrackProducer struct {
 	inner *ffi.MoqTrackProducer
 }
 
-// Name is the track name.
-func (t *TrackProducer) Name() (string, error) {
-	return t.inner.Name()
-}
-
-// Demand returns a watch-only handle to whether the track has subscribers.
+// Demand returns a watch-only handle to the track's name and whether it has subscribers.
 func (t *TrackProducer) Demand() (*TrackDemand, error) {
 	inner, err := t.inner.Demand()
 	if err != nil {
 		return nil, err
 	}
 	return &TrackDemand{inner: inner}, nil
-}
-
-// Used blocks until the track has at least one active subscriber. Prefer Demand.
-func (t *TrackProducer) Used(ctx context.Context) error {
-	return t.inner.Used(ctx)
-}
-
-// Unused blocks until the track has no active subscribers. Prefer Demand.
-func (t *TrackProducer) Unused(ctx context.Context) error {
-	return t.inner.Unused(ctx)
 }
 
 // Dynamic serves fetches for groups that are not currently cached.
@@ -545,13 +542,21 @@ func (t *TrackProducer) CreateGroup(sequence uint64) (*GroupProducer, error) {
 
 // WriteFrame writes frame as a single-frame group.
 func (t *TrackProducer) WriteFrame(frame Frame) error {
-	return t.inner.WriteFrame(frame)
+	f, err := frame.ffi()
+	if err != nil {
+		return err
+	}
+	return t.inner.WriteFrame(f)
 }
 
 // AppendDatagram sends frame as a best-effort datagram and returns the sequence number
 // assigned to it. Payloads are capped at 1200 bytes. There is no stream fallback.
 func (t *TrackProducer) AppendDatagram(frame Frame) (uint64, error) {
-	return t.inner.AppendDatagram(frame)
+	f, err := frame.ffi()
+	if err != nil {
+		return 0, err
+	}
+	return t.inner.AppendDatagram(f)
 }
 
 // Abort closes the track with an application error code.
@@ -562,7 +567,11 @@ func (t *TrackProducer) Abort(errorCode uint16) error {
 // Consume reads directly from this producer's track. subscription tunes delivery
 // (delivery priority, group range); pass nil for defaults.
 func (t *TrackProducer) Consume(subscription *Subscription) (*TrackConsumer, error) {
-	inner, err := t.inner.Consume(subscription)
+	sub, err := subscriptionFFI(subscription)
+	if err != nil {
+		return nil, err
+	}
+	inner, err := t.inner.Consume(sub)
 	if err != nil {
 		return nil, err
 	}
@@ -601,7 +610,11 @@ func (g *GroupProducer) Consume() (*GroupConsumer, error) {
 
 // WriteFrame appends frame to the group.
 func (g *GroupProducer) WriteFrame(frame Frame) error {
-	return g.inner.WriteFrame(frame)
+	f, err := frame.ffi()
+	if err != nil {
+		return err
+	}
+	return g.inner.WriteFrame(f)
 }
 
 // Finish marks the group complete. The handle remains so Abort can still run.
@@ -628,8 +641,8 @@ func (d *TrackDynamic) RequestedGroup(ctx context.Context) (*GroupRequest, error
 	return &GroupRequest{inner: inner}, nil
 }
 
-// Requests ranges over uncached group requests until the dynamic source ends.
-func (d *TrackDynamic) Requests(ctx context.Context) iter.Seq2[*GroupRequest, error] {
+// All ranges over uncached group requests until the dynamic source ends.
+func (d *TrackDynamic) All(ctx context.Context) iter.Seq2[*GroupRequest, error] {
 	return bridge.Seq(ctx, d.RequestedGroup)
 }
 

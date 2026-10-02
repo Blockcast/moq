@@ -170,24 +170,15 @@ fun GroupConsumer.frames(): Flow<Frame> = flow {
 }
 
 /**
- * Stream of announce events matching [config]. An [AnnounceEventLive] follows the
- * routes live at subscribe time, so a collector can gather what is live and stop.
+ * Stream of announce events, as `announced(config).updates()`. An
+ * [AnnounceEventLive] follows the routes live at subscribe time, so a collector
+ * can gather what is live and stop.
  *
- * Acquires the subscription on first collection and cancels it when collection
- * ends, so callers never touch the underlying handle. Use the raw
- * `announced(config)` if you need to hold and cancel the handle yourself.
+ * Collect it once: the handle is cancelled when collection ends, however it ends.
  */
-fun OriginConsumer.announcements(config: AnnounceConfig = AnnounceConfig()): Flow<AnnounceEvent> {
-    val consumer = this
-    return flow {
-        val announced = consumer.announced(config)
-        try {
-            while (true) {
-                currentCoroutineContext().ensureActive()
-                emit(announced.next() ?: break)
-            }
-        } finally {
-            announced.cancel()
-        }
+fun AnnounceConsumer.updates(): Flow<AnnounceEvent> = flow {
+    while (true) {
+        currentCoroutineContext().ensureActive()
+        emit(next() ?: break)
     }
-}
+}.onCompletion { cancel() }

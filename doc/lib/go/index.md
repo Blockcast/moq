@@ -60,7 +60,7 @@ for event, err := range announced.All(ctx) {
 // opusInit, packet, pts, and rgba come from your encoder or capture source.
 broadcast, _ := client.CreateBroadcast("my-stream.hang")
 audio, _ := broadcast.PublishAudio(moq.AudioFormatOpus, opusInit)
-_ = audio.WriteFrame(moq.Frame{Payload: packet, TimestampUs: 20_000})
+_ = audio.WriteFrame(moq.Frame{Payload: packet, Timestamp: 20 * time.Millisecond})
 
 track := "camera"
 video, _ := broadcast.EncodeVideo(
@@ -113,7 +113,8 @@ Sessions reconnect with backoff when the transport drops and re-announce local
 broadcasts, so a worker rides out a relay restart. `Session().Epoch()` counts
 the connections, 1 on the first, pairing with `Session().Status(ctx)` to log
 each reconnect by number; `moq.WithBackoff` tunes the pacing, with
-`moq.RetryForever` as the timeout; and `moq.WithQUICMaxStreams` raises the
+`moq.RetryForever` as the timeout; `moq.WithVersions` pins the protocol versions
+offered; and `moq.WithQUICMaxStreams` raises the
 peer's inbound stream cap for a subscriber to many tracks.
 
 The [WebSocket fallback](/concept/transport#websocket-fallback) races QUIC after
@@ -124,14 +125,16 @@ QUIC-only relay, and `moq.WithWebSocketDelay` changes the head start.
 returns the closed `moq.Transport` enum.
 `Request.SetPublish`/`SetConsume` return an error if the request is already
 answered, cancelled, or currently accepting; `ErrBusy` is the race with an
-in-flight Accept. JSON tracks live in `moq.dev/moq/json` (import it as `moqjson`):
+in-flight Accept. An invalid option fails `Dial` or `Listen` with `moq.ErrConfig`.
+Every live stream ranges with `All(ctx)`; a `TrackConsumer` also offers
+`Groups`, `GroupsAsArrived`, and `Datagrams`. JSON tracks live in `moq.dev/moq/json` (import it as `moqjson`):
 `moqjson.NewSnapshotProducer(broadcast, track, options)` takes over a `TrackProducer`
 and `moqjson.NewSnapshotConsumer(track, options)` a `TrackConsumer`, and they take
 anything `encoding/json` handles and return `json.RawMessage`. The rest
 of the [shared feature list](/lib/#what-every-binding-can-do) maps one to
-one: `FetchGroup`/`FetchMediaGroup`, `Dynamic()` with `Requests(ctx)`,
+one: `FetchGroup`/`FetchMediaGroup`, `Dynamic()` with `All(ctx)`,
 `Session.Bandwidth()` to divide the send estimate,
-`AppendDatagram`/`Datagrams(ctx)`, `SetCatalogSection`, `Demand()` for `Used`/`Unused`,
+`AppendDatagram`/`Datagrams(ctx)`, `SetCatalogSection`, `Demand()` for `Name`, `Used`, and `Unused`,
 `Session().Stats()`. `moq.IsAuthError` and `moq.IsShutdown` classify errors. `moq.ProtocolError(err)` is the structured protocol failure (scope, verbatim code, kind) when the peer sent one.
 
 Each `VideoDecodedFrame` from `DecodeVideo` owns its decoded picture until
@@ -153,7 +156,7 @@ available, which is not the same as zero.
 
 | Field | Unit | Meaning |
 | --- | --- | --- |
-| `RttUs` | microseconds | Smoothed round-trip time. |
+| `RTT` | `time.Duration` | Smoothed round-trip time. |
 | `EstimatedSendRateBps` | bits per second | Send bandwidth from the congestion controller. |
 | `EstimatedRecvRateBps` | bits per second | Receive bandwidth from MoQ PROBE. |
 | `BytesSent` | bytes | Total sent, including retransmissions and overhead. |

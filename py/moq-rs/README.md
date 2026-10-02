@@ -114,7 +114,7 @@ origin = moq.OriginProducer()
 client = moq.Client(
     "https://cdn.moq.dev/anon",
     publish=origin,
-    subscribe=origin,
+    consume=origin,
 )
 ```
 
@@ -122,16 +122,17 @@ client = moq.Client(
 
 ### Connection
 
-- **`connect(url, *, tls_verify=True, tls_roots=None, tls_system_roots=None, tls_fingerprints=None, tls_cert=None, tls_key=None, bind=None, max_streams=None, reconnect=True, backoff=None, publish=None, subscribe=None)`**. Shorthand for `Client(...)`; use as `async with moq.connect(url) as client:`.
-- **`Client(url, *, tls_verify=True, tls_roots=None, tls_system_roots=None, tls_fingerprints=None, tls_cert=None, tls_key=None, bind=None, max_streams=None, reconnect=True, backoff=None, publish=None, subscribe=None)`**. Async context manager for connecting to a relay.
+- **`connect(url, *, tls_verify=True, tls_roots=(), tls_system_roots=None, tls_fingerprints=(), tls_cert=None, tls_key=None, bind=None, versions=(), max_streams=None, websocket_enabled=None, websocket_delay=None, reconnect=True, backoff=None, publish=None, consume=None)`**. Shorthand for `Client(...)`; use as `async with moq.connect(url) as client:`.
+- **`Client(url, *, ...)`**, taking the same arguments. Async context manager for connecting to a relay.
   - `tls_roots`. PEM root certificate file path(s) to trust instead of the system roots.
   - `tls_system_roots`. Whether to trust platform roots in addition to custom roots.
   - `tls_fingerprints`. Hex SHA-256 fingerprint(s) to pin the peer's certificate to, the native equivalent of `serverCertificateHashes`. Accepts the values a server reports via `cert_fingerprints()`, so you can trust a self-signed certificate without `tls_verify=False`.
   - `tls_cert`, `tls_key`. Paired PEM certificate chain and private key paths for mTLS.
   - `max_streams`. Raise the peer's inbound stream cap.
+  - `versions`. Protocol versions to offer, most preferred first (e.g. `"moq-lite-03"`); empty offers all.
   - `reconnect`, `backoff`. Redial with a `Backoff` when the transport drops; `reconnect=False` dials once.
   - `.session`. The established `Session` (or `None` before connecting / after exit).
-- **`Server(bind="[::]:443", *, tls_cert=(), tls_key=(), tls_generate=(), publish=None, subscribe=None)`**. Async context manager + async iterator of incoming `Request`s.
+- **`Server(bind="[::]:443", *, tls_cert=(), tls_key=(), tls_generate=(), versions=(), max_streams=None, publish=None, consume=None)`**. Async context manager + async iterator of incoming `Request`s.
   - `.local_addr`. The bound address (useful when binding to port `0`).
   - `.cert_fingerprints()`. SHA-256 fingerprints of the configured TLS certificates, for `serverCertificateHashes` browser cert pinning.
   - `.create_broadcast(path) → BroadcastProducer`. Create an unannounced broadcast, invisible to everyone; `announce()` makes it discoverable and reachable; `close()` ends it.
@@ -166,12 +167,12 @@ client = moq.Client(
   - `.cut()` / `.seek(sequence)` draw a group boundary (audio has none of its own)
   - `.finish()`
 - **`TrackProducer` / `GroupProducer`**. Write raw payloads with no codec parsing.
-  - `.write_frame(payload, timestamp_us=0)` writes a payload with a presentation timestamp in microseconds.
+  - `.write_frame(payload, timestamp=timedelta(0))` writes a payload with its presentation timestamp.
   - `.create_group(sequence)` creates a sparse or replayed group at an explicit sequence.
   - `.finish()` ends at the live edge; the handle remains so `.abort(error_code)` can still run.
   - `.finish_at(final_sequence)` declares the first group that will never be produced while leaving lower groups writable.
   - `.abort(error_code)` terminates the track or group with an application error.
-  - `.append_datagram(payload, timestamp_us=0) -> sequence` (`TrackProducer`) sends a best-effort datagram. Payloads are capped at 1200 bytes and there is no stream fallback.
+  - `.append_datagram(payload, timestamp=timedelta(0)) -> sequence` (`TrackProducer`) sends a best-effort datagram. Payloads are capped at 1200 bytes and there is no stream fallback.
 
 ### Subscribing
 
@@ -212,9 +213,9 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
 ### Types
 
 - **`Catalog`**. `.audio: dict[str, Audio]`, `.video: dict[str, Video]`, `.display`, `.rotation`, `.flip`.
-- **`Frame`**. `.payload: bytes`, `.timestamp_us: int`. The unit of every write and every raw read.
+- **`Frame`**. `.payload: bytes`, `.timestamp: timedelta`. The unit of every write and every raw read.
 - **`MediaFrame`**. `.payload: bytes`, `.timestamp_us: int`, `.keyframe: bool`. Returned by media subscriptions. `keyframe` marks a group start or video keyframe; for audio it is true only at a group start.
-- **`Datagram`**. `.sequence: int`, `.timestamp_us: int`, `.payload: bytes`. Delivered only on datagram-capable transports and lite-05 or newer moq-lite.
+- **`Datagram`**. `.sequence: int`, `.timestamp: timedelta`, `.payload: bytes`. Delivered only on datagram-capable transports and lite-05 or newer moq-lite.
 - **`Audio`**. `.codec`, `.sample_rate`, `.channel_count`, `.bitrate`, `.description`.
 - **`Video`**. `.codec`, `.coded: Dimensions`, `.display_aspect`, `.bitrate`, `.stalled`, `.framerate`, `.description`. A true `.stalled` recommends temporarily avoiding the rendition without making it unavailable.
 - **`Subscription`**. Subscriber delivery preferences: priority, staleness, and optional group range.

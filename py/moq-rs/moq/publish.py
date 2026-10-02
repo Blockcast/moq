@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 from moq_ffi import (
@@ -13,6 +14,7 @@ from moq_ffi import (
     MoqContainerInit,
     MoqContainerProducer,
     MoqContainerStreamProducer,
+    MoqFrame,
     MoqGroupProducer,
     MoqGroupRequest,
     MoqMediaProducer,
@@ -25,6 +27,7 @@ from moq_ffi import (
     MoqVideoProducer,
 )
 
+from ._records import _subscription, _track_info
 from .types import (
     AudioEncoderInput,
     AudioEncoderOutput,
@@ -88,7 +91,7 @@ class MediaProducer:
 
     def write_frame(self, payload: bytes, timestamp_us: int = 0) -> None:
         """Write one encoded frame with a presentation timestamp in microseconds."""
-        self._inner.write_frame(Frame(payload=payload, timestamp_us=timestamp_us))
+        self._inner.write_frame(MoqFrame(payload=payload, timestamp_us=timestamp_us))
 
     def flush(self, timestamp_us: int) -> None:
         """Record a local encoder's frame handoff on the broadcast media clock.
@@ -216,9 +219,9 @@ class GroupProducer:
 
         return GroupConsumer(self._inner.consume())
 
-    def write_frame(self, payload: bytes, timestamp_us: int = 0) -> None:
-        """Write a frame with a presentation timestamp in microseconds."""
-        self._inner.write_frame(Frame(payload=payload, timestamp_us=timestamp_us))
+    def write_frame(self, payload: bytes, timestamp: timedelta = timedelta(0)) -> None:
+        """Write a frame with its presentation timestamp."""
+        self._inner.write_frame(Frame(payload, timestamp)._ffi())
 
     def finish(self) -> None:
         """Close this group cleanly, marking it complete for subscribers.
@@ -271,22 +274,9 @@ class TrackProducer:
     def __init__(self, inner: MoqTrackProducer) -> None:
         self._inner = inner
 
-    @property
-    def name(self) -> str:
-        """The track name."""
-        return self._inner.name()
-
     def demand(self) -> TrackDemand:
-        """A watch-only handle to whether this track has subscribers."""
+        """A watch-only handle to this track's name and whether it has subscribers."""
         return TrackDemand(self._inner.demand())
-
-    async def used(self) -> None:
-        """Wait until this track has at least one active subscriber. Prefer :meth:`demand`."""
-        await self._inner.used()
-
-    async def unused(self) -> None:
-        """Wait until this track has no active subscribers. Prefer :meth:`demand`."""
-        await self._inner.unused()
 
     def dynamic(self) -> TrackDynamic:
         """Serve fetches for groups that are not currently cached."""
@@ -300,17 +290,17 @@ class TrackProducer:
         """Create a group with an explicit sequence number."""
         return GroupProducer(self._inner.create_group(sequence))
 
-    def write_frame(self, payload: bytes, timestamp_us: int = 0) -> None:
-        """Write a single-frame group with a timestamp in microseconds."""
-        self._inner.write_frame(Frame(payload=payload, timestamp_us=timestamp_us))
+    def write_frame(self, payload: bytes, timestamp: timedelta = timedelta(0)) -> None:
+        """Write a single-frame group with its presentation timestamp."""
+        self._inner.write_frame(Frame(payload, timestamp)._ffi())
 
-    def append_datagram(self, payload: bytes, timestamp_us: int = 0) -> int:
+    def append_datagram(self, payload: bytes, timestamp: timedelta = timedelta(0)) -> int:
         """Send a best-effort datagram and return its sequence number.
 
         Payloads are capped at 1200 bytes. Datagram delivery requires a datagram-capable
         transport and wire version; there is no stream fallback.
         """
-        return self._inner.append_datagram(Frame(payload=payload, timestamp_us=timestamp_us))
+        return self._inner.append_datagram(Frame(payload, timestamp)._ffi())
 
     def consume(self, subscription: Subscription | None = None) -> TrackConsumer:
         """Create a consumer that reads directly from this producer's track.
@@ -319,7 +309,7 @@ class TrackProducer:
         """
         from .subscribe import TrackConsumer
 
-        return TrackConsumer(self._inner.consume(subscription))
+        return TrackConsumer(self._inner.consume(_subscription(subscription)))
 
     def abort(self, error_code: int) -> None:
         """Abort this track with an application error code."""
@@ -358,7 +348,7 @@ class TrackRequest:
 
         ``info`` fixes the track's timescale, priority, and cache; omit for defaults.
         """
-        return TrackProducer(self._inner.accept(info))
+        return TrackProducer(self._inner.accept(_track_info(info)))
 
     def dynamic(self) -> TrackDynamic:
         """Create a fetch handler before accepting this requested track."""
@@ -734,7 +724,7 @@ class BroadcastProducer:
     def publish_track(self, name: str, info: TrackInfo | None = None) -> TrackProducer:
         """Create a track. Send any bytes, no codec validation. ``info`` sets track
         properties (priority, cache, timescale); omit for defaults."""
-        return TrackProducer(self._inner.publish_track(name, info))
+        return TrackProducer(self._inner.publish_track(name, _track_info(info)))
 
     def set_catalog_section(self, name: str, value: Any) -> None:
         """Set or replace an untyped application section in the catalog.
