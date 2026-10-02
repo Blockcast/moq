@@ -9,8 +9,10 @@ moq-ffi and every wrapper, so the root namespace has no setters left.
 ## Plan
 
 [Net](/quest/m1/ffi-shape/net.md) (#4697) replaced every other root setter
-with config records but left these two. Mirror the shape of moq-net's
-server-side request accept. Use one optional argument per origin, or a small
+with config records but left these two. moq-net's server request takes its
+origins through consuming `with_publisher`/`with_subscriber` builders before
+`ok()`; a shared FFI handle can't consume itself, so the origins move onto
+`accept()` instead. Use one optional argument per origin, or a small
 record if the wrapper idioms read better with one. Update the `doc/lib`
 samples and the server examples in every binding.
 
