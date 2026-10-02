@@ -523,7 +523,8 @@ export class Consumer {
 						this.#floor = this.#start?.timestamp;
 						this.#start = { group: seq, timestamp: frame.timestamp };
 					}
-					if (this.#floor !== undefined && frame.timestamp < this.#floor) {
+					// Delayed history has its own earlier floor; this bound belongs to #start.group.
+					if (seq === this.#start.group && this.#floor !== undefined && frame.timestamp < this.#floor) {
 						this.#abort(new Error("frame timestamp is below the previous group start"));
 						throw this.#error;
 					}
