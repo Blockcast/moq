@@ -4354,6 +4354,7 @@ dependencies = [
  "uniffi",
  "url",
  "web-async",
+ "web-transport-trait",
  "web-transport-wasm",
 ]
 
@@ -4507,7 +4508,6 @@ dependencies = [
  "tracing",
  "wasm-bindgen-test",
  "web-async",
- "web-transport-trait",
 ]
 
 [[package]]
@@ -4964,16 +4964,19 @@ dependencies = [
 name = "moq-wasm"
 version = "0.0.0"
 dependencies = [
+ "bytes",
  "console_error_panic_hook",
  "futures",
  "getrandom 0.4.3",
  "js-sys",
  "moq-net",
+ "thiserror 2.0.21",
  "tracing-wasm",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-async",
+ "web-transport-trait",
  "web-transport-wasm",
 ]
 
