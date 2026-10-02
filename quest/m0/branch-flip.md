@@ -92,8 +92,9 @@ Sequence:
    `main`, so they stop running there.
 4. Admin, back to back, run by the agent only after the maintainer's
    go-ahead in chat: rename `main` to `release`, rename `dev` to `main`, set
-   the default branch, create the `release` ruleset, delete the `dev`
-   ruleset, retarget open PRs. Release-plz PRs (such as #4596) stay on
+   the default branch, create the `release` ruleset, drop linear history
+   from the default-branch ruleset, delete the `dev` ruleset, retarget open
+   PRs. Release-plz PRs (such as #4596) stay on
    `release`. Dry-run first and show the PR list with each PR's class. The
    maintainer points the Cloudflare docs and demo builds at `release`.
 5. Verify: a no-op push to `main` publishes nothing; release-plz runs on
