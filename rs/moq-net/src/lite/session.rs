@@ -33,30 +33,78 @@ pub async fn accept_setup<S: crate::transport::poll::Session>(
 	session: &mut S,
 	version: Version,
 ) -> Result<AcceptedSetup<S>, Error> {
-	let mut early = Vec::new();
-	loop {
-		let stream = session.accept_uni().await.map_err(Error::from_transport)?;
-		let mut reader = Reader::new(stream, version);
-		let kind = match reader.decode_peek::<u64>().await {
-			Ok(kind) => kind,
-			Err(
-				Error::Cancel
-				| Error::Stream(_)
-				| Error::Remote(_)
-				| Error::Transport(_)
-				| Error::Decode(crate::DecodeError::Short),
-			) => continue,
-			Err(err) => return Err(err),
-		};
-		if kind != DataType::Setup as u64 {
-			early.push(reader);
-			continue;
-		}
-		reader.decode::<DataType>().await?;
-		return Ok(AcceptedSetup {
-			setup: reader.decode().await?,
+	let mut accept = SetupAccept::<S> {
+		version,
+		pending: Vec::new(),
+		early: Vec::new(),
+		setup: None,
+	};
+	kio::wait(|waiter| accept.poll(session, waiter)).await
+}
+
+struct SetupAccept<S: crate::transport::poll::Session> {
+	version: Version,
+	pending: Vec<Reader<S::RecvStream, Version>>,
+	early: Vec<Reader<S::RecvStream, Version>>,
+	setup: Option<Reader<S::RecvStream, Version>>,
+}
+
+impl<S: crate::transport::poll::Session> SetupAccept<S> {
+	fn poll(&mut self, session: &mut S, waiter: &kio::Waiter) -> Poll<Result<AcceptedSetup<S>, Error>> {
+		let Self {
+			version,
+			pending,
 			early,
-		});
+			setup,
+		} = self;
+		let version = *version;
+
+		let mut cx = Context::from_waker(waiter.waker());
+		while let Poll::Ready(stream) = session.poll_accept_uni(&mut cx) {
+			pending.push(Reader::new(stream.map_err(Error::from_transport)?, version));
+		}
+		let mut index = 0;
+		while index < pending.len() {
+			let kind = match pending[index].poll_decode_peek::<u64>(&mut cx) {
+				Poll::Pending => {
+					index += 1;
+					continue;
+				}
+				Poll::Ready(Ok(kind)) => kind,
+				Poll::Ready(Err(
+					Error::Cancel
+					| Error::Stream(_)
+					| Error::Remote(_)
+					| Error::Transport(_)
+					| Error::Decode(crate::DecodeError::Short),
+				)) => {
+					pending.swap_remove(index);
+					continue;
+				}
+				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+			};
+			let mut reader = pending.swap_remove(index);
+			if kind != DataType::Setup as u64 {
+				early.push(reader);
+				continue;
+			}
+			if setup.is_some() {
+				return Poll::Ready(Err(Error::ProtocolViolation));
+			}
+			ready!(reader.poll_decode::<DataType>(&mut cx))?;
+			*setup = Some(reader);
+		}
+		let Some(reader) = setup else {
+			return Poll::Pending;
+		};
+		let setup = ready!(reader.poll_decode::<Setup>(&mut cx))?;
+		// A stream need not have delivered even its type yet. Keep it intact for the
+		// session instead of letting it block SETUP or dropping it at the handoff.
+		early.append(pending);
+		Poll::Ready(Ok(AcceptedSetup {
+			setup,
+			early: std::mem::take(early),
+		}))
 	}
 }
 
@@ -551,6 +599,29 @@ impl<S: crate::transport::poll::Session> SendGoaway<S> {
 mod tests {
 	use super::*;
 	use crate::coding::Encode;
+
+	#[tokio::test(start_paused = true)]
+	async fn accept_setup_does_not_wait_on_an_early_stream_header() {
+		let version = Version::Lite05;
+		let mut setup = Vec::new();
+		DataType::Setup.encode(&mut setup, version).unwrap();
+		Setup::default().encode(&mut setup, version).unwrap();
+		let mut session =
+			crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![Vec::new(), setup]);
+		let accepted = accept_setup(&mut session, version).await.unwrap();
+		assert_eq!(accepted.early.len(), 1);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn accept_setup_refuses_two_incomplete_setup_streams() {
+		use futures::FutureExt;
+		let mut session =
+			crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![vec![1], vec![1]]);
+		assert!(matches!(
+			accept_setup(&mut session, Version::Lite05).now_or_never(),
+			Some(Err(Error::ProtocolViolation))
+		));
+	}
 
 	#[tokio::test(start_paused = true)]
 	async fn duplicate_setup_closes_the_session() {
