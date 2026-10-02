@@ -244,7 +244,7 @@ export class Connection implements Established {
 					// A protocol violation on one stream is the peer breaking the session.
 					// Resetting that stream leaves it free to repeat the violation; a duplicate
 					// GOAWAY is the one this dispatcher raises.
-					if (err instanceof ProtocolViolation) this.close();
+					if (err instanceof ProtocolViolation) this.abort();
 				})
 				.finally(() => {
 					stream.writer.close();
