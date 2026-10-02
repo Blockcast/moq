@@ -47,10 +47,6 @@ header to `UnknownSession`, flooding relay logs with WARNs; the fork now
 keeps the read's cause and logs a reset at debug. After the bump, confirm on
 a moq.pro relay that the flood stops.
 
-## Required
-
-- A `web-transport-moq` 1.3.x release that carries moq-dev/noq#24
-
 ## Related
 
 - [Browser close code](/quest/m1/browser-close-code.md) - the playwright case that proves Chromium reads the code this quest unblocks
