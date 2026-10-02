@@ -9,8 +9,20 @@ package dev.moq
 
 // Session + connection handles. `Server` is not aliased: `dev.moq.Server` is the
 // listen facade (see Server.kt), which exposes the raw handle as `server`.
-/** A MoQ client: configure the TLS/bind knobs, then connect to a relay. */
+/** A MoQ client built from a [ClientConfig]: connect it to a relay. */
 typealias Client = uniffi.moq.MoqClient
+/** Client configuration: bind address, versions, TLS, QUIC, WebSocket, reconnect pacing, and origins. */
+typealias ClientConfig = uniffi.moq.MoqClientConfig
+/** Certificate trust and the mTLS identity for a [ClientConfig]. */
+typealias ClientTls = uniffi.moq.MoqClientTls
+/** Server configuration: bind address, versions, TLS identity, QUIC, and origins. */
+typealias ServerConfig = uniffi.moq.MoqServerConfig
+/** The served TLS identity for a [ServerConfig]: PEM files or generated hostnames. */
+typealias ServerTls = uniffi.moq.MoqServerTls
+/** QUIC transport tuning, such as the peer's inbound stream cap. */
+typealias QuicConfig = uniffi.moq.MoqQuicConfig
+/** The WebSocket fallback raced against QUIC: whether it runs and QUIC's head start. */
+typealias WebSocketConfig = uniffi.moq.MoqWebSocketConfig
 /** A live pub/sub session with a relay, exposing publish and consume origins. */
 typealias Session = uniffi.moq.MoqSession
 /** An incoming session awaiting a decision: accept it to handshake, or reject it. */

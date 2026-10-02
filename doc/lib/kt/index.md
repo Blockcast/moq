@@ -24,8 +24,8 @@ dependencies {
 import dev.moq.*
 
 // Subscribe. The Flow is live, so run it in its own coroutine.
-Moq.connect("https://relay.example.com", tlsRoots = listOf("ca.pem")).use { moq ->
-    moq.announcements(AnnounceConfig(prefix = "live/", filter = "*/camera")).collect { event ->
+Moq.connect("https://relay.example.com", ClientConfig(tls = ClientTls(roots = listOf("ca.pem")))).use { moq ->
+    moq.announced(AnnounceConfig(prefix = "live/", filter = "*/camera")).updates().collect { event ->
         if (event !is AnnounceEventStart) return@collect // Update, End, or Live
         // Prefixes stay origin-relative; captures reports what each wildcard matched.
         println(event.announce.captures)
@@ -64,7 +64,7 @@ is a no-op; Kotlin spells it `end` because `close()`, or `use { }`, releases the
 handle, which ends the broadcast only once no `dynamic()` handle remains); `origin.dynamic(prefix, route)` claims `prefix` and every
 path beneath it (`""` for everything). Hold the returned `OriginDynamic`
 while the claim should stay advertised, and reject the requests you will not
-serve. A route is a capability, not an inventory. `announcements(config)` takes
+serve. A route is a capability, not an inventory. `announced(config).updates()` takes
 a literal prefix plus an optional relative pattern and yields `AnnounceEvent`s:
 `AnnounceEventStart`, `AnnounceEventUpdate`, or `AnnounceEventEnd`
 carrying an `Announce`, whose `prefix` stays origin-relative and whose
@@ -74,25 +74,26 @@ a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lite#hidden-br
 
 Sessions reconnect with backoff when the transport drops and re-announce local
 broadcasts. `moq.epoch()` counts the connections, 1 on the first, pairing with
-`MoqSession.status` to log each reconnect; the `backoff` argument tunes the
-pacing (`timeoutUs = 0` retries forever); and `maxStreams` raises the peer's
-inbound stream cap.
+`MoqSession.status` to log each reconnect. `Moq.connect(url, config)` takes a
+`ClientConfig`: `backoff` tunes the pacing (`timeoutUs = 0uL` retries forever),
+`quic = QuicConfig(maxStreams = ...)` raises the peer's inbound stream cap,
+`versions` pins the protocol versions offered, and `once = true` dials once. A
+value the native side cannot use throws `MoqException.Config`.
 
 The [WebSocket fallback](/concept/transport#websocket-fallback) races QUIC after
-a 200 ms head start. `Moq.connect(websocketEnabled = false)` turns it off for a
-QUIC-only relay, and a `websocketDelay` `Duration` changes the head start.
+a 200 ms head start. `WebSocketConfig(enabled = false)` turns it off for a
+QUIC-only relay, and `delayUs` changes the head start.
 
-`Server.listen(bind, tlsGenerate = ...)` accepts sessions with per-request
-`accept()`/`reject()`. Generated configuration setters, including
-`MoqRequest.setPublish`/`setConsume`, throw if a connect, listen, or accept is
-in flight, or after cancel. `MoqRequest.transport()` returns a `Transport` enum.
+`Server.listen(ServerConfig(bind = ..., tls = ServerTls(generate = ...)))` accepts
+sessions with per-request `accept()`/`reject()`. `MoqRequest.setPublish`/`setConsume`
+throw if an accept is in flight, after a response, or after cancel. `MoqRequest.transport()` returns a `Transport` enum.
 JSON tracks live in the `dev.moq.json` package and take `@Serializable` types:
 `SnapshotProducer(broadcast, track, SnapshotConfig())` takes over a track from
 `publishTrack`, `SnapshotConsumer(track, SnapshotConfig())` one from
 `subscribeTrack`, and `valuesAs<T>()` decodes. The rest of
 the [shared feature list](/lib/#what-every-binding-can-do) maps one to one:
 `fetchGroup`/`fetchMediaGroup`, `dynamic()` for tracks and `dynamic(prefix)` for broadcasts, `appendDatagram`/`datagrams()`,
-`setCatalogSection`, `demand()` for `used()`/`unused()`. `session.bandwidth()` divides the
+`setCatalogSection`, `demand()` for `name()`, `used()`, and `unused()`. `session.bandwidth()` divides the
 connection's send estimate; pass it to `encodeVideo` / `encodeAudio` or
 `reserve` a share for an app-owned track. `MoqException.isAuth` and
 `isShutdown` classify errors. Microsecond fields read back as a
