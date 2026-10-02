@@ -27,9 +27,12 @@ import 'package:moq/moq.dart';
 final moq = await Moq.connect('https://relay.example.com');
 
 // Subscribe. The stream is live, so listen to it rather than awaiting its end.
-moq.announcements(
-  options: const AnnounceOptions(prefix: 'live/', filter: '*/camera'),
-).listen((event) {
+moq
+    .announced(
+      options: const AnnounceOptions(prefix: 'live/', filter: '*/camera'),
+    )
+    .updates()
+    .listen((event) {
   if (event is AnnounceEventStart) {
     print(event.announce.prefix);
     print(event.announce.captures);
@@ -74,7 +77,7 @@ call is a no-op); `origin.dynamic_(prefix:, route:)` claims `prefix` and
 every path beneath it (`''` for everything; Dart spells the origin method
 `dynamic_` because `dynamic` is reserved). Hold the returned handle while the
 claim should stay advertised, and reject the requests you will not serve. A
-route is a capability, not an inventory. `announcements(options:)` takes a
+route is a capability, not an inventory. `announced(options:).updates()` takes a
 literal prefix plus an optional relative pattern and yields `AnnounceEvent`s:
 `AnnounceEventStart`, `AnnounceEventUpdate`, or `AnnounceEventEnd`
 carrying an `Announce`, whose `prefix` stays origin-relative and whose
@@ -87,7 +90,9 @@ broadcasts. `Moq.connect` and `Server.listen` take a `ConnectOptions` /
 `ListenOptions` struct, like Rust: `reconnect: false` makes the dial one-shot
 and `backoff:` re-paces the retries. `moq.epoch` counts the connections, 1 on the first, pairing with
 `session.status()` to log each reconnect; `maxStreams` raises the peer's
-inbound stream cap for a subscriber to many tracks.
+inbound stream cap for a subscriber to many tracks; and `versions:` pins the
+protocol versions offered. A value the native side cannot use throws
+`ConfigMoqException`; `publish:` and `consume:` wire the origins.
 
 The [WebSocket fallback](/concept/transport#websocket-fallback) races QUIC after
 a 200 ms head start. `websocketEnabled: false` turns it off for a QUIC-only
@@ -101,8 +106,8 @@ wrappers. `Container`, `Route`, and the exceptions keep theirs, because
 
 Cancelling a stream releases the native cursor. The package re-exports
 `moq_ffi`, so the full generated API is available without a second import.
-Generated configuration setters throw if a connect, listen, or accept is in
-flight, or after `cancel()`. Incoming requests report a `MoqTransport` enum.
+`MoqRequest.setPublish`/`setConsume` throw if an accept is in flight, after a
+response, or after `cancel()`. Incoming requests report a `MoqTransport` enum.
 `ProtocolMoqException` carries a `MoqProtocolException` as `details` (scope, verbatim
 code, kind) when the peer sent a session or stream code.
 
