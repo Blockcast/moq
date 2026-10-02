@@ -36,12 +36,7 @@ final class SmokeTests: XCTestCase {
     /// generated API. No network needed: we just instantiate a few types and
     /// exercise the cancel path.
     func testClientConstructsAndCancels() async throws {
-        let client = Client()
-        try client.setTlsRoots([])
-        try client.setTlsSystemRoots(true)
-        try client.setTlsFingerprints([])
-        try client.setTlsCert(nil)
-        try client.setTlsKey(nil)
+        let client = try Client(tls: ClientTls(roots: [], systemRoots: true, fingerprints: []))
         client.cancel()
         do {
             _ = try await client.connect(to: "https://localhost:0/test")
@@ -60,19 +55,29 @@ final class SmokeTests: XCTestCase {
         }
     }
 
+    /// A value the native side cannot use throws from the constructor, not the dial.
+    func testInvalidConfigThrowsConfig() {
+        XCTAssertThrowsError(try Client(versions: ["moq-lite-99"])) { error in
+            guard case MoqError.Config = error else {
+                return XCTFail("expected Config, got \(error)")
+            }
+        }
+        XCTAssertThrowsError(try Server(bind: "not-an-address")) { error in
+            guard case MoqError.Config = error else {
+                return XCTFail("expected Config, got \(error)")
+            }
+        }
+    }
+
     /// `cancel()` releases the listening socket before it returns, so the same
     /// address binds again with no retry.
     func testServerCloseReleasesPort() async throws {
-        let first = Server()
-        try first.bind("127.0.0.1:0")
-        try first.generateTls(hostnames: ["localhost"])
+        let first = try Server(bind: "127.0.0.1:0", tls: ServerTls(generate: ["localhost"]))
         let addr = try await first.listen()
         first.cancel()
 
         // No retry: cancel() closed the socket, so this binds on the first try.
-        let second = Server()
-        try second.bind(addr)
-        try second.generateTls(hostnames: ["localhost"])
+        let second = try Server(bind: addr, tls: ServerTls(generate: ["localhost"]))
         let rebound = try await second.listen()
         XCTAssertEqual(rebound, addr)
         second.cancel()
@@ -173,7 +178,7 @@ final class SmokeTests: XCTestCase {
     func testBroadcastProducerOpensTracks() throws {
         let broadcast = try BroadcastProducer()
         let track = try broadcast.publishTrack(name: "events")
-        XCTAssertEqual(try track.name, "events")
+        XCTAssertEqual(try track.demand().name, "events")
         try track.finish()
         try broadcast.close()
     }

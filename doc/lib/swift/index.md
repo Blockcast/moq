@@ -25,7 +25,7 @@ targets: [
 import Moq
 
 // Subscribe. The sequence is live, so run it in its own Task.
-let client = Client()
+let client = try Client()
 let session = try await client.connect(to: "https://relay.example.com")
 
 for try await event in try session.consume.announced(prefix: "live/", filter: "*/camera") {
@@ -75,26 +75,27 @@ matched, or `.live` once every route live at subscribe time has been delivered.
 Paths with a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lite#hidden-broadcasts) unless
 `hidden: true`.
 
-For a self-signed relay on your own test network, `try client.setTlsVerify(false)`
-accepts any certificate; prefer `setTlsRoots` or a fingerprint anywhere else.
-Setters throw if a connect is in flight or after `cancel()`.
+`Client(...)` takes its configuration as labeled arguments, each with a default,
+and throws `MoqError.Config` for a value the native side cannot use. For a
+self-signed relay on your own test network, `Client(tls: ClientTls(insecure: true))`
+accepts any certificate; prefer `ClientTls(roots:)` or `fingerprints` anywhere else.
+`versions:` pins the protocol versions offered, and `once: true` dials once.
 
 Sessions reconnect with backoff when the transport drops and re-announce local
 broadcasts. `session.epoch()` counts the connections, 1 on the first, pairing
-with `session.status()` to log each reconnect; `client.setBackoff` tunes the
-pacing; and `client.setQuicMaxStreams` raises the peer's inbound stream cap.
+with `session.status()` to log each reconnect; `Client(backoff:)` tunes the
+pacing; and `Client(quic: QuicConfig(maxStreams:))` raises the peer's inbound stream cap.
 
 The [WebSocket fallback](/concept/transport#websocket-fallback) races QUIC after
-a 200 ms head start. `client.setWebsocketEnabled(false)` turns it off for a
-QUIC-only relay, and `client.setWebsocketDelay(_:)` changes the head start, in
-microseconds.
+a 200 ms head start. `WebSocketConfig(enabled: false)` turns it off for a
+QUIC-only relay, and `delayUs` changes the head start, in microseconds.
 
-`Server` binds, generates or loads TLS, and hands you each request to
+`Server(bind:tls:)` binds, generates or loads TLS, and hands you each request to
 `accept()` or `reject(code:)`; `request.transport` is a `Transport` enum. JSON tracks live under `Json` and take `Codable` types
 (`Json.SnapshotProducer<Value>(broadcast:track:)`, `Json.StreamConsumer<Value>(track:)`), and the
 rest of the [shared feature list](/lib/#what-every-binding-can-do) maps one
 to one: `fetchGroup`/`fetchMediaGroup`, `dynamic()` for tracks and `dynamic(prefix:)` for broadcasts, `appendDatagram`/
-`datagrams`, `setCatalogSection`, `demand()` for `used()`/`unused()`. `session.bandwidth()`
+`datagrams`, `setCatalogSection`, `demand()` for `name`, `used()`, and `unused()`. `session.bandwidth()`
 divides the connection's send estimate; pass it to `encodeVideo` /
 `encodeAudio` or `reserve` a share for an app-owned track. `MoqError.isAuth` and
 `isShutdown` classify errors. `protocolError` is the structured protocol failure

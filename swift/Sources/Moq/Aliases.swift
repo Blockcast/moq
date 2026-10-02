@@ -100,8 +100,21 @@ public typealias TrackInfo = MoqFFI.MoqTrackInfo
 /// counters). Fields are `nil` when the transport backend doesn't report them.
 public typealias ConnectionStats = MoqFFI.MoqConnectionStats
 
-/// Retry pacing for the automatic reconnect; see `Client.setBackoff`.
+/// Retry pacing for the automatic reconnect; see `Client(backoff:)`. A `nil`
+/// field keeps its default.
 public typealias Backoff = MoqFFI.MoqBackoff
+
+/// Certificate trust and the mTLS identity for a `Client`.
+public typealias ClientTls = MoqFFI.MoqClientTls
+
+/// The served TLS identity for a `Server`: PEM files or generated hostnames.
+public typealias ServerTls = MoqFFI.MoqServerTls
+
+/// QUIC transport tuning, such as the peer's inbound stream cap.
+public typealias QuicConfig = MoqFFI.MoqQuicConfig
+
+/// The WebSocket fallback raced against QUIC: whether it runs and QUIC's head start.
+public typealias WebSocketConfig = MoqFFI.MoqWebSocketConfig
 
 /// A connection lifecycle transition reported by `Session.status()`.
 public typealias ConnectionStatus = MoqFFI.MoqConnectionStatus
