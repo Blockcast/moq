@@ -36,7 +36,7 @@ sudo dnf install gstreamer1-moq
 The `moq-gst` flake output bundles the plugin with wrappers around `gst-inspect-1.0` / `gst-launch-1.0` that preload moq + the standard `gst-plugins-{base,good,bad}` set, so no `GST_PLUGIN_PATH` setup is needed.
 
 ```bash
-# Inspect: list moqsink + moqsrc. (Or one-shot: `nix run github:moq-dev/moq#moq-gst -- moq`.)
+# Inspect: list moqsink + moqsrc. (Or one-shot: `nix run github:moq-dev/moq/release#moq-gst -- moq`.)
 nix shell github:moq-dev/moq#moq-gst --command gst-inspect-1.0 moq
 
 # Subscribe to the always-on public test broadcast and render to a window.

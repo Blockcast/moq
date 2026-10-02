@@ -81,8 +81,7 @@ Record queue/lock work, CPU, throughput, latency, and byte fairness on the
 same congested workloads. Both equal-priority subscriptions must progress
 while a higher-priority subscription preempts them and each subscription
 sheds its own old backlog. Measure the full scope of trait and adapter changes
-before publishing the API; any published break targets dev under the normal
-release policy.
+before publishing the API.
 
 Retransmissions follow the same hierarchy. noq already re-queues a lost
 range through the stream's priority (`StreamsState::retransmit`), so a lost
@@ -104,7 +103,7 @@ where the new implementation makes it redundant.
 
 ## Required
 
-- [Hard fork](/quest/m1/quic/fork/README.md) - lands in `moq-quic` on `dev`, not the frozen fork
+- [Hard fork](/quest/m1/quic/fork/README.md) - lands in `moq-quic`, not the frozen fork
 
 ## Closes
 

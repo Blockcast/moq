@@ -22,7 +22,7 @@ order), and `latest()` skips to the newest state, today's behavior. A reader
 that falls behind still jumps to the newest group. Update
 `doc/lib/js/{json,flate}.md`.
 
-Public API: breaking, on `dev`. Wire: none.
+Public API: breaking. Wire: none.
 
 ## Required
 

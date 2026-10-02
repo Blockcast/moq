@@ -2,7 +2,7 @@
 
 ## Goal
 
-On `dev`, every moq-mux TS stats type lives in the `container::ts::stats`
+Every moq-mux TS stats type lives in the `container::ts::stats`
 module beside `stats::Log`: `ts::Stats` becomes `ts::stats::Snapshot` and
 `ts::StreamStats` becomes `ts::stats::Stream`. `StreamStats.track` becomes an
 owned `String`, and `ts::MultipleProgramsError` becomes `#[non_exhaustive]`.
@@ -14,8 +14,8 @@ Decided while planning the follow-ups of
 [#4505](https://github.com/moq-dev/moq/pull/4505) and
 [#4506](https://github.com/moq-dev/moq/pull/4506):
 
-- **Breaking, so `dev`.** `Stats` and `StreamStats` have been published since
-  moq-mux 0.9.14. #4506 kept them at `ts::` on `main` for that reason.
+- **Breaking.** `Stats` and `StreamStats` have been published since
+  moq-mux 0.9.14. #4506 kept them at `ts::` on `release` for that reason.
 - **Names: `stats::Snapshot` and `stats::Stream`.** `Snapshot` matches
   `moq_net::stats::Snapshot`. `stats::Import` was rejected because it reads
   like `ts::Import`, and `stats::Pid` because the row is a stream's liveness,

@@ -22,8 +22,7 @@ name: Release Kotlin lib
 on:
   push:
     branches:
-      - main
-      - dev
+      - release
     paths:
       - "kt/moq/**"
       - "kt/gradle.properties"
