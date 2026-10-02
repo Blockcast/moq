@@ -101,7 +101,7 @@ Every importer takes a broadcast; single-track imports choose a `Named` or `Requ
    ContainerGroupConsumer
    Named
    Requested
-   moq.media.MediaFrame
+   MediaFrame
    catalog
 ```
 
@@ -158,25 +158,25 @@ Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
    :toctree: api
    :nosignatures:
 
-   moq.media.Catalog
-   moq.media.Container
+   media.Catalog
+   media.Container
    Frame
-   moq.media.MediaFrame
+   media.MediaFrame
    Datagram
-   moq.media.Video
-   moq.media.VideoHint
-   moq.media.VideoProperties
+   media.Video
+   media.VideoHint
+   media.VideoProperties
    VideoFrame
    VideoCodec
    VideoPixelFormat
    VideoEncoderInput
    VideoEncoderOutput
    VideoEncoderKind
-   moq.media.Dimensions
-   moq.media.Audio
+   media.Dimensions
+   media.Audio
    AudioFrame
    AudioCodec
-   moq.media.AudioFormat
+   media.AudioFormat
    AudioDecoderOutput
    AudioEncoderInput
    AudioEncoderOutput
