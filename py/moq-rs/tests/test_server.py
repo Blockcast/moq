@@ -117,7 +117,12 @@ async def test_client_reconnects_and_resumes_announcements():
                 tls_verify=False,
                 bind="127.0.0.1:0",
                 # Fast retries so the test doesn't wait out the default 1s backoff.
-                backoff=moq.Backoff(initial_us=50_000, multiplier=2, max_us=200_000, timeout_us=0),
+                backoff=moq.Backoff(
+                    initial=timedelta(milliseconds=50),
+                    multiplier=2,
+                    max=timedelta(milliseconds=200),
+                    timeout=timedelta(0),
+                ),
             ) as client:
                 session = client.session
                 assert session is not None
@@ -172,12 +177,15 @@ async def test_server_request_close():
 
         reject_task = asyncio.create_task(reject_loop())
         try:
-            client = moq_ffi.MoqClient()
-            client.set_tls_verify(False)
-            client.set_bind("127.0.0.1:0")
-            # One-shot, so this dial's outcome is what surfaces here rather than
-            # whatever the reconnect loop eventually reports.
-            client.set_reconnect(False)
+            client = moq_ffi.MoqClient(
+                moq_ffi.MoqClientConfig(
+                    bind="127.0.0.1:0",
+                    tls=moq_ffi.MoqClientTls(insecure=True),
+                    # One-shot, so this dial's outcome is what surfaces here rather than
+                    # whatever the reconnect loop eventually reports.
+                    once=True,
+                )
+            )
             # The rejection races the optimistic connect: it surfaces either as a
             # connect error or as the session's terminal close. MoqError is an
             # Exception subclass at runtime; UniFFI's generated code rebinds the
@@ -227,15 +235,14 @@ async def test_client_websocket_fallback_options():
         moq.Client("https://localhost", websocket_delay=timedelta(milliseconds=-1))
 
 
-async def test_client_setters_fail_after_cancel():
-    """A cancelled client refuses further configuration rather than ignoring it."""
-    client = moq_ffi.MoqClient()
-    client.set_tls_verify(False)
-    client.cancel()
-    with pytest.raises(moq_ffi.MoqError.Cancelled):  # type: ignore[misc]
-        client.set_tls_verify(True)
-    with pytest.raises(moq_ffi.MoqError.Cancelled):  # type: ignore[misc]
-        client.set_bind("127.0.0.1:0")
+async def test_invalid_config_fails_on_enter():
+    """A value the native side cannot use fails the connect or listen, not a later call."""
+    with pytest.raises(moq.Error.Config):  # type: ignore[attr-defined]
+        async with moq.Client("https://localhost", versions=["moq-lite-99"]):
+            pass
+    with pytest.raises(moq.Error.Config):  # type: ignore[attr-defined]
+        async with moq.Server("not-an-address", tls_generate=["localhost"]):
+            pass
 
 
 async def test_cert_fingerprints_after_listen():

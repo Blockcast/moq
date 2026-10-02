@@ -8,6 +8,7 @@ from moq_ffi import (
     MoqAudioConsumer,
     MoqBroadcastConsumer,
     MoqCatalogConsumer,
+    MoqFrame,
     MoqGroupConsumer,
     MoqMediaConsumer,
     MoqMediaGroupConsumer,
@@ -15,6 +16,7 @@ from moq_ffi import (
     MoqVideoConsumer,
 )
 
+from ._records import _subscription
 from .types import (
     Audio,
     AudioDecoderOutput,
@@ -31,6 +33,10 @@ from .types import (
     VideoDecodedFrame,
     VideoDecoderOutput,
 )
+
+
+def _frame(frame: MoqFrame | None) -> Frame | None:
+    return None if frame is None else Frame._from_ffi(frame)
 
 
 class MediaConsumer:
@@ -123,11 +129,11 @@ class GroupConsumer:
         frame = await self._inner.read_frame()
         if frame is None:
             raise StopAsyncIteration
-        return frame
+        return Frame._from_ffi(frame)
 
     async def read_frame(self) -> Frame | None:
         """Read the next timestamped frame. Returns `None` when the group ends."""
-        return await self._inner.read_frame()
+        return _frame(await self._inner.read_frame())
 
     def cancel(self) -> None:
         """Cancel reading this group and stop delivering frames."""
@@ -207,7 +213,7 @@ class TrackConsumer:
         `None` only when the track ends. Cancelling one call keeps the current
         group so a later :meth:`read_frame` or :meth:`next_group` still sees it.
         """
-        return await self._inner.read_frame()
+        return _frame(await self._inner.read_frame())
 
     async def recv_datagram(self) -> Datagram | None:
         """Receive the next best-effort datagram in arrival order.
@@ -215,15 +221,16 @@ class TrackConsumer:
         Returns ``None`` when the track ends. Datagrams are unavailable over stream-only
         transports and older wire versions.
         """
-        return await self._inner.recv_datagram()
+        datagram = await self._inner.recv_datagram()
+        return None if datagram is None else Datagram._from_ffi(datagram)
 
     def info(self) -> TrackInfo:
         """Return the publisher-side track properties."""
-        return self._inner.info()
+        return TrackInfo._from_ffi(self._inner.info())
 
     def update(self, subscription: Subscription) -> None:
         """Change this subscriber's delivery preferences."""
-        self._inner.update(subscription)
+        self._inner.update(subscription._ffi())
 
     def cancel(self) -> None:
         """Cancel the subscription and stop delivering groups."""
@@ -343,7 +350,7 @@ class BroadcastConsumer:
 
         ``subscription`` tunes delivery priority, group range, and staleness; omit for defaults.
         """
-        return TrackConsumer(await self._inner.subscribe_track(name, subscription))
+        return TrackConsumer(await self._inner.subscribe_track(name, _subscription(subscription)))
 
     async def fetch_group(
         self,
@@ -389,11 +396,11 @@ class BroadcastConsumer:
         dynamic flow, where you subscribe before the catalog exists.
         ``subscription`` tunes delivery priority, group
         range, and the max age; omit for defaults. Raise
-        :attr:`Subscription.max_age_us` to buffer instead of skipping a
+        :attr:`Subscription.max_age` to buffer instead of skipping a
         stalled group.
         """
         container = track if isinstance(track, Container) else track.container
-        return MediaConsumer(await self._inner.subscribe_media(name, container, subscription))
+        return MediaConsumer(await self._inner.subscribe_media(name, container, _subscription(subscription)))
 
     async def resolve(self, reference: str | None) -> "BroadcastConsumer":
         """Resolve a catalog rendition's ``broadcast`` reference to the broadcast

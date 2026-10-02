@@ -63,7 +63,7 @@ async def main():
 
         # Raw bytes and JSON
         events = broadcast.publish_track("events")
-        events.write_frame(b'{"cmd": "ready"}', 0)
+        events.write_frame(b'{"cmd": "ready"}')
         status = moq.json.SnapshotProducer(broadcast, broadcast.publish_track("status"), compression=True)
         status.update({"state": "live", "viewers": 42})
 
@@ -97,8 +97,10 @@ Paths with a `.`-prefixed segment below the prefix are [hidden](/concept/moq-lit
 Sessions reconnect with backoff when the transport drops and re-announce local
 broadcasts. `session.epoch()` counts the connections, 1 on the first, pairing
 with `session.status()` to log each reconnect; `moq.Backoff` tunes the pacing
-(`timeout_us=0` retries forever); and `moq.connect(..., max_streams=...)`
-raises the peer's inbound stream cap.
+(`timeout=timedelta(0)` retries forever); `moq.connect(..., max_streams=...)`
+raises the peer's inbound stream cap; and `versions=["moq-lite-03"]` pins the
+protocol versions offered. A value the native side cannot use raises
+`moq.Error.Config` on entering the client or server.
 
 The [WebSocket fallback](/concept/transport#websocket-fallback) races QUIC after
 a 200 ms head start. Pass `websocket_enabled=False` to `moq.connect` for a
@@ -112,7 +114,7 @@ and a producer's `demand()`, a `TrackDemand` whose
 `used()`/`unused()` let capture idle when nobody is subscribed. `request.set_publish`/`set_consume` raise if the request is already
 answered, cancelled, or currently accepting. `session.bandwidth()` divides the connection's send estimate;
 pass it to `encode_video` / `encode_audio` or `reserve` a share for an
-app-owned track. `moq.is_auth(err)` and `moq.is_shutdown(err)` classify errors. `moq.protocol_error(err)` is the structured protocol failure (scope, verbatim code, kind) when the peer sent one. Catch `moq.Error.Busy` when a setter races an in-flight connect, listen, or accept.
+app-owned track. `moq.is_auth(err)` and `moq.is_shutdown(err)` classify errors. `moq.protocol_error(err)` is the structured protocol failure (scope, verbatim code, kind) when the peer sent one. Catch `moq.Error.Busy` when a request setter races its in-flight accept.
 Each server request reports a `moq.Transport` enum, including QUIC, Iroh,
 WebSocket, TCP, and Unix sockets.
 
@@ -138,7 +140,7 @@ not the same as zero.
 
 | Field | Unit | Meaning |
 | --- | --- | --- |
-| `rtt_us` | microseconds | Smoothed round-trip time. |
+| `rtt` | `timedelta` | Smoothed round-trip time. |
 | `estimated_send_rate_bps` | bits per second | Send bandwidth from the congestion controller. |
 | `estimated_recv_rate_bps` | bits per second | Receive bandwidth from MoQ PROBE. |
 | `bytes_sent` | bytes | Total sent, including retransmissions and overhead. |

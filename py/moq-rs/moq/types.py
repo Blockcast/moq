@@ -1,4 +1,7 @@
-"""Re-export moq-ffi record types without the Moq prefix."""
+"""Re-export moq-ffi record types without the Moq prefix.
+
+Records with duration fields are owned in `_records` instead, so they read as `timedelta`.
+"""
 
 from moq_ffi import (
     MoqAudio as Audio,
@@ -25,13 +28,7 @@ from moq_ffi import (
     MoqAudioSampleFormat as AudioSampleFormat,
 )
 from moq_ffi import (
-    MoqBackoff as Backoff,
-)
-from moq_ffi import (
     MoqCatalog as Catalog,
-)
-from moq_ffi import (
-    MoqConnectionStats as ConnectionStats,
 )
 from moq_ffi import (
     MoqConnectionStatus as ConnectionStatus,
@@ -43,9 +40,6 @@ from moq_ffi import (
     MoqContainerFormat as ContainerFormat,
 )
 from moq_ffi import (
-    MoqDatagram as Datagram,
-)
-from moq_ffi import (
     MoqDimensions as Dimensions,
 )
 from moq_ffi import (
@@ -53,9 +47,6 @@ from moq_ffi import (
 )
 from moq_ffi import (
     MoqFetchGroupOptions as FetchGroupOptions,
-)
-from moq_ffi import (
-    MoqFrame as Frame,
 )
 from moq_ffi import (
     MoqMediaFrame as MediaFrame,
@@ -68,12 +59,6 @@ from moq_ffi import (
 )
 from moq_ffi import (
     MoqRoute as Route,
-)
-from moq_ffi import (
-    MoqSubscription as Subscription,
-)
-from moq_ffi import (
-    MoqTrackInfo as TrackInfo,
 )
 from moq_ffi import (
     MoqVideo as Video,
@@ -111,6 +96,8 @@ from moq_ffi import (
 from moq_ffi import (
     MoqVideoProperties,
 )
+
+from ._records import Backoff, ConnectionStats, Datagram, Frame, Subscription, TrackInfo
 
 VideoProperties = MoqVideoProperties
 """Video catalog properties shared by every rendition; ``None`` fields clear them."""
