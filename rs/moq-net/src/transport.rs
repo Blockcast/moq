@@ -633,7 +633,7 @@ mod tests {
 			panic!("missing empty chunk")
 		};
 		assert!(chunk.is_empty());
-		let mut empty = &mut [][..];
+		let mut empty: &mut [u8] = &mut [];
 		assert!(matches!(
 			read.poll_read_buf(&mut cx, &mut empty),
 			Poll::Ready(Ok(Some(0)))
