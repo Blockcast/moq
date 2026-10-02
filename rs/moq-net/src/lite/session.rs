@@ -60,8 +60,15 @@ impl<S: crate::transport::poll::Session> SetupAccept<S> {
 		let version = *version;
 
 		let mut cx = Context::from_waker(waiter.waker());
+		let mut accept_error = None;
 		while let Poll::Ready(stream) = session.poll_accept_uni(&mut cx) {
-			pending.push(Reader::new(stream.map_err(Error::from_transport)?, version));
+			match stream {
+				Ok(stream) => pending.push(Reader::new(stream, version)),
+				Err(err) => {
+					accept_error = Some(Error::from_transport(err));
+					break;
+				}
+			}
 		}
 		let mut index = 0;
 		while index < pending.len() {
@@ -94,10 +101,19 @@ impl<S: crate::transport::poll::Session> SetupAccept<S> {
 			ready!(reader.poll_decode::<DataType>(&mut cx))?;
 			*setup = Some(reader);
 		}
-		let Some(reader) = setup else {
-			return Poll::Pending;
+		// A closed transport can still yield a complete buffered SETUP. Decode it
+		// before reporting the terminal error from accepting the next stream.
+		let result = setup
+			.as_mut()
+			.map(|reader| reader.poll_decode::<Setup>(&mut cx))
+			.unwrap_or(Poll::Pending);
+		let setup = match result {
+			Poll::Ready(result) => result?,
+			Poll::Pending => match accept_error {
+				Some(err) => return Poll::Ready(Err(err)),
+				None => return Poll::Pending,
+			},
 		};
-		let setup = ready!(reader.poll_decode::<Setup>(&mut cx))?;
 		// A stream need not have delivered even its type yet. Keep it intact for the
 		// session instead of letting it block SETUP or dropping it at the handoff.
 		early.append(pending);

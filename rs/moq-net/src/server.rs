@@ -882,6 +882,7 @@ mod tests {
 					data: data.into(),
 					stops: self.stops.clone(),
 				})),
+				None if self.closed().is_some() => std::task::Poll::Ready(Err(FakeError)),
 				None => std::task::Poll::Pending,
 			}
 		}
@@ -1217,6 +1218,17 @@ mod tests {
 			.unwrap();
 		assert_eq!(request.path(), "/team/room");
 		assert!(stops.lock().unwrap().is_empty(), "the early stream must stay open");
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn accept_request_reads_buffered_setup_after_transport_close() {
+		let mut session = FakeSession::new(ALPN_LITE_05, [lite05_setup(Some("/closed"), None, None)]);
+		web_transport_trait::poll::Session::close(&mut session, SessionError::Cancel.to_code(), "closed");
+		let request = Server::new()
+			.accept_request_lite(tokio::time::Instant::now().into_std(), session)
+			.await
+			.unwrap();
+		assert_eq!(request.path(), "/closed");
 	}
 
 	#[tokio::test(start_paused = true)]
