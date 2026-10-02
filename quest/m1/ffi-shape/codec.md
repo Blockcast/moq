@@ -31,7 +31,3 @@ The audio and video frame and decoder-output records carry microsecond fields
 should become owned `timedelta` / `time.Duration` records like net's.
 
 Public API: breaking in every binding. Wire: none.
-
-## Required
-
-- [Media](/quest/m1/ffi-shape/media.md) - the catalog handle the encoders register into

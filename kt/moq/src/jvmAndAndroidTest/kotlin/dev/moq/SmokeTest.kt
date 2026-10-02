@@ -1,5 +1,7 @@
 package dev.moq
 
+import dev.moq.media.*
+
 import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -183,7 +185,7 @@ class SmokeTest {
     @Test
     fun `broadcast updates shared video properties`() {
         BroadcastProducer().use { broadcast ->
-            broadcast.setVideoProperties(VideoProperties(rotation = 315.0))
+            CatalogProducer(broadcast).setVideoProperties(VideoProperties(rotation = 315.0))
         }
     }
 
@@ -220,26 +222,29 @@ class SmokeTest {
         }
     }
 
+    @Test
+    fun `catalog handle closes with its broadcast`() {
+        val broadcast = BroadcastProducer()
+        val catalog = CatalogProducer(broadcast)
+        catalog.setSection("app", "{\"value\":42}")
+        broadcast.close()
+        assertFailsWith<MoqException.Closed> { catalog.removeSection("app") }
+        catalog.close()
+    }
+
     /** A fetched media group streams its decoded frames and then completes. */
     @Test
     fun `media group helper streams fetched frames`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val media = broadcast.publishAudio(
-                AudioInit(format = AudioFormat.OPUS, data = opusHead()),
-            )
+            val media = dev.moq.media.TrackProducer.audio(broadcast, Named(null), AudioInit(format = AudioFormat.OPUS, data = opusHead()))
             val consumer = broadcast.consume()
-            val (name, audio) = consumer.catalog().audio.entries.single()
+            val (name, audio) = catalog(consumer).audio.entries.single()
 
             media.writeFrame(Frame(payload = "opus frame".encodeToByteArray(), timestampUs = 5_000_000uL))
 
             // Fetch while the track is still published: finishing the media producer
             // unpublishes it, and the fetch would then miss with NotFound.
-            val fetched: MediaGroupConsumer = consumer.fetchMediaGroup(
-                name,
-                0uL,
-                audio.container,
-                FetchGroupOptions(priority = 3u),
-            )
+            val fetched: ContainerGroupConsumer = ContainerGroupConsumer.fetch(consumer, ContainerGroupConfig(name = name, sequence = 0uL, container = audio.container, options = FetchGroupOptions(priority = 3u)))
 
             // Close the group so the fetched stream terminates instead of waiting for more.
             media.finish()
@@ -525,7 +530,7 @@ class SmokeTest {
                 }
 
                 val consumer = origin.consume().requestBroadcast("video-decode-frame")
-                val catalog = consumer.subscribeCatalog().next()!!
+                val catalog = CatalogConsumer.subscribe(consumer).next()!!
                 val rendition = catalog.video["camera"]!!
 
                 val decoder = consumer.decodeVideo("camera", rendition, VideoDecoderOutput())

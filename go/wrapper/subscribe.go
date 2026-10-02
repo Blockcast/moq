@@ -13,15 +13,6 @@ type BroadcastConsumer struct {
 	inner *ffi.MoqBroadcastConsumer
 }
 
-// SubscribeCatalog subscribes to the broadcast's catalog track.
-func (b *BroadcastConsumer) SubscribeCatalog(ctx context.Context) (*CatalogConsumer, error) {
-	inner, err := b.inner.SubscribeCatalog(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return &CatalogConsumer{inner: inner}, nil
-}
-
 // SubscribeTrack subscribes to a track, receiving arbitrary byte payloads.
 // subscription tunes delivery priority, group range, and staleness; pass nil for defaults.
 func (b *BroadcastConsumer) SubscribeTrack(
@@ -55,49 +46,11 @@ func (b *BroadcastConsumer) FetchGroup(
 	return &GroupConsumer{inner: inner}, nil
 }
 
-// FetchMediaGroup fetches one group by sequence and decodes it with the given
-// container. Unlike SubscribeMedia this holds no live subscription and applies no
-// latency-based group skipping, so every frame in the group is delivered.
-func (b *BroadcastConsumer) FetchMediaGroup(
-	ctx context.Context,
-	name string,
-	sequence uint64,
-	container Container,
-	options *FetchGroupOptions,
-) (*MediaGroupConsumer, error) {
-	inner, err := b.inner.FetchMediaGroup(ctx, name, sequence, container, options)
-	if err != nil {
-		return nil, err
-	}
-	return &MediaGroupConsumer{inner: inner}, nil
-}
-
-// SubscribeMedia subscribes to a media track, decoded with the given container.
-// subscription tunes delivery priority, group range, and
-// the max age; pass nil for defaults. Raise Subscription.MaxAge to
-// buffer instead of skipping a stalled group.
-func (b *BroadcastConsumer) SubscribeMedia(
-	ctx context.Context,
-	name string,
-	container Container,
-	subscription *Subscription,
-) (*MediaConsumer, error) {
-	sub, err := subscriptionFFI(subscription)
-	if err != nil {
-		return nil, err
-	}
-	inner, err := b.inner.SubscribeMedia(ctx, name, container, sub)
-	if err != nil {
-		return nil, err
-	}
-	return &MediaConsumer{inner: inner}, nil
-}
-
 // Resolve returns the broadcast serving a catalog rendition, honoring its broadcast
-// reference: Video.Broadcast / Audio.Broadcast. A nil or empty reference names this
+// reference: ffi.MoqVideo.Broadcast / ffi.MoqAudio.Broadcast. A nil or empty reference names this
 // broadcast, anything else names a sibling relative to it (e.g. "./source"). Call it on a
-// rendition that carries one before SubscribeMedia, SubscribeTrack, FetchGroup, or
-// FetchMediaGroup, which take a track name rather than a rendition; DecodeAudio and
+// rendition that carries one before media.NewContainerConsumer, SubscribeTrack, FetchGroup, or
+// media.NewContainerGroupConsumer, which take a track name rather than a rendition; DecodeAudio and
 // DecodeVideo resolve it themselves.
 //
 // Errors if this broadcast came from a local producer rather than an origin, since a
@@ -115,7 +68,7 @@ func (b *BroadcastConsumer) Resolve(ctx context.Context, reference *string) (*Br
 func (b *BroadcastConsumer) DecodeAudio(
 	ctx context.Context,
 	name string,
-	catalogAudio Audio,
+	catalogAudio ffi.MoqAudio,
 	output AudioDecoderOutput,
 ) (*AudioConsumer, error) {
 	inner, err := b.inner.DecodeAudio(ctx, name, catalogAudio, output)
@@ -132,7 +85,7 @@ func (b *BroadcastConsumer) DecodeAudio(
 func (b *BroadcastConsumer) DecodeVideo(
 	ctx context.Context,
 	name string,
-	catalogVideo Video,
+	catalogVideo ffi.MoqVideo,
 	output VideoDecoderOutput,
 ) (*VideoConsumer, error) {
 	inner, err := b.inner.DecodeVideo(ctx, name, catalogVideo, output)
@@ -140,70 +93,6 @@ func (b *BroadcastConsumer) DecodeVideo(
 		return nil, err
 	}
 	return &VideoConsumer{inner: inner}, nil
-}
-
-// Catalog subscribes and returns the first catalog. It reports ErrClosed if the
-// catalog track ends before any catalog arrives.
-func (b *BroadcastConsumer) Catalog(ctx context.Context) (*Catalog, error) {
-	consumer, err := b.SubscribeCatalog(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer consumer.Cancel()
-	catalog, err := consumer.Next(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if catalog == nil {
-		return nil, ErrClosed
-	}
-	return catalog, nil
-}
-
-// MediaConsumer is a stream of decoded media frames.
-type MediaConsumer struct {
-	inner *ffi.MoqMediaConsumer
-}
-
-// Next returns the next frame, or (nil, nil) when the track ends.
-func (m *MediaConsumer) Next(ctx context.Context) (*MediaFrame, error) {
-	return bridge.Call(ctx, m.inner.Cancel, m.inner.Next)
-}
-
-// All ranges over frames until the track ends or the loop breaks.
-func (m *MediaConsumer) All(ctx context.Context) iter.Seq2[*MediaFrame, error] {
-	return bridge.Seq(ctx, m.Next)
-}
-
-// Cancel stops the stream.
-func (m *MediaConsumer) Cancel() {
-	m.inner.Cancel()
-}
-
-// MediaGroupConsumer is a finite stream of decoded media frames from one fetched
-// group. It ends after the group's last frame.
-type MediaGroupConsumer struct {
-	inner *ffi.MoqMediaGroupConsumer
-}
-
-// Sequence is this group's sequence number within the track.
-func (m *MediaGroupConsumer) Sequence() uint64 {
-	return m.inner.Sequence()
-}
-
-// Next returns the next decoded frame, or (nil, nil) when the group ends.
-func (m *MediaGroupConsumer) Next(ctx context.Context) (*MediaFrame, error) {
-	return bridge.Call(ctx, m.inner.Cancel, m.inner.Next)
-}
-
-// All ranges over decoded frames until the group ends or the loop breaks.
-func (m *MediaGroupConsumer) All(ctx context.Context) iter.Seq2[*MediaFrame, error] {
-	return bridge.Seq(ctx, m.Next)
-}
-
-// Cancel stops the stream.
-func (m *MediaGroupConsumer) Cancel() {
-	m.inner.Cancel()
 }
 
 // GroupConsumer is a stream of timestamped raw frames within a single group.
@@ -422,24 +311,4 @@ func (f *VideoDecodedFrame) Surface() VideoSurface {
 // Close releases the frame's surface back to the decoder.
 func (f *VideoDecodedFrame) Close() {
 	f.inner.Destroy()
-}
-
-// CatalogConsumer is a stream of catalog updates.
-type CatalogConsumer struct {
-	inner *ffi.MoqCatalogConsumer
-}
-
-// Next returns the next catalog, or (nil, nil) when the track ends.
-func (c *CatalogConsumer) Next(ctx context.Context) (*Catalog, error) {
-	return bridge.Call(ctx, c.inner.Cancel, c.inner.Next)
-}
-
-// All ranges over catalog updates until the track ends or the loop breaks.
-func (c *CatalogConsumer) All(ctx context.Context) iter.Seq2[*Catalog, error] {
-	return bridge.Seq(ctx, c.Next)
-}
-
-// Cancel stops the stream.
-func (c *CatalogConsumer) Cancel() {
-	c.inner.Cancel()
 }

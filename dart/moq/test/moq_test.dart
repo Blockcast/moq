@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:moq/media.dart' as moq_media;
 import 'package:moq/json.dart' as moq_json;
 import 'package:moq/moq.dart';
 import 'package:test/test.dart';
@@ -17,6 +18,17 @@ Future<AnnounceEvent> nextRoute(AnnounceConsumer announced) async {
 }
 
 void main() {
+  test('catalog handle closes with its broadcast', () {
+    final broadcast = BroadcastProducer();
+    final catalog = moq_media.CatalogProducer(broadcast: broadcast);
+    catalog.setSection(name: 'app', json: '{"value":42}');
+    broadcast.close();
+    expect(
+      () => catalog.removeSection(name: 'app'),
+      throwsA(isA<ClosedMoqException>()),
+    );
+  });
+
   test('connects, announces, subscribes, and delivers a frame', () async {
     final relay = MoqOriginProducer(config: MoqOriginConfig());
     final server = MoqServer(

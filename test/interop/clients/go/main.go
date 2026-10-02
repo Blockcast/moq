@@ -24,11 +24,12 @@ import (
 	"time"
 
 	"moq.dev/moq"
+	moqmedia "moq.dev/moq/media"
 )
 
 const readChunk = 64 * 1024
 
-// SubscribeMedia max age: how much reordering the jitter buffer tolerates.
+// ContainerConsumer max age: how much reordering the jitter buffer tolerates.
 const maxAge = time.Second
 
 // Synthetic audio: a 48 kHz mono tone, encoded as Opus.
@@ -86,7 +87,7 @@ func publish(ctx context.Context, url, broadcast string) error {
 	}
 	defer producer.Close()
 
-	media, err := producer.PublishVideoStream(moq.VideoFormatAvc3)
+	media, err := moqmedia.NewVideoTrackStreamProducer(producer, moqmedia.Named{}, moqmedia.VideoInit{Format: moqmedia.VideoFormatAvc3, Data: nil})
 	if err != nil {
 		return err
 	}
@@ -148,8 +149,8 @@ func publish(ctx context.Context, url, broadcast string) error {
 // The catalog is a live track. A lazy publisher (e.g. the browser, which only
 // encodes on demand) may announce video in a later update rather than the first
 // snapshot, so wait for a catalog that actually has a video track.
-func catalogWithVideo(ctx context.Context, consumer *moq.BroadcastConsumer) (*moq.Catalog, error) {
-	catalogs, err := consumer.SubscribeCatalog(ctx)
+func catalogWithVideo(ctx context.Context, consumer *moq.BroadcastConsumer) (*moqmedia.Catalog, error) {
+	catalogs, err := moqmedia.NewCatalogConsumer(ctx, consumer)
 	if err != nil {
 		return nil, err
 	}
@@ -196,12 +197,12 @@ func subscribe(ctx context.Context, url, broadcast string, timeout time.Duration
 	}
 
 	var name string
-	var video moq.Video
+	var video moqmedia.Video
 	for name, video = range catalog.Video {
 		break
 	}
 
-	media, err := consumer.SubscribeMedia(ctx, name, video.Container, &moq.Subscription{MaxAge: maxAge})
+	media, err := moqmedia.NewContainerConsumer(ctx, consumer, moqmedia.ContainerConfig{Name: name, Container: video.Container, Subscription: &moq.Subscription{MaxAge: maxAge}})
 	if err != nil {
 		return err
 	}

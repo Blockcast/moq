@@ -43,7 +43,7 @@ for try await event in announced {
     print("captures \(announcement.captures ?? [])")
 
     let broadcast = try await session.consume.requestBroadcast(path: announcement.prefix)
-    let catalog = try await broadcast.subscribeCatalog()
+    let catalog = try await Media.CatalogConsumer.subscribe(broadcast: broadcast)
     for try await update in catalog {
         print("catalog: \(update)")
     }
@@ -62,11 +62,11 @@ try broadcast.announce() // unannounced broadcasts are invisible
 
 Cancelling the surrounding Swift `Task` propagates through to the underlying `cancel()` calls on each consumer. `session.shutdown()` is an alias for `cancel(code: 0)` (code 0 means "no error").
 
-A note on enum casing: `MoqError` keeps Rust's PascalCase variants, each carrying `message: String` (e.g. `MoqError.Closed(message: "...")`); plain enums round-trip to lowerCamelCase (`AudioSampleFormat.s16`). Audio codecs are objects with constructors (`AudioCodec.opus()`).
+A note on enum casing: `MoqError` keeps Rust's PascalCase variants, each carrying `message: String` (e.g. `MoqError.Closed(message: "...")`); plain enums round-trip to lowerCamelCase (`AudioSampleFormat.s16`). Media.Audio codecs are objects with constructors (`AudioCodec.opus()`).
 
 ## API shape
 
-The wrapper fully wraps every stateful handle (`Client`, `Session`, `BroadcastProducer`, `TrackConsumer`, …) and re-exports the plain data records/enums under de-prefixed names via typealias (`Frame`, `Catalog`, `Audio`, `Container`, …). Because the records are typealiased, new fields on the `moq-ffi` side flow through automatically; only new FFI *methods* need a matching wrapper method.
+The wrapper fully wraps every stateful handle (`Client`, `Session`, `BroadcastProducer`, `TrackConsumer`, …) and re-exports the plain data records/enums under de-prefixed names via typealias (`Frame`, `Media.Catalog`, `Media.Audio`, `Media.Container`, …). Because the records are typealiased, new fields on the `moq-ffi` side flow through automatically; only new FFI *methods* need a matching wrapper method.
 
 Every consumer conforms to `AsyncSequence`, so `for try await x in consumer` works directly. `TrackConsumer` iterates groups in sequence order; use its `groupsAsArrived` property for arrival order.
 
@@ -102,7 +102,7 @@ swift/
   Package.swift.template      Released WRAPPER manifest (Moq + dep on moq-swift-ffi; REPLACE_FFI_VERSION)
   ffi/Package.swift.template  Released FFI manifest (MoqFFI + binaryTarget; REPLACE_URL/REPLACE_CHECKSUM)
   Sources/
-    Moq/                      Ergonomic wrapper (Client, Server, Origin, Broadcast, Track, Media, Audio, …)
+    Moq/                      Ergonomic wrapper (Client, Server, Origin, Broadcast, Track, Media, Media.Audio, …)
     MoqFFI/                   UniFFI-generated swift (populated by check.sh/package-ffi.sh, gitignored)
   Tests/MoqTests/             Smoke tests
   scripts/                    check.sh, package{,-ffi}.sh, verify{,-ffi}.sh, publish{,-ffi}.sh

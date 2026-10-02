@@ -9,56 +9,6 @@ import kotlinx.coroutines.flow.onCompletion
 import uniffi.moq.MoqException
 
 /**
- * Stream of catalog updates. Terminates when the underlying track ends.
- *
- * The Flow's [onCompletion] forwards Kotlin coroutine cancellation to the
- * native consumer's `cancel()` so structured concurrency propagates through
- * to the QUIC stream.
- */
-fun CatalogConsumer.updates(): Flow<Catalog> = flow {
-    while (true) {
-        currentCoroutineContext().ensureActive()
-        emit(next() ?: break)
-    }
-}.onCompletion { cause ->
-    if (cause is CancellationException) cancel()
-}
-
-/**
- * Subscribe to the catalog track and return the first catalog, cancelling the
- * subscription before returning. Convenience for callers that only need the
- * current catalog rather than a stream of updates (use [updates] for that).
- */
-suspend fun BroadcastConsumer.catalog(): Catalog {
-    val consumer = subscribeCatalog()
-    try {
-        return consumer.next() ?: throw MoqException.Closed()
-    } finally {
-        consumer.cancel()
-    }
-}
-
-/** Stream of decoded media frames in decode order. */
-fun MediaConsumer.frames(): Flow<MediaFrame> = flow {
-    while (true) {
-        currentCoroutineContext().ensureActive()
-        emit(next() ?: break)
-    }
-}.onCompletion { cause ->
-    if (cause is CancellationException) cancel()
-}
-
-/** Stream of decoded frames from one finite, fetched media group. */
-fun MediaGroupConsumer.frames(): Flow<MediaFrame> = flow {
-    while (true) {
-        currentCoroutineContext().ensureActive()
-        emit(next() ?: break)
-    }
-}.onCompletion { cause ->
-    if (cause is CancellationException) cancel()
-}
-
-/**
  * Stream of decoded audio frames in the layout declared by the
  * [AudioDecoderOutput] the consumer was created with.
  */

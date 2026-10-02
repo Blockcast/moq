@@ -13,12 +13,18 @@ core arrives as a prebuilt static library through the `moq.dev/moq-ffi` module, 
 `go get` is all it takes (`CGO_ENABLED=1`, the default on Unix). Targets:
 linux/amd64, linux/arm64, darwin/arm64 (macOS 12.3+), windows/amd64.
 
+`moq.dev/moq/media` owns catalogs, encoded imports, and container consumers.
+Construct `NewAudioTrackProducer` / `NewVideoTrackProducer` from a broadcast, an init record,
+and a `Named` or `Requested` target. `NewCatalogProducer` holds its broadcast weakly;
+catalog writes fail with `ErrClosed` after the broadcast closes. Media timestamps use `time.Duration`.
+
 ```bash
 go get moq.dev/moq@latest
 ```
 
 ```go
 import "moq.dev/moq"
+import moqmedia "moq.dev/moq/media"
 
 // Subscribe. The iterator is live, so run it in its own goroutine.
 client, err := moq.Dial(ctx, "https://relay.example.com", moq.WithTLSRoots("ca.pem"))
@@ -47,7 +53,7 @@ for event, err := range announced.All(ctx) {
     if err != nil {
         log.Fatal(err)
     }
-    catalog, err := broadcast.Catalog(ctx)
+    catalog, err := moqmedia.CatalogSnapshot(ctx, broadcast)
     if err != nil {
         log.Fatal(err)
     }
@@ -59,7 +65,7 @@ for event, err := range announced.All(ctx) {
 // Publish encoded frames, or raw pixels with the codec inside the binding.
 // opusInit, packet, pts, and rgba come from your encoder or capture source.
 broadcast, _ := client.CreateBroadcast("my-stream.hang")
-audio, _ := broadcast.PublishAudio(moq.AudioFormatOpus, opusInit)
+audio, _ := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.AudioFormatOpus, Data: opusInit})
 _ = audio.WriteFrame(moq.Frame{Payload: packet, Timestamp: 20 * time.Millisecond})
 
 track := "camera"
@@ -73,7 +79,7 @@ _ = broadcast.Announce(moq.Route{})
 broadcast.Close()    // keep the producer reachable while publishing, then close explicitly
 ```
 
-For locally encoded media, call `MediaProducer.Flush(timestampUs)` after `WriteFrame` with the same broadcast-clock PTS. It measures catalog jitter at the transport handoff. File, pipe, and network imports should omit `Flush`; built-in encoders observe their own output.
+For locally encoded media, call `media.TrackProducer.Flush(timestamp)` after `WriteFrame` with the same broadcast-clock PTS. It measures catalog jitter at the transport handoff. File, pipe, and network imports should omit `Flush`; built-in encoders observe their own output.
 
 Call `media.Discontinuity()` when the source seeks, pauses, or changes its time base. It publishes a timeline marker and restarts handoff measurement without lowering advertised jitter. Resume with timestamps that continue forward on the broadcast media clock; this does not permit timestamp rewinds. On a video track, resume with a keyframe: a delta frame before it fails.
 
@@ -132,9 +138,9 @@ Every live stream ranges with `All(ctx)`; a `TrackConsumer` also offers
 and `moqjson.NewSnapshotConsumer(track, options)` a `TrackConsumer`, and they take
 anything `encoding/json` handles and return `json.RawMessage`. The rest
 of the [shared feature list](/lib/#what-every-binding-can-do) maps one to
-one: `FetchGroup`/`FetchMediaGroup`, `Dynamic()` with `All(ctx)`,
+one: `FetchGroup`/`media.NewContainerGroupConsumer`, `Dynamic()` with `All(ctx)`,
 `Session.Bandwidth()` to divide the send estimate,
-`AppendDatagram`/`Datagrams(ctx)`, `SetCatalogSection`, `Demand()` for `Name`, `Used`, and `Unused`,
+`AppendDatagram`/`Datagrams(ctx)`, `media.CatalogProducer.SetSection`, `Demand()` for `Name`, `Used`, and `Unused`,
 `Session().Stats()`. `moq.IsAuthError` and `moq.IsShutdown` classify errors. `moq.ProtocolError(err)` is the structured protocol failure (scope, verbatim code, kind) when the peer sent one.
 
 Each `VideoDecodedFrame` from `DecodeVideo` owns its decoded picture until

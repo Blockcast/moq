@@ -54,10 +54,6 @@ val Frame.timestamp: Duration
     get() = timestampUs.toLong().microseconds
 
 /** Presentation timestamp. */
-val MediaFrame.timestamp: Duration
-    get() = timestampUs.toLong().microseconds
-
-/** Presentation timestamp. */
 val Datagram.timestamp: Duration
     get() = timestampUs.toLong().microseconds
 
