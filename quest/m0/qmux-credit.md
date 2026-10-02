@@ -32,7 +32,8 @@ still needs to finish; these are draft PRs, not released fixes.
 Remaining work:
 
 - Merge the upstream fixes after review and CI.
-- Publish patched 0.5.x newer than 0.5.2 and patched 0.6.x newer than 0.6.1.
+- Publish patched 0.5.x newer than 0.5.2 containing #413, and patched
+  0.6.x newer than 0.6.2 containing #412.
   The upstream release workflow only runs on `main`; the 0.5 release needs the
   maintainer's release process.
 - Bump `main`'s current 0.5.2 pin to the released 0.5 fix and validate the
