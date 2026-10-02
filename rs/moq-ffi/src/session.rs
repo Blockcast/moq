@@ -189,9 +189,7 @@ impl Client {
 
 		// Building the endpoint here, not at connect, is what surfaces an unreadable
 		// certificate or a half-configured mTLS identity from `new`.
-		let client = connect
-			.init(quic)
-			.map_err(|err| MoqError::Config(format!("{err}")))?;
+		let client = connect.init(quic).map_err(|err| MoqError::Config(format!("{err}")))?;
 
 		Ok(Self {
 			client,
@@ -259,7 +257,6 @@ fn map_closed_error(err: moq_tokio::Error) -> MoqError {
 		},
 	}
 }
-
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
@@ -577,7 +574,6 @@ impl MoqClient {
 		self.task.cancel();
 	}
 }
-
 
 /// A snapshot of connection statistics for a [`MoqSession`].
 ///

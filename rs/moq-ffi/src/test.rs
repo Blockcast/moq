@@ -3683,7 +3683,11 @@ async fn server_cancel_releases_the_bound_port() {
 	// Park an accept on the server lock, the state a live server is closed in.
 	let accepting = server.clone();
 	let accept = tokio::spawn(async move { accepting.accept().await });
-	wait_for_config_error(|| server.cert_fingerprints().map(drop), |err| matches!(err, MoqError::Busy)).await;
+	wait_for_config_error(
+		|| server.cert_fingerprints().map(drop),
+		|err| matches!(err, MoqError::Busy),
+	)
+	.await;
 
 	server.cancel();
 
@@ -4416,7 +4420,9 @@ async fn server_cert_fingerprints_busy_during_accept_and_cancelled_after() {
 	})
 	.unwrap();
 	server.listen().await.expect("listen failed");
-	server.cert_fingerprints().expect("fingerprints available between accepts");
+	server
+		.cert_fingerprints()
+		.expect("fingerprints available between accepts");
 
 	let accepting = server.clone();
 	let accept = tokio::spawn(async move { accepting.accept().await });
