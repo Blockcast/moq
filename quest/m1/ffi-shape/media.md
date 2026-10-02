@@ -24,4 +24,8 @@ once the shape is in front of you, and prefer one path. Go's
 `FetchMediaGroup` takes an options struct. Media producers watch subscribers
 through `demand()` only.
 
+Net already gave Python and Go owned root records with `timedelta` /
+`time.Duration` fields (`Frame`, `Subscription`, `TrackInfo`, ...); `MediaFrame`
+and `MediaProducer`'s `timestamp_us`/`flush` arguments should follow suit.
+
 Public API: breaking in every binding. Wire: none.
