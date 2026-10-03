@@ -72,7 +72,6 @@ Confirmed in [#4100](https://github.com/moq-dev/moq/pull/4100):
 - [Session report parity](/quest/m1/cpp/session-report.md) - a session reports its negotiated draft and reconnect failures, so the OBS dock shows them again
 - [Catalog switch](/quest/m1/cpp/catalog-switch.md) - a catalog update keeps OBS playback running until the replacement track is decoding
 - [OBS stats race test](/quest/m1/cpp/stats-race.md) - a test against the generated bindings proves a retired session's stats are refused
-- [Cancel](/quest/m1/cpp/cancel.md) - a cancelled or consumed future reports `valid() == false`, like `std::future`, and a read of it aborts with a message naming the misuse
 
 ## Related
 

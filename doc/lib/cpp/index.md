@@ -111,6 +111,9 @@ An async call returns `moq::Future<T>`, which delivers a `moq::expected<T>`:
 - **Cancel** by calling `cancel()` or destroying the future. The Rust future is
   dropped at its next await point; the object it ran on stays usable, so the
   next call works. A cancelled future's continuation never runs.
+- **Check** `valid()` before reading a future that may be cancelled, consumed, or
+  moved from. It is false once `get()`, `then()`, `cancel()`, or a move took the
+  future's state, and reading an invalid future aborts.
 
 ```cpp
 auto reading = (*media)->next();

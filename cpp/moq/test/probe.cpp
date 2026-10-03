@@ -138,13 +138,25 @@ int main() {
     // Cancel a read that has nothing to deliver yet.
     auto pending = consumer->read_frame();
     CHECK(pending.wait_for(50ms) == std::future_status::timeout);
+    CHECK(pending.valid());
     pending.cancel();
     CHECK(!pending.valid());
+
+    // A move takes the state, so the source is invalid and the destination is not.
+    {
+        auto source = consumer->read_frame();
+        CHECK(source.valid());
+        auto destination = std::move(source);
+        CHECK(!source.valid());
+        CHECK(destination.valid());
+    }
 
     // The consumer survives the cancelled read and delivers the next frame.
     auto reading = consumer->read_frame();
     ok(track->write_frame({bytes("hello"), 1000}), "write_frame");
     auto frame = ok(reading.get(), "read_frame");
+    // get() consumed the state.
+    CHECK(!reading.valid());
     CHECK(frame.has_value());
     CHECK(frame->payload == bytes("hello"));
     CHECK(frame->timestamp_us == 1000);
@@ -153,10 +165,13 @@ int main() {
     {
         Latch done;
         std::optional<moq::Frame> received;
-        auto continuation = consumer->read_frame().then(moq::inline_executor, [&](moq::expected<std::optional<moq::Frame>> result) {
+        auto reading_next = consumer->read_frame();
+        auto continuation = std::move(reading_next).then(moq::inline_executor, [&](moq::expected<std::optional<moq::Frame>> result) {
             received = ok(std::move(result), "then read_frame");
             done.set();
         });
+        // then() took the future's state.
+        CHECK(!reading_next.valid());
         ok(track->write_frame({bytes("then"), 2000}), "write_frame");
         CHECK(done.wait_for(5s));
         CHECK(received && received->payload == bytes("then"));
