@@ -23,4 +23,3 @@ producing a misleading missing-header error.
 ## Related
 
 - [C++ through moq-ffi](/quest/m1/cpp/README.md) - the line this blocks
-- [OBS builds on case-insensitive filesystems](/quest/m1/cpp/obs-version-header.md) - the other inherited `platform.yml` failure

@@ -26,6 +26,10 @@ else()
 endif()
 
 include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/common/bootstrap.cmake" NO_POLICY_SCOPE)
+# The template turns this on for every directory, which puts cpp/obs and cpp/moq on the
+# include path; on case-insensitive filesystems their VERSION files then answer
+# `#include <version>`. Every plugin include is a same-directory quoted one, so nothing needs it.
+set(CMAKE_INCLUDE_CURRENT_DIR FALSE)
 
 project(${_name} VERSION ${_version})
 
