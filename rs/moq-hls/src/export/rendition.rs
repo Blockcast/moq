@@ -139,9 +139,8 @@ impl Media {
 		let mut handle = self.handle.lock().expect("media lock poisoned");
 		match handle.binding.poll_broadcast(&kio::Waiter::noop()) {
 			Poll::Ready(Ok(broadcast)) if broadcast.is_closed() => {
-				// The bound sibling ended (a different first hop replaces the publisher with
-				// Dropped). Origin finish()es that spliced front, so is_finished() cannot
-				// tell a rival publisher from a clean VOD end. Rows listed for it must not
+				// The bound sibling ended, and a broadcast end carries no cause, so a rival
+				// publisher looks the same as a clean VOD end. Rows listed for it must not
 				// be served from the replacement.
 				window.clear();
 				if let Ok(next) = source.bind(Some(rel)) {
@@ -190,11 +189,12 @@ fn normalize_video(config: &VideoConfig) -> VideoConfig {
 	let mut config = config.clone();
 	config.bitrate = None;
 	config.jitter = None;
+	config.delay = None;
 	config.label = None;
 	config.stalled = None;
-	// The muxer ignores a non-finite framerate, and NaN never equals itself, so a catalog
-	// carrying one would otherwise look different from itself on every republish.
-	config.framerate = config.framerate.filter(|fps| fps.is_finite());
+	// Publishers estimate it and republish once it settles. The rendition keeps the fMP4
+	// timescale it was built with, and the framerate is refreshed in place like the bitrate.
+	config.framerate = None;
 	config
 }
 
@@ -203,6 +203,7 @@ fn normalize_audio(config: &AudioConfig) -> AudioConfig {
 	let mut config = config.clone();
 	config.bitrate = None;
 	config.jitter = None;
+	config.delay = None;
 	config.label = None;
 	config
 }
@@ -217,6 +218,9 @@ pub struct Rendition {
 	/// Advertised bitrate for the master playlist `BANDWIDTH` attribute; read through
 	/// [`bandwidth`](Self::bandwidth), refreshed in place by [`refresh`](Self::refresh).
 	bitrate: RwLock<Option<u64>>,
+	/// The latest catalog framerate (video only), refreshed in place by [`refresh`](Self::refresh):
+	/// the muxer's fallback sample cadence and the DASH `frameRate`.
+	framerate: RwLock<Option<f64>>,
 	/// Coded width, for the master playlist `RESOLUTION` (video only).
 	pub width: Option<u32>,
 	/// Coded height, for the master playlist `RESOLUTION` (video only).
@@ -249,8 +253,8 @@ pub struct Rendition {
 impl Rendition {
 	/// Whether `config` describes the same media this rendition is already serving, i.e. whether
 	/// it decodes and muxes identically. Fields the publisher revises without touching the media
-	/// (its bitrate and jitter estimates, a label) are ignored here and picked up by
-	/// [`refresh`](Self::refresh) instead.
+	/// (its bitrate, jitter, and framerate estimates, a label) are ignored here, and the bitrate
+	/// and framerate are picked up by [`refresh`](Self::refresh) instead.
 	pub(crate) fn matches_video(&self, config: &VideoConfig) -> bool {
 		let Config::Video(current) = &self.config else {
 			return false;
@@ -272,19 +276,25 @@ impl Rendition {
 		self.bitrate().unwrap_or(default_bandwidth(self.kind))
 	}
 
-	/// Take the advertised bitrate from a catalog update that
-	/// [`matches`](Self::matches_video) this rendition.
+	/// Take the advertised bitrate and framerate from a catalog update that
+	/// [`matches`](Self::matches_video) this rendition (audio passes no framerate).
 	///
 	/// The publisher's estimator republishes the catalog whenever its measured bitrate moves, so
 	/// this is the common update by far: rebuilding the rendition for it would reset the playlist
 	/// window, the cached init segment, and `EXT-X-MEDIA-SEQUENCE` several times a minute.
-	pub(crate) fn refresh(&self, bitrate: Option<u64>) {
+	pub(crate) fn refresh(&self, bitrate: Option<u64>, framerate: Option<f64>) {
 		*self.bitrate.write().expect("bitrate lock poisoned") = bitrate;
+		*self.framerate.write().expect("framerate lock poisoned") = framerate;
 	}
 
 	/// The latest catalog bitrate, preserving `None` for muxer-specific fallback behavior.
 	fn bitrate(&self) -> Option<u64> {
 		*self.bitrate.read().expect("bitrate lock poisoned")
+	}
+
+	/// The latest catalog framerate.
+	fn framerate(&self) -> Option<f64> {
+		*self.framerate.read().expect("framerate lock poisoned")
 	}
 
 	/// Build a video rendition over the broadcast's timeline `section`, timed by the
@@ -303,6 +313,7 @@ impl Rendition {
 			name,
 			kind: Kind::Video,
 			bitrate: RwLock::new(config.bitrate),
+			framerate: RwLock::new(config.framerate),
 			width: config.coded_width,
 			height: config.coded_height,
 			codec: config.codec.to_string(),
@@ -329,6 +340,7 @@ impl Rendition {
 			name,
 			kind: Kind::Audio,
 			bitrate: RwLock::new(config.bitrate),
+			framerate: RwLock::new(None),
 			width: None,
 			height: None,
 			codec: config.codec.to_string(),
@@ -564,7 +576,7 @@ impl Rendition {
 			})
 			.collect();
 		let (framerate, sample_rate, channel_count) = match &self.config {
-			Config::Video(config) => (config.framerate, None, None),
+			Config::Video(_) => (self.framerate(), None, None),
 			Config::Audio(config) => (None, Some(config.sample_rate), Some(config.channel_count)),
 		};
 		Some(mpd::Representation {
@@ -610,13 +622,15 @@ impl Rendition {
 		clock.wall_clock(pts).ok()
 	}
 
-	fn muxer(&self) -> Result<Muxer> {
+	/// A muxer at the timescale this rendition's config chose, with the latest bitrate and
+	/// fallback framerate.
+	pub(crate) fn muxer(&self) -> Result<Muxer> {
 		let bitrate = self.bitrate();
 		Ok(match &self.config {
 			Config::Video(config) => {
 				let mut config = config.clone();
 				config.bitrate = bitrate;
-				Muxer::video(&config)?
+				Muxer::video(&config)?.with_framerate(self.framerate())
 			}
 			Config::Audio(config) => {
 				let mut config = config.clone();

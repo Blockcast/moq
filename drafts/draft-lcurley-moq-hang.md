@@ -391,6 +391,7 @@ type JsonSchema = {
   "broadcast": string | undefined,
   "bitrate": number | undefined,
   "jitter": number | undefined,
+  "delay": number | undefined,
 }
 ~~~
 
@@ -406,6 +407,7 @@ type BinarySchema = {
   "broadcast": string | undefined,
   "bitrate": number | undefined,
   "jitter": number | undefined,
+  "delay": number | undefined,
 }
 ~~~
 
@@ -461,9 +463,14 @@ A `snapshot` group covers a single value (plus any deltas), so its window spans 
 ### broadcast {#data-shared}
 The `broadcast` field carries the same meaning here as it does for a media rendition ({{field-broadcast}}).
 
-### bitrate and jitter {#data-estimates}
+### bitrate, jitter, and delay {#data-estimates}
 The optional `bitrate` field is the track's maximum bitrate in bits per second.
-The optional `jitter` field carries the same meaning and rules as it does for a media rendition ({{field-jitter}}), with a payload in place of a frame.
+The optional `jitter` and `delay` fields carry the same meaning and rules as they do for a media rendition ({{field-jitter}}, {{field-delay}}), with a payload in place of a frame.
+
+A payload's presentation timestamp is its capture time on the broadcast's clock, the one its media renditions use, when the publisher knows it (a datagram's arrival, a sensor read), and otherwise the time the publisher wrote it.
+A publisher measures `jitter` and `delay` only from payloads that carry a capture time, and MUST omit both for a track written without one.
+A publisher MUST NOT use a timestamp on an unrelated clock, such as a device's own uptime, since it would report a meaningless lateness and, through the broadcast-wide minimum, distort every other rendition's `delay`.
+A `snapshot` update that writes no frame, such as an unchanged JSON value, is not a flush and is not measured.
 
 ## Binary Fields {#binary}
 A decoder config field carrying raw bytes, notably `description` (an `AllowSharedBufferSource` in WebCodecs), is carried in the catalog as a hex string ({{!RFC4648, Section 8}}).
@@ -481,6 +488,7 @@ type CommonExtensions = {
   "label": string | undefined,
   "container": Container,
   "jitter": number | undefined,
+  "delay": number | undefined,
 }
 ~~~
 
@@ -532,6 +540,19 @@ For example:
 - A fragment or packet batch contributes the media span between its earliest timestamp and flush point.
 - Reordered frames contribute the delay they were held before flushing, without treating a decode-order presentation timestamp gap as delay by itself.
 
+### delay {#field-delay}
+The maximum amount, in milliseconds, by which a rendition's minimum flush lateness ({{field-jitter}}) has trailed the smallest minimum among the broadcast's renditions that measure it.
+If absent, a consumer SHOULD assume the rendition does not trail the others.
+
+A publisher measures each rendition's minimum over the same recent window it uses for `jitter`, from one clock shared by every rendition, and advertises the largest difference observed.
+A container importer does not measure `delay`.
+The rounding, `0`, and never-lower rules of `jitter` apply unchanged.
+
+A consumer SHOULD hold at least the largest `delay` plus `jitter` among the renditions it plays together.
+A consumer MUST NOT subtract one rendition's `delay` from another's: each is a maximum over the life of the stream, so two values need not share an origin.
+
+For example, a video encoder that flushes 200 milliseconds after the audio encoder for the same media time advertises a video `delay` of 200 and no audio `delay`.
+
 # Container {#container}
 Audio, video, and text tracks use a container to encapsulate the media payload.
 A rendition declares its container via the `container` field of its catalog entry ({{common}}):
@@ -555,7 +576,10 @@ A consumer MUST NOT submit the marker to a decoder.
 Empty groups (zero objects) are permitted and mean nothing.
 After a discontinuity the timeline continues forward.
 A publisher that stops producing and may resume on the same track (e.g. an encoder idle for lack of demand) SHOULD publish a discontinuity marker when it stops, so the group before the pause does not reach across the gap and read as live.
-A group whose timestamps fall below the live edge earlier groups reached is malformed.
+The first timestamp of a group MUST NOT be lower than the first timestamp of any group with a lower sequence, and no frame of a group may be lower than the first timestamp of the group before it; a group that breaks either is malformed.
+A group MAY start at the same timestamp as the previous group.
+Frames MAY present below the previous group's content (B-frames, or a keyframe overlapping the previous group's last frame).
+A publisher whose source restarts below the previous group's start begins a new broadcast instead.
 A delivered sequence hole is a playhead event unless the boundary is contiguous within 1 ms.
 A consumer re-applies startup delay and skip at a playhead event; it does not reset codec state.
 
@@ -1083,9 +1107,12 @@ A publisher MAY estimate an unknown final duration from the frame cadence, but M
 - A marker group of one empty frame declares a discontinuity. Empty groups mean nothing. Timestamps only move forward; a group below the live edge is malformed. A delivered sequence hole is a playhead event unless contiguous within 1 ms.
 - A publisher that stops producing and may resume on the same track SHOULD publish a discontinuity marker when it stops.
 - An audio endpoint bounds only the terminal packets that follow it in its own group.
+- Replaced the live-edge floor with monotonic group starts: a group may overlap the previous group's content but not start before it.
 - Replaced the archive timeline `wall` field with a root `clock` section (`wall` plus `timescale`): one fixed broadcast mapping every track and the archive index convert into, independent of any archive. Zero timescales and walls past the JSON-safe integer range are refused.
 - Added optional `bitrate` and `jitter` fields to `json` and `binary` track entries.
+- Added the optional `delay` rendition field: how far a rendition's minimum flush lateness trails the broadcast's earliest rendition, never lowered once advertised and never subtracted across renditions.
 - Recommended namespaced keys for application root sections.
+- Added the optional `delay` field to `json` and `binary` track entries, measured only from payloads stamped with their capture time on the broadcast clock.
 
 # Acknowledgments
 {:numbered="false"}

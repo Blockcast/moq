@@ -1,15 +1,16 @@
 import { type Dispose, type Getter, race, Signal } from "@moq/signals";
 import type * as broadcast from "../broadcast.ts";
+import { Withdrawal } from "../connection/withdrawal.ts";
 import { error, NotFound, reason, StreamCode, StreamError } from "../error.ts";
 import type * as group from "../group.ts";
-import { type Hop, type Route, routesEqual } from "../hop.ts";
-import { hiddenBelow, hooks } from "../internal.ts";
+import { Cost, type Hop, type Route, routesEqual } from "../hop.ts";
+import { hiddenBelow, hooks, presented } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
-import * as Path from "../path.ts";
+import type * as Path from "../path.ts";
 import { type Reader, type Stream, Writer } from "../stream.ts";
 import { Milli, Timescale } from "../time.ts";
 import type * as track from "../track.ts";
-import { type Advertised, wireOf } from "../wire.ts";
+import { type Advertised, type Advertisements, wireOf } from "../wire.ts";
 import { AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
 import * as DatagramStream from "./datagram_stream.ts";
@@ -32,35 +33,11 @@ import {
 	hasAnnounceOk,
 	hasDatagrams,
 	hasProbeRtt,
+	hasRouteCost,
 	hasStreamCount,
 	resolvesStart,
 	Version,
 } from "./version.ts";
-
-// Where each originated route lands under the requested prefix: its suffix beneath
-// the prefix, or the empty suffix for a route above it, where the most specific
-// such route wins the way a request through the prefix would resolve.
-function presented(
-	prefix: Path.Valid,
-	table: ReadonlyMap<Path.Valid, Advertised>,
-	hidden: boolean,
-): Map<Path.Valid, Advertised> {
-	const out = new Map<Path.Valid, Advertised>();
-	let rootLen = -1;
-	for (const [covered, snap] of table) {
-		if (Path.hasPrefix(covered, prefix)) {
-			if (covered.length < rootLen) continue;
-			rootLen = covered.length;
-			out.set(Path.empty(), snap);
-			continue;
-		}
-		// A hidden route stays off the wire unless the request opted in.
-		if (!hidden && hiddenBelow(prefix, covered)) continue;
-		const suffix = Path.stripPrefix(prefix, covered);
-		if (suffix !== null) out.set(suffix, snap);
-	}
-	return out;
-}
 
 const PROBE_INTERVAL = 100; // ms
 const PROBE_MAX_AGE = 10_000; // ms
@@ -347,6 +324,7 @@ function positionCursor(track: track.Subscriber, version: Version, startGroup: n
  * @internal
  */
 export class Publisher {
+	#withdrawal = new Withdrawal();
 	// The version of the connection.
 	readonly version: Version;
 
@@ -365,7 +343,7 @@ export class Publisher {
 	#datagramWriter?: WritableStreamDefaultWriter<Uint8Array>;
 
 	// Originated advertisements this session forwards.
-	#advertised: Getter<ReadonlyMap<Path.Valid, Advertised> | undefined>;
+	#advertised: Getter<Advertisements | undefined>;
 
 	#publish?: OriginConsumer;
 
@@ -408,7 +386,12 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	async runAnnounce(msg: AnnounceRequest, stream: Stream) {
+	runAnnounce(msg: AnnounceRequest, stream: Stream): Promise<void> {
+		return this.#withdrawal.track(this.#runAnnounce(msg, stream));
+	}
+
+	async #runAnnounce(msg: AnnounceRequest, stream: Stream) {
+		if (this.#withdrawal.closing.peek()) return;
 		console.debug(`announce: prefix=${msg.prefix}`);
 
 		// Keyed by suffix, valued by identity plus route, so a republish diffs as
@@ -424,6 +407,10 @@ export class Publisher {
 			if (hasAnnounceOk(this.version)) return route.hops;
 			return [...route.hops, this.hop];
 		};
+
+		// What the peer decodes for a route: pre-lite-06 wires carry no cost, so a re-price
+		// there must not restart.
+		const onWire = (route: Route): Route => (hasRouteCost(this.version) ? route : { ...route, cost: Cost.zero });
 
 		const announce = async (suffix: Path.Valid, route: Route) => {
 			console.debug(`announce: broadcast=${suffix} active=true`);
@@ -475,15 +462,18 @@ export class Publisher {
 		// unrelated moved.
 		// TODO Make a better helper within Signals.
 		let dispose!: Dispose;
-		let changed = new Promise<ReadonlyMap<Path.Valid, Advertised> | undefined>((resolve) => {
+		let changed = new Promise<Advertisements | undefined>((resolve) => {
 			dispose = this.#advertised.changed(resolve);
 		});
+
+		// A hidden route stays off the wire unless the request opted in.
+		const carries = (covered: Path.Valid) => msg.hidden || !hiddenBelow(msg.prefix, covered);
 
 		try {
 			const initial = this.#advertised.peek();
 			if (!initial) return; // closed
 
-			for (const [name, snap] of presented(msg.prefix, initial, msg.hidden)) {
+			for (const [name, snap] of presented(msg.prefix, initial, carries)) {
 				active.set(name, snap);
 			}
 
@@ -515,12 +505,12 @@ export class Publisher {
 			}
 
 			for (;;) {
-				const advertised = await race([changed, stream.reader.closed]);
+				const advertised = await race([changed, stream.reader.closed, this.#withdrawal.closing]);
 				dispose();
-				if (!advertised) break;
+				if (!advertised || advertised === true) break;
 
 				// Re-arm before reading, so an advertise that lands while we write is not lost.
-				changed = new Promise<ReadonlyMap<Path.Valid, Advertised> | undefined>((resolve) => {
+				changed = new Promise<Advertisements | undefined>((resolve) => {
 					dispose = this.#advertised.changed(resolve);
 				});
 
@@ -528,7 +518,7 @@ export class Publisher {
 				if (!latest) break;
 
 				const updated = new Map<Path.Valid, Advertised>();
-				for (const [name, snap] of presented(msg.prefix, latest, msg.hidden)) {
+				for (const [name, snap] of presented(msg.prefix, latest, carries)) {
 					updated.set(name, snap);
 				}
 
@@ -540,12 +530,17 @@ export class Publisher {
 					const prev = active.get(suffix);
 					if (!prev || prev.identity !== snap.identity) {
 						await announce(suffix, snap.route);
-					} else if (!routesEqual(prev.route, snap.route)) {
+					} else if (!routesEqual(onWire(prev.route), onWire(snap.route))) {
 						await restart(suffix, snap.route);
 					}
 				}
 
 				active = updated;
+			}
+			if (this.#withdrawal.closing.peek()) {
+				for (const suffix of active.keys()) await retract(suffix);
+				stream.close();
+				await stream.writer.closed;
 			}
 		} finally {
 			dispose();
@@ -950,7 +945,7 @@ export class Publisher {
 		}
 
 		const cached = tracks.get(track);
-		if (cached) return cached;
+		if (cached !== undefined) return cached;
 
 		const pending = (async () => {
 			const info = await wireOf(front).resolveTrackInfo(track);
@@ -991,7 +986,7 @@ export class Publisher {
 
 				// Convert the timestamp to the track's advertised timescale, matching #serveGroup.
 				const ts = Math.round(datagram.timestamp.as(timescale));
-				const body = new DatagramMessage(sub, datagram.sequence, ts, datagram.payload).encode();
+				const body = new DatagramMessage(sub, datagram.sequence, ts, datagram.payload).encode(this.version);
 
 				// No group fallback: drop anything that doesn't fit a single datagram.
 				if (body.byteLength > maxSize) {
@@ -1055,6 +1050,7 @@ export class Publisher {
 			// in the order we asked, which is oldest-first, exactly backwards for live media.
 			// Failing here drops the group and lets the next one compete for the next slot.
 			const stream = await Writer.tryOpen(this.#quic, {
+				version: this.version,
 				sendOrder: priority.rank(group.sequence),
 				cancel: unsubscribed,
 				waitUntilAvailable: false,
@@ -1084,13 +1080,10 @@ export class Publisher {
 			// follows it too rather than keeping a stale rank until it finishes.
 			priority.add(stream, group.sequence);
 
-			await hooks.guardGroup(
-				group,
-				(async () => {
-					await stream.u53(0); // stream type
-					await msg.encode(stream, this.version);
-				})(),
-			);
+			await hooks.guardGroup(group, async () => {
+				await stream.u53(0); // stream type
+				await msg.encode(stream, this.version);
+			});
 
 			// Lite05+ prefixes every frame with a zigzag-delta timestamp at the track's
 			// advertised timescale; older drafts omit it.
@@ -1122,12 +1115,12 @@ export class Publisher {
 					if (timestamps) {
 						// Convert each frame to the track's advertised timescale.
 						const ts = BigInt(Math.round(read.frame.timestamp.as(timescale)));
-						await hooks.guardGroup(group, stream.u62(zigzag(ts - prevTs)));
+						await hooks.guardGroup(group, () => stream.u62(zigzag(ts - prevTs)));
 						prevTs = ts;
 					}
 
-					await hooks.guardGroup(group, stream.u53(read.frame.payload.byteLength));
-					await hooks.guardGroup(group, stream.write(read.frame.payload));
+					await hooks.guardGroup(group, () => stream.u53(read.frame.payload.byteLength));
+					await hooks.guardGroup(group, () => stream.write(read.frame.payload));
 				} finally {
 					read.complete();
 				}
@@ -1231,6 +1224,10 @@ export class Publisher {
 			console.warn("probe stream error", err);
 			stream.close();
 		}
+	}
+
+	withdraw(): Promise<void> {
+		return this.#withdrawal.close();
 	}
 
 	close() {

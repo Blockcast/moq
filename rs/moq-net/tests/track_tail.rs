@@ -56,9 +56,19 @@ struct Outcome {
 	elapsed: Duration,
 }
 
-/// Publish a one-group track, end it while its group stream is held back, then deliver or
-/// lose that stream, and return what the subscriber read.
-async fn round(version: &str, late: Late) -> Outcome {
+/// A publisher and subscriber over the mock, with the subscriber holding `bcast`.
+struct Pair {
+	pair: support::harness::MockPair,
+	track: moq_net::track::Producer,
+	remote: moq_net::broadcast::Consumer,
+	_keep: (
+		moq_net::broadcast::Producer,
+		moq_net::origin::Producer,
+		moq_net::origin::Producer,
+	),
+}
+
+async fn connect(version: &str) -> Pair {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	let track = broadcast.create_track("video", None).unwrap();
@@ -79,6 +89,24 @@ async fn round(version: &str, late: Late) -> Outcome {
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
+
+	Pair {
+		pair,
+		track,
+		remote,
+		_keep: (broadcast, publisher, subscriber),
+	}
+}
+
+/// Publish a group below the declared end (or none for an empty track), hold its stream
+/// back until the subscription ends, then deliver or lose it.
+async fn round(version: &str, late: Late, final_sequence: u64) -> Outcome {
+	let Pair {
+		pair,
+		mut track,
+		remote,
+		_keep,
+	} = connect(version).await;
 
 	let reader = tokio::spawn(async move {
 		let subscription = moq_net::track::Subscription::default().with_start(moq_net::track::Position::group(0));
@@ -106,25 +134,29 @@ async fn round(version: &str, late: Late) -> Outcome {
 		(frames, err, tokio::time::Instant::now())
 	});
 
-	tokio::time::timeout(TIMEOUT, track.used())
+	tokio::time::timeout(TIMEOUT, track.demand().used())
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();
 
 	pair.server_transport.hold_unis();
-	let mut group = track.append_group().unwrap();
-	group.write_frame(Timestamp::ZERO, PAYLOAD).unwrap();
-	group.finish().unwrap();
-	track.finish().unwrap();
+	if final_sequence > 0 {
+		let mut group = track.append_group().unwrap();
+		group.write_frame(Timestamp::ZERO, PAYLOAD).unwrap();
+		group.finish().unwrap();
+	}
+	track.finish_at(final_sequence).unwrap();
 	drop(track);
 
-	// Paused time only advances once every task is idle, so this runs the publisher to its
-	// end of the subscription and the subscriber through reading it.
-	tokio::time::sleep(GRACE / 10).await;
-	assert!(
-		!reader.is_finished(),
-		"{version}: the track ended before its group arrived"
-	);
+	if final_sequence > 0 {
+		// Paused time advances only when every task is idle, after the publisher and
+		// subscriber have processed the subscription's end.
+		tokio::time::sleep(GRACE / 10).await;
+		assert!(
+			!reader.is_finished(),
+			"{version}: the track ended before its group arrived"
+		);
+	}
 
 	let released = tokio::time::Instant::now();
 	match late {
@@ -136,7 +168,7 @@ async fn round(version: &str, late: Late) -> Outcome {
 		.await
 		.expect("the subscription never ended")
 		.expect("reader panicked");
-	drop((pair, broadcast, publisher, subscriber));
+	drop((pair, _keep));
 	Outcome {
 		frames,
 		err,
@@ -150,7 +182,7 @@ async fn round(version: &str, late: Late) -> Outcome {
 async fn a_group_after_the_end_is_delivered() {
 	tokio::time::pause();
 	for version in VERSIONS {
-		let outcome = round(version, Late::Delivered).await;
+		let outcome = round(version, Late::Delivered, 1).await;
 		assert!(
 			outcome.err.is_none() && outcome.frames == [PAYLOAD],
 			"{version}: got {} frame(s), err={:?}",
@@ -176,7 +208,7 @@ async fn a_group_after_the_end_is_delivered() {
 async fn a_lost_group_ends_the_track_after_the_grace() {
 	tokio::time::pause();
 	for version in VERSIONS {
-		let outcome = round(version, Late::Lost).await;
+		let outcome = round(version, Late::Lost, 1).await;
 		assert!(
 			outcome.err.is_none() && outcome.frames.is_empty(),
 			"{version}: got {} frame(s), err={:?}",
@@ -188,5 +220,150 @@ async fn a_lost_group_ends_the_track_after_the_grace() {
 			"{version}: ended after {:?}",
 			outcome.elapsed
 		);
+	}
+}
+
+/// Skipped sequences have no stream and must not hold lite-07's counted tail open.
+#[tokio::test]
+async fn lite07_skipped_groups_end_without_the_grace() {
+	tokio::time::pause();
+	let outcome = round("moq-lite-07-wip", Late::Delivered, 3).await;
+	assert!(outcome.err.is_none());
+	assert_eq!(outcome.frames, [PAYLOAD]);
+	assert!(outcome.elapsed < GRACE / 10, "ended after {:?}", outcome.elapsed);
+}
+
+/// A zero stream count leaves no tail to wait for.
+#[tokio::test]
+async fn lite07_zero_streams_end_without_the_grace() {
+	tokio::time::pause();
+	let outcome = round("moq-lite-07-wip", Late::Delivered, 0).await;
+	assert!(outcome.err.is_none());
+	assert!(outcome.frames.is_empty());
+	assert!(outcome.elapsed < GRACE / 10, "ended after {:?}", outcome.elapsed);
+}
+
+/// IETF drafts over the control stream adapter (14), on their own streams (17), and with
+/// subscription fills (20+).
+const IETF: &[&str] = &[
+	"moq-transport-14",
+	"moq-transport-17",
+	"moq-transport-20",
+	"moq-transport-22",
+];
+
+/// A subscriber that leaves while END_OF_TRACK waits for stream credit ends the publisher's
+/// request, instead of parking it until credit that may never come.
+#[tokio::test]
+async fn ietf_leaving_cancels_a_blocked_end_of_track() {
+	tokio::time::pause();
+	for version in IETF {
+		let Pair {
+			pair,
+			track,
+			remote,
+			_keep,
+		} = connect(version).await;
+
+		let subscription = moq_net::track::Subscription::default().with_start(moq_net::track::Position::group(0));
+		let mut sub = remote
+			.track("video")
+			.unwrap()
+			.subscribe(subscription)
+			.await
+			.expect("subscribe");
+		tokio::time::timeout(TIMEOUT, track.demand().used())
+			.await
+			.expect("no subscriber appeared")
+			.unwrap();
+
+		let mut group = track.append_group().unwrap();
+		group.write_frame(Timestamp::ZERO, PAYLOAD).unwrap();
+		group.finish().unwrap();
+		let mut group = tokio::time::timeout(TIMEOUT, sub.recv_group())
+			.await
+			.expect("group timeout")
+			.unwrap()
+			.expect("a group");
+		while group.read_frame().await.unwrap().is_some() {}
+
+		// Out of stream credit, so the marker cannot open.
+		pair.server_transport.withhold_unis();
+		track.finish().unwrap();
+		tokio::time::sleep(GRACE / 10).await;
+		assert!(
+			track.subscription().is_some(),
+			"{version}: the publisher is still ending the request"
+		);
+
+		// The request task holds the publisher's subscription until it ends.
+		drop((group, sub));
+		tokio::time::timeout(TIMEOUT, async {
+			while track.subscription().is_some() {
+				tokio::time::sleep(GRACE / 100).await;
+			}
+		})
+		.await
+		.unwrap_or_else(|_| panic!("{version}: the publisher's request never ended"));
+		drop((pair, _keep));
+	}
+}
+
+/// A lost datagram is not owed. Nothing tells the subscriber its sequence was a datagram, so
+/// on the drafts that account for the owed range its hole keeps the subscription routable for
+/// the grace, like a stream reset before its header. A reader never waits on it: the track
+/// ends for readers once the live edge reaches the declared end.
+#[tokio::test]
+async fn a_lost_datagram_never_delays_the_end() {
+	tokio::time::pause();
+	for version in ["moq-lite-05", "moq-lite-07-wip"] {
+		let Pair {
+			pair,
+			mut track,
+			remote,
+			_keep,
+		} = connect(version).await;
+
+		let reader = tokio::spawn(async move {
+			let subscription = moq_net::track::Subscription::default().with_start(moq_net::track::Position::group(0));
+			let mut sub = remote
+				.track("video")
+				.unwrap()
+				.subscribe(subscription)
+				.await
+				.expect("subscribe");
+			let mut groups = Vec::new();
+			while let Some(group) = sub.recv_group().await.expect("track aborted") {
+				groups.push(group.sequence);
+			}
+			(groups, tokio::time::Instant::now())
+		});
+		tokio::time::timeout(TIMEOUT, track.demand().used())
+			.await
+			.expect("no subscriber appeared")
+			.unwrap();
+
+		for datagram in [false, true, false] {
+			if datagram {
+				pair.server_transport.lose_datagrams();
+				track.append_datagram(Timestamp::ZERO, PAYLOAD).unwrap();
+			} else {
+				let mut group = track.append_group().unwrap();
+				group.write_frame(Timestamp::ZERO, PAYLOAD).unwrap();
+				group.finish().unwrap();
+			}
+			tokio::time::sleep(GRACE / 100).await;
+		}
+		let finished = tokio::time::Instant::now();
+		track.finish().unwrap();
+
+		let (groups, ended) = tokio::time::timeout(TIMEOUT, reader)
+			.await
+			.expect("the subscription never ended")
+			.expect("reader panicked");
+		assert_eq!(groups, [0, 2], "{version}");
+		let elapsed = ended - finished;
+		assert!(elapsed < GRACE / 10, "{version}: ended after {elapsed:?}");
+		drop((pair, _keep));
 	}
 }

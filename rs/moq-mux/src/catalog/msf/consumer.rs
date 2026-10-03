@@ -237,6 +237,7 @@ fn video_config_from_msf(track: &moq_msf::Track) -> Result<Option<VideoConfig>> 
 	config.framerate = track.framerate;
 	config.container = container;
 	config.jitter = track.jitter;
+	config.delay = track.delay;
 	Ok(Some(config))
 }
 
@@ -276,6 +277,7 @@ fn audio_config_from_msf(track: &moq_msf::Track) -> Result<Option<AudioConfig>> 
 	config.description = legacy_description(track)?;
 	config.container = container;
 	config.jitter = track.jitter;
+	config.delay = track.delay;
 	Ok(Some(config))
 }
 
@@ -330,8 +332,9 @@ fn derive_from_codec_config(track: &moq_msf::Track, codec: &AudioCodec, init: by
 			if buf.has_remaining() {
 				return Err(Error::OpusTrailingBytes(track.name.clone()).into());
 			}
+			// Opus decodes at 48 kHz; the OpusHead rate is informational.
 			Ok(DerivedAudio {
-				sample_rate: cfg.sample_rate,
+				sample_rate: 48_000,
 				channel_count: cfg.channel_count,
 			})
 		}
@@ -444,6 +447,30 @@ mod test {
 		assert_eq!(video.framerate, Some(30.0));
 		assert_eq!(video.bitrate, Some(5_000_000));
 		assert_eq!(video.stalled, Some(true));
+	}
+
+	#[test]
+	fn delay_round_trips_onto_hang() {
+		let mut video = video_track("video0", moq_msf::Packaging::Legacy, None);
+		video.jitter = Some(std::time::Duration::from_millis(40));
+		video.delay = Some(std::time::Duration::from_millis(200));
+
+		let mut audio = audio_track("audio0", moq_msf::Packaging::Loc);
+		audio.delay = Some(std::time::Duration::from_millis(80));
+
+		let catalog = from_msf::<()>(&moq_msf::Catalog::new(vec![video, audio])).expect("delay should convert");
+		assert_eq!(
+			catalog.video.renditions["video0"].delay,
+			Some(std::time::Duration::from_millis(200))
+		);
+		assert_eq!(
+			catalog.video.renditions["video0"].jitter,
+			Some(std::time::Duration::from_millis(40))
+		);
+		assert_eq!(
+			catalog.audio.renditions["audio0"].delay,
+			Some(std::time::Duration::from_millis(80))
+		);
 	}
 
 	#[test]
@@ -628,7 +655,7 @@ mod test {
 
 		let catalog = from_msf::<()>(&msf).expect("Opus OpusHead should parse");
 		let audio = catalog.audio.renditions.get("audio0").expect("audio0 rendition");
-		assert_eq!(audio.sample_rate, 24_000);
+		assert_eq!(audio.sample_rate, 48_000, "OpusHead rate is informational");
 		assert_eq!(audio.channel_count, 6);
 	}
 

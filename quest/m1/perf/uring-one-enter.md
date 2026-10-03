@@ -10,7 +10,7 @@ a ratio of two totals.
 
 ## Plan
 
-Branch from dev. The loop in `Worker::block_on`
+Branch from main. The loop in `Worker::block_on`
 (rs/moq-uring/src/worker.rs:164-187) runs one task pass, then `pump`
 (`submit()` at worker.rs:250, then reap and dispatch), then `maybe_park`,
 whose enter (`submit_and_wait(1)` or a timed `enter(to_submit, 1,
@@ -42,7 +42,7 @@ fails without the flag. Latency must not regress.
 
 ## Related
 
-- [#3200](/quest/m1/perf/3200-moq-uring-batch-completion-wakeups-with-min-timeout.md) -
-  the wait side of the same enter
 - [Run to quiescence](/quest/m1/perf/uring-quiescence.md) - fewer turns per
   packet, which multiplies this saving
+- [#3200](/quest/m2/3200-moq-uring-batch-completion-wakeups-with-min-timeout.md) -
+  the wait side of the same enter

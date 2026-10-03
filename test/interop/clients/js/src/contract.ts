@@ -103,7 +103,7 @@ export type Sample = {
 	/** Whether the subscriber has resolved an announced broadcast. */
 	broadcastActive: boolean;
 	/** The subscriber's catalog state, which stays offline without an announcement. */
-	broadcastStatus: "offline" | "loading" | "live";
+	broadcastStatus: "offline" | "loading" | "live" | "error";
 	/** Whether this document has received user activation. */
 	userActivated: boolean;
 	/** `performance.now()` when the sample was taken. */
@@ -130,6 +130,8 @@ export type Sample = {
 	audioTimestamp?: number;
 	/** Whether the audio buffer is waiting to refill. */
 	audioStalled: boolean;
+	/** How far playback trails the live edge, in milliseconds: the player's resolved sync delay. */
+	delay: number;
 	/** Peak frequency in the tone band, absent until the graph exists. */
 	toneHz?: number;
 	/** The tone step that peak names, absent when no tone stands above the floor. */
@@ -165,7 +167,7 @@ export type InteropControl = {
 	start(): void;
 	/** Remove the player from the DOM. */
 	detach(): void;
-	/** Put the player back and resume sampling. */
+	/** Blank the canvas the old session left behind, put the player back, and resume sampling. */
 	reattach(): void;
 	/** Connect a second player and leave it behind for the leaked-session negative control. */
 	startLeak(): void;

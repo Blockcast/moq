@@ -554,7 +554,24 @@ fn test_flac_catalog() {
 		},
 	};
 
-	let trak = super::build_audio_trak(1, 96_000, mp4_atom::Codec::from(flac));
+	let data = audio_init(super::build_audio_trak(1, 96_000, mp4_atom::Codec::from(flac)));
+
+	let catalog = run_fmp4(&data);
+	assert_eq!(catalog.audio.renditions.len(), 1);
+
+	let a = catalog.audio.renditions.values().next().unwrap();
+	assert!(matches!(a.codec, hang::catalog::AudioCodec::Flac));
+	assert_eq!(a.sample_rate, 96_000);
+	assert_eq!(a.channel_count, 2);
+	// fmp4 import is CMAF passthrough.
+	assert!(matches!(a.container, Container::Cmaf { .. }));
+	// The WebCodecs FLAC description: `fLaC` marker + STREAMINFO.
+	let desc = a.description.as_ref().expect("flac description");
+	assert_eq!(&desc[..4], b"fLaC");
+}
+
+/// An init segment (ftyp + moov) holding a single audio trak with track ID 1.
+fn audio_init(trak: mp4_atom::Trak) -> Vec<u8> {
 	let moov = mp4_atom::Moov {
 		mvhd: mp4_atom::Mvhd {
 			timescale: 1000,
@@ -580,19 +597,83 @@ fn test_flac_catalog() {
 	let mut data = Vec::new();
 	ftyp.encode(&mut data).unwrap();
 	moov.encode(&mut data).unwrap();
+	data
+}
+
+/// An Opus init segment whose dOps declares a 44.1 kHz input, 312 samples of pre-skip,
+/// and -6 dB of gain, behind a sample entry claiming `entry_rate`.
+fn opus_init(entry_rate: u16) -> (mp4_atom::Dops, Vec<u8>) {
+	let dops = mp4_atom::Dops {
+		output_channel_count: 2,
+		pre_skip: 312,
+		input_sample_rate: 44_100,
+		output_gain: -1536,
+	};
+	let opus = mp4_atom::Opus {
+		audio: mp4_atom::Audio {
+			data_reference_index: 1,
+			channel_count: 2,
+			sample_size: 16,
+			sample_rate: mp4_atom::FixedPoint::from(entry_rate),
+		},
+		dops: dops.clone(),
+		btrt: None,
+	};
+	let data = audio_init(super::build_audio_trak(1, 48_000, mp4_atom::Codec::from(opus)));
+	(dops, data)
+}
+
+/// dOps becomes the OpusHead description, and a track re-exported from that description
+/// writes the same dOps back, so pre-skip and gain survive the round trip.
+#[test]
+fn opus_dops_round_trips() {
+	let (dops, data) = opus_init(48_000);
 
 	let catalog = run_fmp4(&data);
-	assert_eq!(catalog.audio.renditions.len(), 1);
-
-	let a = catalog.audio.renditions.values().next().unwrap();
-	assert!(matches!(a.codec, hang::catalog::AudioCodec::Flac));
-	assert_eq!(a.sample_rate, 96_000);
+	let a = catalog.audio.renditions.values().next().expect("opus rendition");
+	assert!(matches!(a.codec, hang::catalog::AudioCodec::Opus));
+	assert_eq!(a.sample_rate, 48_000);
 	assert_eq!(a.channel_count, 2);
-	// fmp4 import is CMAF passthrough.
-	assert!(matches!(a.container, Container::Cmaf { .. }));
-	// The WebCodecs FLAC description: `fLaC` marker + STREAMINFO.
-	let desc = a.description.as_ref().expect("flac description");
-	assert_eq!(&desc[..4], b"fLaC");
+
+	let desc = a.description.as_ref().expect("opus description");
+	let head = crate::codec::opus::Config::parse(&mut desc.as_ref()).unwrap();
+	assert_eq!(head.sample_rate, 44_100);
+	assert_eq!(head.channel_count, 2);
+	assert_eq!(head.pre_skip, 312);
+	assert_eq!(head.output_gain, -1536);
+
+	let trak = super::synthesize_audio_trak(1, 48_000, a).expect("synthesize Opus trak");
+	match &trak.mdia.minf.stbl.stsd.codecs[0] {
+		mp4_atom::Codec::Opus(opus) => assert_eq!(opus.dops, dops),
+		other => panic!("expected Opus sample entry, got {other:?}"),
+	}
+}
+
+/// The catalog describes the decoder's 48 kHz output even when the sample entry claims
+/// another rate.
+#[test]
+fn opus_catalog_uses_the_decode_rate() {
+	let (_, data) = opus_init(44_100);
+	let catalog = run_fmp4(&data);
+	let a = catalog.audio.renditions.values().next().expect("opus rendition");
+	assert_eq!(a.sample_rate, 48_000);
+}
+
+/// A dOps with a channel mapping table is refused rather than imported without it.
+#[test]
+fn opus_dops_mapping_family_is_refused() {
+	let (_, mut data) = opus_init(48_000);
+
+	// The mapping family byte follows version, channels, pre-skip, rate, and gain.
+	let at = data.windows(4).position(|w| w == b"dOps").unwrap() + 4 + 10;
+	assert_eq!(data[at], 0);
+	data[at] = 1;
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
+	assert!(fmp4.decode(&bytes::BytesMut::from(data.as_slice())).is_err());
+	assert!(catalog.snapshot().audio.renditions.is_empty());
 }
 
 // ---- Segment-driven grouping ----
@@ -1017,22 +1098,6 @@ fn non_advancing_fragment_decode_time_is_rejected() {
 }
 
 #[test]
-fn seek_resets_fragment_decode_time() {
-	let (ftyp, moov) = decode_init(include_bytes!("test_data/bbb.mp4"));
-	let mut init = Vec::new();
-	ftyp.encode(&mut init).unwrap();
-	moov.encode(&mut init).unwrap();
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
-	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
-	fmp4.decode(&init).unwrap();
-	fmp4.decode(&audio_fragment(4096, 1024, 327)).unwrap();
-	fmp4.seek(1).unwrap();
-	fmp4.decode(&audio_fragment(0, 1024, 327)).unwrap();
-	fmp4.decode(&audio_fragment(1024, 1024, 327)).unwrap();
-}
-
-#[test]
 fn rejected_fragment_preserves_decode_time() {
 	let (ftyp, moov) = decode_init(include_bytes!("test_data/bbb.mp4"));
 	let mut init = Vec::new();
@@ -1209,52 +1274,44 @@ fn live_session(start_us: u64, frames: u64) -> Vec<u8> {
 	out
 }
 
-/// What an fMP4 import published, plus the broadcast clock's reading around the first chunk.
-struct LiveImport {
+/// What an fMP4 import published, and the wall-clock window its first chunk arrived in.
+struct Imported {
 	published: std::collections::BTreeMap<String, Vec<u128>>,
 	video: String,
-	clock: crate::Clock,
-	before: u128,
-	after: u128,
+	/// The root clock the catalog advertised.
+	clock: hang::catalog::Clock,
+	arrival: std::ops::RangeInclusive<std::time::SystemTime>,
 	/// The first segment the broadcast timeline recorded, the index an archive replays from.
 	record: moq_net::Timestamp,
+	/// Why a chunk was refused, if one was.
+	refused: Option<crate::Error>,
 }
 
-/// Import bbb's init then `chunks`, idling `idle` between them, on a clock that began `ago`
-/// earlier. `live` translates onto that clock; otherwise decode times publish verbatim.
-async fn live_import(
-	chunks: &[Vec<u8>],
-	live: bool,
-	ago: std::time::Duration,
-	idle: std::time::Duration,
-) -> LiveImport {
+/// Import bbb's init then `chunks` on a catalog with the default clock, stopping at the first
+/// refused chunk.
+async fn import_session(chunks: &[Vec<u8>]) -> Imported {
 	let (init, _, _) = bbb_init();
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
-	let config = crate::catalog::Config::default().with_clock(crate::container::test_util::late_clock(ago));
-	let mut catalog = crate::catalog::Producer::new(&mut broadcast, config).unwrap();
-	let clock = catalog.clock();
+	let mut catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
-	if live {
-		fmp4 = fmp4.live();
-	}
 	fmp4.decode(&init).unwrap();
 
-	let snapshot = catalog.snapshot();
-	let section = snapshot.archive.clone().expect("the import advertises a timeline");
+	let section = catalog.snapshot().archive.expect("the import advertises a timeline");
 	let mut timeline = crate::timeline::Consumer::<()>::subscribe(&consumer, &section)
 		.await
 		.unwrap();
 
-	let before = clock.now().as_micros();
+	let before = std::time::SystemTime::now();
 	let mut after = before;
+	let mut refused = None;
 	for (i, chunk) in chunks.iter().enumerate() {
-		if i > 0 {
-			std::thread::sleep(idle);
+		if let Err(err) = fmp4.decode(chunk) {
+			refused = Some(err);
+			break;
 		}
-		fmp4.decode(chunk).unwrap();
 		if i == 0 {
-			after = clock.now().as_micros();
+			after = std::time::SystemTime::now();
 		}
 	}
 	fmp4.finish().unwrap();
@@ -1265,84 +1322,86 @@ async fn live_import(
 		panic!("the first timeline event was not a segment");
 	};
 
-	LiveImport {
+	let snapshot = catalog.snapshot();
+	Imported {
 		published: crate::container::test_util::published(&consumer, &snapshot).await,
 		video: snapshot.video.renditions.keys().next().unwrap().clone(),
-		clock,
-		before,
-		after,
+		clock: snapshot.clock.expect("the catalog advertises a clock"),
+		arrival: before..=after,
 		record: entry.pts,
+		refused,
 	}
 }
 
-/// A feed an hour into its own decode timeline, arriving 30s after the broadcast began, publishes
-/// on the broadcast clock: the `tfdt` a decoder reads is rewritten so the first fragment is live
-/// on arrival, and every track moves by the one offset. The archive index records the same times,
-/// so a replay names each segment's real wall time.
+/// A feed an hour into its own decode timeline publishes that hour verbatim (the `tfdt` a
+/// decoder reads is untouched), and the catalog clock maps its first fragment to the arrival
+/// time. The archive index records the same times, so a replay names each segment's wall time.
 #[tokio::test]
-async fn live_import_rewrites_tfdt_onto_the_broadcast_clock() {
-	let input = [live_session(3_600_000_000, 20)];
-	let ago = std::time::Duration::from_secs(30);
-	let verbatim = live_import(&input, false, ago, std::time::Duration::ZERO).await;
-	let wall_before = std::time::SystemTime::now();
-	let live = live_import(&input, true, ago, std::time::Duration::ZERO).await;
-	let wall_after = std::time::SystemTime::now();
+async fn import_publishes_decode_times_on_an_arrival_clock() {
+	let start = 3_600_000_000;
+	let import = import_session(&[live_session(start, 20)]).await;
+	assert!(import.refused.is_none());
 
-	crate::container::test_util::common_offset(&verbatim.published, &live.published);
-	let first = live.published[&live.video][0];
-	assert!(
-		(live.before..=live.after).contains(&first),
-		"the first fragment is live on arrival: {first} not in {}..={}",
-		live.before,
-		live.after
+	let first = import.published[&import.video][0];
+	assert_eq!(first, start as u128, "the source's own decode time");
+	assert_eq!(
+		import.record.as_micros(),
+		first,
+		"the archive indexes the source's time"
 	);
 
-	// The timeline records at a coarser scale, so allow its rounding.
+	// The advertised clock is micros, so allow its rounding.
 	let tick = std::time::Duration::from_millis(1);
+	let wall = import.clock.wall_clock(import.record).unwrap();
 	assert!(
-		first.abs_diff(live.record.as_micros()) < tick.as_micros(),
-		"the archive indexes the translated time"
-	);
-	let wall = live.clock.wall_clock(live.record).unwrap();
-	assert!(
-		wall_before - tick <= wall && wall <= wall_after,
-		"a replayed segment names the wall time it went live"
+		*import.arrival.start() - tick <= wall && wall <= *import.arrival.end() + tick,
+		"the first fragment is live on arrival"
 	);
 }
 
-/// A source whose decode times restart at zero continues forward after the real idle gap rather
-/// than being refused as non-monotonic, with every track moving onto one new mapping.
+/// A source whose decode times restart is a new epoch: the import refuses the rewind rather than
+/// re-anchoring it forward, keeping everything published before it.
 #[tokio::test]
-async fn live_import_restarts_forward_after_idle() {
-	for idle in [std::time::Duration::ZERO, std::time::Duration::from_millis(300)] {
-		let input = [live_session(5_000_000, 20), live_session(0, 20)];
-		let live = live_import(&input, true, std::time::Duration::from_secs(30), idle).await;
+async fn import_refuses_a_restart() {
+	let import = import_session(&[live_session(5_000_000, 20), live_session(0, 20)]).await;
+	let err = import.refused.expect("the restart is refused");
+	assert!(
+		matches!(
+			err,
+			crate::Error::Cmaf(crate::container::fmp4::Error::NonMonotonicDecodeTime { .. })
+		),
+		"{err:?}"
+	);
+	assert_eq!(
+		import.published[&import.video].len(),
+		20,
+		"the first session stays published"
+	);
+}
 
-		// The restart lands the arrival gap after the first session's last fragment, and never on
-		// top of it: that fragment lasts 100ms.
-		let last = live
-			.published
-			.values()
-			.map(|t| t[..20].iter().max().unwrap())
-			.max()
-			.unwrap();
-		let gap = live.published[&live.video][20] as i128 - *last as i128;
-		let floor = idle.max(std::time::Duration::from_millis(100));
-		assert!(
-			gap >= floor.as_micros() as i128,
-			"the restart lands after the idle gap: {gap}us after {idle:?}"
-		);
-		assert!(
-			gap < (idle + std::time::Duration::from_secs(5)).as_micros() as i128,
-			"the restart is not pushed further: {gap}us"
-		);
+/// Skipping sequences (an HLS media-sequence gap) is not a new timeline: a rewound decode time
+/// after a seek is still refused. Only a signalled discontinuity starts the comparison afresh.
+#[tokio::test]
+async fn seek_keeps_the_decode_time_until_a_discontinuity() {
+	let (init, _, _) = bbb_init();
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
+	fmp4.decode(&init).unwrap();
+	fmp4.decode(&live_session(5_000_000, 5)).unwrap();
 
-		let verbatim = live_import(&input[1..], false, std::time::Duration::ZERO, std::time::Duration::ZERO).await;
-		let second = live
-			.published
-			.iter()
-			.map(|(name, t)| (name.clone(), t[20..].to_vec()))
-			.collect();
-		crate::container::test_util::common_offset(&verbatim.published, &second);
-	}
+	fmp4.seek(100).unwrap();
+	let err = fmp4.decode(&live_session(0, 5)).unwrap_err();
+	assert!(
+		matches!(
+			err,
+			crate::Error::Cmaf(crate::container::fmp4::Error::NonMonotonicDecodeTime { .. })
+		),
+		"{err:?}"
+	);
+
+	fmp4.discontinuity();
+	fmp4.seek(200).unwrap();
+	fmp4.decode(&live_session(0, 5))
+		.expect("a signalled discontinuity starts a new timeline");
 }

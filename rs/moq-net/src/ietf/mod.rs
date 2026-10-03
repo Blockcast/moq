@@ -6,9 +6,11 @@
 
 #[macro_use]
 mod parameters;
+pub mod active_count;
 mod adapter;
 pub mod cluster;
 mod control;
+mod datagram;
 pub(crate) mod error;
 mod fetch;
 mod filter;
@@ -30,10 +32,12 @@ pub mod solicit;
 mod subscribe;
 mod subscribe_namespace;
 mod subscriber;
+pub(crate) mod token;
 mod track;
 mod version;
 
 use control::Control;
+pub use datagram::*;
 pub use fetch::*;
 pub use filter::*;
 pub use goaway::*;

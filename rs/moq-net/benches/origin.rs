@@ -5,8 +5,8 @@
 //! (cursors), so a cost that grows with the size of the table rather than with
 //! the tree around the touched path shows up as a slope. The table is a trie
 //! keyed by path segment: an announcement visits only the cursors on the walk
-//! down to its prefix and beneath it, and each recomputes its best route from
-//! the entries at that prefix alone.
+//! down to its prefix and beneath it. Competing routes at that prefix are
+//! ranked once per change, then each cursor selects its first visible entry.
 //!
 //! Run with `cargo bench -p moq-net --bench origin`.
 
@@ -20,9 +20,9 @@ use moq_net::{Hop, Hops, Pattern, Patterns, Timestamp, announce, broadcast, kio,
 const SHAPES: [(usize, usize); 3] = [(100, 10), (1_000, 100), (1_000, 1_000)];
 
 /// `(duplicates, subscribers)` shapes for one *contended* prefix: how many
-/// routes cover the same path, against how many cursors watch it. The first row
-/// is a live fleet's mesh width; the rest sweep past it so the slope is visible.
-const CONTENDED: [(usize, usize); 4] = [(30, 30), (60, 60), (240, 60), (240, 240)];
+/// routes cover the same path, against how many cursors watch it. Includes
+/// sparse fanout, a live fleet's mesh width, and larger contended tables.
+const CONTENDED: [(usize, usize); 6] = [(1, 1), (30, 1), (30, 30), (60, 60), (240, 60), (240, 240)];
 
 /// An origin with `publishers` broadcasts under `room/` and `subscribers`
 /// cursors watching everything. The handles are held: dropping a broadcast
@@ -81,6 +81,55 @@ fn bench_announce(c: &mut Criterion) {
 	group.finish();
 }
 
+/// `bench_announce` read through mounts: `publishers` routes under the fleet-wide
+/// `.svc/p0`, watched by `subscribers` project sessions that each mount it at
+/// their own `<project>/.svc`. Every mount aliases the one target, the worst
+/// case, so each announcement reaches every mounted cursor. Compare against
+/// `origin/announce` for what a mount adds per cursor.
+fn bench_announce_mounted(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/announce_mounted");
+	for (publishers, subscribers) in SHAPES {
+		let id = BenchmarkId::from_parameter(format!("{publishers}p_{subscribers}s"));
+		group.bench_function(id, |b| {
+			let (producer, _driver) = origin::Producer::new(origin::Config::default());
+			let _publishers: Vec<_> = (0..publishers)
+				.map(|i| {
+					producer
+						.publish(format!(".svc/p0/{i}"), origin::Route::default())
+						.unwrap()
+				})
+				.collect();
+			let mut cursors: Vec<announce::Consumer> = (0..subscribers)
+				.map(|project| {
+					producer
+						.mount(format!("p{project}/.svc"), ".svc/p0")
+						.unwrap()
+						.scope(format!("p{project}"), &Patterns::from(Pattern::all()))
+						.unwrap()
+						.consume()
+						.with_hidden(true)
+						.announced()
+				})
+				.collect();
+			for cursor in &mut cursors {
+				while cursor.next().now_or_never().flatten().is_some() {}
+			}
+
+			b.iter(|| {
+				let handle = producer.publish(".svc/p0/incoming", origin::Route::default()).unwrap();
+				for cursor in &mut cursors {
+					cursor.next().now_or_never().flatten().expect("announce delivered");
+				}
+				drop(handle);
+				for cursor in &mut cursors {
+					cursor.next().now_or_never().flatten().expect("retract delivered");
+				}
+			});
+		});
+	}
+	group.finish();
+}
+
 /// A relay's own stats fan-out: `.stats/<project>/node/<node>` for every project
 /// on every node, watched by one cursor per peer, each scoped to one project.
 /// Cursors differ in scope, so none can be collapsed, and an announcement under
@@ -126,8 +175,7 @@ fn bench_announce_fleet(c: &mut Criterion) {
 /// publisher produces. A mesh produces the other one: the same path arrives
 /// once per peer it can travel through, so a prefix carries one entry per peer.
 /// The trie narrows a change to the touched prefix, but picking the winner
-/// there still visits every entry at it, once per watching cursor, so both are
-/// swept.
+/// there shares the ranking across its watching cursors, so both are swept.
 ///
 /// The arriving route is priced below every incumbent so it takes the prefix
 /// outright: each cursor is told twice per iteration, once for the new winner
@@ -163,6 +211,64 @@ fn bench_announce_duplicate(c: &mut Criterion) {
 				drop(handle);
 				for cursor in &mut cursors {
 					cursor.next().now_or_never().flatten().expect("incumbent restored");
+				}
+			});
+		});
+	}
+	group.finish();
+}
+
+/// Re-price a live mesh route with cursors watching different scopes.
+/// The challenger alternates between winning and losing, so selection must
+/// honor each cursor's scope rather than reuse one global winner.
+fn bench_reprice_duplicate(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/reprice_duplicate");
+	for (duplicates, subscribers) in CONTENDED {
+		let id = BenchmarkId::from_parameter(format!("{duplicates}d_{subscribers}s"));
+		group.bench_function(id, |b| {
+			let (producer, _driver) = origin::Producer::new(origin::Config::default());
+			let _routes: Vec<_> = (1..=duplicates)
+				.map(|peer| {
+					producer
+						.scope(
+							"",
+							&Patterns::from(Pattern::subtree(&format!("{PATH}/p{}", (peer - 1) % 2)).unwrap()),
+						)
+						.unwrap()
+						.dynamic(PATH, peer_route(peer as u64, INCUMBENT_COST))
+						.unwrap()
+				})
+				.collect();
+			let challenger = duplicates as u64 + 1;
+			let route = producer
+				.dynamic(PATH, peer_route(challenger, INCUMBENT_COST + 1))
+				.unwrap();
+			let mut cursors: Vec<announce::Consumer> = (0..subscribers)
+				.map(|peer| {
+					producer
+						.consume()
+						.scope(
+							"",
+							&Patterns::from(Pattern::subtree(&format!("{PATH}/p{}", peer % 2)).unwrap()),
+						)
+						.unwrap()
+						.with_hidden(true)
+						.announced()
+				})
+				.collect();
+			for cursor in &mut cursors {
+				while cursor.next().now_or_never().flatten().is_some() {}
+			}
+			b.iter(|| {
+				for cost in [INCUMBENT_COST - 1, INCUMBENT_COST + 1] {
+					route.update(peer_route(challenger, cost)).unwrap();
+					for cursor in &mut cursors {
+						let event = cursor.next().now_or_never().flatten().expect("winner changed");
+						let moq_net::announce::Event::Update(update) = event else {
+							panic!("expected an update: got {event:?}");
+						};
+						assert_eq!(update.route.cost, moq_net::origin::Cost::new(cost.min(INCUMBENT_COST)));
+					}
 				}
 			});
 		});
@@ -242,11 +348,8 @@ fn bench_serve_idle(c: &mut Criterion) {
 				})
 				.collect();
 			b.iter(|| {
-				// A fresh waiter per sweep. A live registration keeps the waiter's
-				// `Weak` in each route's list until it drops, so a waiter reused
-				// across sweeps would stack one per route per iteration. Production
-				// retires the parked waiter the same way: `Park::hold` drops a
-				// still-registered waiter before the next poll registers again.
+				// A fresh waiter per sweep, so every poll pays a real registration: a
+				// reused one would find itself still parked on each route and skip it.
 				let waiter = kio::Waiter::noop();
 				// Nothing is queued, so every poll parks again: the idle sweep.
 				for dynamic in &dynamics {
@@ -269,7 +372,7 @@ fn bench_subscribe(c: &mut Criterion) {
 			b.iter(|| {
 				let mut cursor = fleet.consumer.announced();
 				let mut replayed = 0;
-				while cursor.next().now_or_never().flatten().is_some() {
+				while let Some(announce::Event::Start(_)) = cursor.next().now_or_never().flatten() {
 					replayed += 1;
 				}
 				assert_eq!(replayed, publishers);
@@ -364,8 +467,8 @@ fn bench_handoff(c: &mut Criterion) {
 						total += started.elapsed();
 
 						drop(subscription);
-						incumbent.finish();
-						standby.finish();
+						incumbent.close();
+						standby.close();
 						// Wait for the front to close so the next iteration starts a fresh one.
 						resolved.closed().await;
 					}
@@ -380,8 +483,10 @@ fn bench_handoff(c: &mut Criterion) {
 criterion_group!(
 	benches,
 	bench_announce,
+	bench_announce_mounted,
 	bench_announce_fleet,
 	bench_announce_duplicate,
+	bench_reprice_duplicate,
 	bench_announce_fronts,
 	bench_serve_idle,
 	bench_subscribe,

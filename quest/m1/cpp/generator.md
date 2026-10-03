@@ -41,8 +41,3 @@ stop here and write down why.
   group before dropping its write future).
 - Offer both the 0.32 port and the expected flag upstream to LiveKit and
   NordSecurity; the fork exists only until they tag.
-
-## Related
-
-- [#2907](/quest/m4/2907-bind-the-browser-through-moq-ffi-uniffi-instead-of-a.md) - the browser generator spike; same Task and `#[cfg]`-inside-export gotchas apply
-- [C# generator](/quest/m2/cs/generator.md) - the same 0.32 port against NordSecurity's C# generator

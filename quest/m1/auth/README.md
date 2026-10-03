@@ -39,7 +39,7 @@ Decisions settled while planning, recorded so review does not relitigate them:
   the union and cancels publications and subscriptions that lose authorization.
   Other authorized work continues on the same session. An empty union leaves
   the session connected with no access, so it can accept a fresh token.
-  [Origin narrowing](/quest/m1/origin-narrowing.md) owns the common resize
+  [Origin narrowing](/quest/m1/auth/narrowing.md) owns the common resize
   operation; relay token handling requires it rather than shipping a temporary
   close-on-shrink policy.
 - **A public grant contains publish patterns, subscribe patterns, and an
@@ -47,8 +47,8 @@ Decisions settled while planning, recorded so review does not relitigate them:
   root, and every token in a union shares the connection's root. Unscoped
   permission is `**`; an empty union grants nothing. Legacy AUTH wire codecs
   explicitly convert representable prefix unions, where `[""]` means all,
-  and refuse patterns they cannot represent. [Pattern interest](/quest/m1/path-patterns.md)
-  upgrades AUTH and ANNOUNCE_REQUEST wire fields together without changing
+  and refuse patterns they cannot represent. Pattern interest (#4277, on this
+  line) upgrades AUTH and ANNOUNCE_REQUEST wire fields together without changing
   the public pattern-valued grant type.
 - **Fail loud by aborting the session.** A publisher whose origin announces a
   broadcast outside the union aborts the session with `Unauthorized`, naming
@@ -87,7 +87,7 @@ Everything here is additive: `Session::auth()` is new, the relay derives the
 grant from the origin handles it already scopes, and AUTH is added to the
 existing lite-06 ALPN.
 
-## Quests
+## Required
 
 - [Lite stream](/quest/m1/auth/lite.md) - both sides of a lite-06 session
   exchange grants over AUTH streams, exposed as `Session::auth()`, and an
@@ -96,6 +96,11 @@ existing lite-06 ALPN.
   each lite-06 cell's grant and that a publish outside it fails loud
 - [Unauthorized reset](/quest/m1/auth/unauthorized.md) - a subscription that
   loses access resets with a dedicated UNAUTHORIZED stream code
+- [AUTH_OK preflight](/quest/m1/auth/auth-ok-preflight.md) - an unencodable IETF grant answers NOT_SUPPORTED with nothing written, as JS already does
+- [AUTH endings](/quest/m1/auth/error-codes.md) - an out-of-range AUTH_ERROR code is refused, and both sides settle and recompute grants when a stream ends
+- [Origin narrowing](/quest/m1/auth/narrowing.md) - a live grant narrows in
+  place: subscriptions outside it reset, publishes outside it abort, and relay
+  revalidation stops closing the session
 - [Relay tokens](/quest/m1/auth/relay-refresh.md) - the relay verifies tokens
   sent in band, unions their grants, and cancels only work that loses access
 - [Request tokens](/quest/m1/auth/request-token.md) - an `AUTHORIZATION
@@ -103,8 +108,10 @@ existing lite-06 ALPN.
   grant does not, and REQUEST_UPDATE refreshes it
 - [moq-transport](/quest/m1/auth/moq-transport.md) - the same exchange as a
   setup-option extension on draft-17+, specified in a new draft
+- [Expired token error](/quest/m1/auth/expired-error.md) - an expired token
+  reports `Error::Expired`, not `Unauthorized`, in Rust, JS, and the bindings
 - [Bindings](/quest/m1/auth/bindings.md) - grants and tokens reach every
-  binding through moq-ffi and libmoq
+  binding through moq-ffi
 - [Token in band](/quest/m1/auth/token-in-band.md) - the credential can leave
   the URL: a session starts on what the URL carried and its AUTH streams add
   the rest, with the URL kept for peers below lite-06
@@ -113,9 +120,6 @@ existing lite-06 ALPN.
 
 ## Related
 
-- [Origin narrowing](/quest/m1/origin-narrowing.md) - resizes a live session
-  when the union shrinks, for revalidation and token expiry alike
-- [Pattern interest](/quest/m1/path-patterns.md) - moves AUTH's legacy wire prefixes to patterns along with ANNOUNCE_REQUEST
-- [Expiring media grants](/quest/m1/processor/grant-lease.md) - a worker's
+- [Expiring media grants](/quest/m2/processor/grant-lease.md) - a worker's
   lease renewal is a new in-band token
-- [P2P](/quest/m1/p2p/README.md) - the first consumer of hop-bound peer grants
+- [P2P](/quest/m2/p2p/README.md) - the first consumer of hop-bound peer grants

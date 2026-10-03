@@ -4,7 +4,7 @@ import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import type { Algorithm } from "./algorithm.ts";
 import { authorize, type Claims } from "./claims.ts";
 import { INSECURE_TEST_RS256_OTHER, INSECURE_TEST_RSA_KEYS } from "./insecure-test-keys.ts";
-import { Key } from "./key.ts";
+import { Key, KeyIdSchema } from "./key.ts";
 
 // Helper function to encode JSON to base64url
 function encodeJwk(obj: unknown): string {
@@ -53,6 +53,25 @@ async function generateAsymmetricKeyPair(
 		}),
 	};
 }
+
+test("decode checks the signature, algorithm, and kid without applying claims policy", async () => {
+	const key = Key.parse(encodeJwk(testKey));
+	const secret = new TextEncoder().encode("test-secret-that-is-long-enough-for-hmac-sha256");
+	const custom = await new SignJWT({ custom: "accepted", exp: 1 })
+		.setProtectedHeader({ alg: "HS256", kid: testKey.kid })
+		.sign(secret);
+	await expect(Key.decode(key, custom)).resolves.toEqual({ custom: "accepted", exp: 1 });
+	await expect(Key.verify(key, custom)).rejects.toThrow();
+
+	const wrongKid = await new SignJWT({ custom: "accepted" })
+		.setProtectedHeader({ alg: "HS256", kid: "other" })
+		.sign(secret);
+	await expect(Key.decode(key, wrongKid)).rejects.toThrow(/kid/);
+	const wrongAlgorithm = await new SignJWT({ custom: "accepted" })
+		.setProtectedHeader({ alg: "HS384", kid: testKey.kid })
+		.sign(secret);
+	await expect(Key.decode(key, wrongAlgorithm)).rejects.toThrow();
+});
 
 test("parse - valid JWK", () => {
 	const jwk = encodeJwk(testKey);
@@ -757,4 +776,50 @@ test("key scope treats absolute and rooted grants alike", async () => {
 	await expect(Key.sign(scoped, { root: "", publish: ["**"] })).rejects.toThrow("exceed the key scope");
 	// Roles are independent: a publish-only scope grants no subscribe.
 	await expect(Key.sign(scoped, { root: "project", subscribe: ["live/**"] })).rejects.toThrow("exceed the key scope");
+});
+
+/** Sign an arbitrary payload with `testKey`, bypassing the claims schema, as another issuer might. */
+async function signRaw(payload: Record<string, unknown>): Promise<string> {
+	const secret = new TextEncoder().encode("test-secret-that-is-long-enough-for-hmac-sha256");
+	return new SignJWT(payload).setProtectedHeader({ alg: "HS256", typ: "JWT", kid: testKey.kid }).sign(secret);
+}
+
+// An issuer's bookkeeping is read and dropped; anything else is refused by name, since it
+// might narrow the grant, and a misspelled `root` would widen it to everything.
+test("verify - only registered claims", async () => {
+	const key = Key.parse(encodeJwk(testKey));
+	const now = Math.floor(Date.now() / 1000);
+
+	const token = await signRaw({ root: "room", publish: ["**"], iss: "api", sub: "alice", jti: "1", iat: now });
+	const claims = await Key.verify(key, token);
+	expect(claims.root).toBe("room");
+	expect(claims).not.toHaveProperty("iss");
+
+	for (const [claim, payload] of [
+		["rooot", { rooot: "room/123", publish: ["**"] }],
+		["user_id", { root: "room", publish: ["**"], user_id: 7 }],
+		["cluster", { root: "room", put: [""], cluster: true }],
+		["aud", { root: "room", publish: ["**"], aud: "relay" }],
+	] as const) {
+		await expect(Key.verify(key, await signRaw(payload))).rejects.toThrow(claim);
+	}
+});
+
+test("verify - enforces not before", async () => {
+	const key = Key.parse(encodeJwk(testKey));
+	const now = Math.floor(Date.now() / 1000);
+	expect((await Key.verify(key, await signRaw({ publish: ["**"], nbf: now - 60 }))).nbf).toBe(now - 60);
+	await expect(Key.verify(key, await signRaw({ publish: ["**"], nbf: now + 3600 }))).rejects.toThrow();
+});
+
+test("key IDs share Rust's grammar and 128-character limit", async () => {
+	for (const kid of ["a", "A0_-", "a".repeat(128)]) {
+		expect(KeyIdSchema.parse(kid)).toBe(kid);
+		expect(Key.parse(JSON.stringify({ ...testKey, kid })).kid).toBe(kid);
+	}
+	for (const kid of ["", "bad.key", "é", "a".repeat(129)]) {
+		expect(KeyIdSchema.safeParse(kid).success).toBe(false);
+		expect(() => Key.parse(JSON.stringify({ ...testKey, kid }))).toThrow();
+	}
+	await expect(Key.generate("HS256", "a".repeat(129))).rejects.toThrow();
 });
