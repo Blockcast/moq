@@ -67,7 +67,6 @@ Confirmed in [#4100](https://github.com/moq-dev/moq/pull/4100):
 ## Required
 
 - [OBS builds on case-insensitive filesystems](/quest/m1/cpp/obs-version-header.md) - `cpp/moq/VERSION` stops shadowing `<version>`, so the macOS and Windows OBS jobs build again
-- [MSVC pkg-config probe](/quest/m1/cpp/msvc-pkg-config.md) - the `C++ (MSVC)` job stops tripping on Strawberry Perl's broken `pkg-config`
 - [Client settings parity](/quest/m1/cpp/client-config.md) - moq-ffi offers libmoq's client knobs, and the OBS advanced settings get back the ones the migration dropped
 - [Session report parity](/quest/m1/cpp/session-report.md) - a session reports its negotiated draft and reconnect failures, so the OBS dock shows them again
 - [Catalog switch](/quest/m1/cpp/catalog-switch.md) - a catalog update keeps OBS playback running until the replacement track is decoding

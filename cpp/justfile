@@ -13,8 +13,8 @@ default:
 # on Unix; Windows uses MSVC.
 
 # Build and install cpp/moq, then build the probe against the installed package at C++17 and
-# C++23 through CMake (C++23 also the documented in-project way), and at C++17 through
-# pkg-config, and run each. Also compiles the doc samples.
+# C++23 through CMake (C++23 also the documented in-project way) and run each. Outside
+# Windows, also builds and runs it through pkg-config at C++17 and compiles the doc samples.
 check $FILES="":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -61,19 +61,25 @@ check $FILES="":
     cmake --build "$build/test-target-23" --config Release
     run "$build/test-target-23"
 
+    # The rest builds with `c++`, which on Windows is MinGW GCC and can't link the MSVC-built
+    # package. MSVC consumers use the CMake package.
+    if [[ "$(uname -s)" == MINGW* || "$(uname -s)" == MSYS* ]]; then
+    	exit 0
+    fi
+
     # The samples in doc/lib/cpp compile against the installed headers.
     bash ../doc/lib/samples.sh cpp ../doc/lib/cpp/index.md >"$build/doc-samples.cpp"
-    if [[ "$(uname -s)" != MINGW* && "$(uname -s)" != MSYS* ]]; then
-    	"${CXX:-c++}" -std=c++17 -fsyntax-only -Wall -Werror -include moq/test/doc-samples.hpp \
-    		-I"$prefix/include" "$build/doc-samples.cpp"
-    fi
+    "${CXX:-c++}" -std=c++17 -fsyntax-only -Wall -Werror -include moq/test/doc-samples.hpp \
+    	-I"$prefix/include" "$build/doc-samples.cpp"
 
     if command -v pkg-config >/dev/null 2>&1; then
     	export PKG_CONFIG_PATH="$prefix/lib/pkgconfig"
+    	# Assigned first: set -e ignores a failing substitution inside a command's arguments.
+    	sources=$(pkg-config --variable=sources moq-cpp)
+    	flags=$(pkg-config --cflags --libs moq-cpp)
     	mkdir -p "$build/pkg-config"
-    	# shellcheck disable=SC2046 # pkg-config output is a flag list.
-    	"${CXX:-c++}" -std=c++17 -o "$build/pkg-config/probe" moq/test/probe.cpp \
-    		$(pkg-config --variable=sources moq-cpp) $(pkg-config --cflags --libs moq-cpp)
+    	# shellcheck disable=SC2086 # flags is a flag list.
+    	"${CXX:-c++}" -std=c++17 -o "$build/pkg-config/probe" moq/test/probe.cpp "$sources" $flags
     	run "$build/pkg-config"
     fi
 
