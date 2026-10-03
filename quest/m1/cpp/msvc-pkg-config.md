@@ -23,3 +23,4 @@ producing a misleading missing-header error.
 ## Related
 
 - [C++ through moq-ffi](/quest/m1/cpp/README.md) - the line this blocks
+- [Generated bindings end with a newline](/quest/m1/cpp/generated-newline.md) - the other `platform.yml` failure
