@@ -40,7 +40,9 @@ async def test_server_client_roundtrip():
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
         # Publish a broadcast on the server side.
         broadcast = server.create_broadcast("hello")
-        media = broadcast.publish_audio(moq.AudioFormat.OPUS, opus_head())
+        media = moq.media.TrackProducer.audio(
+            broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_head())
+        )
         broadcast.announce()
 
         # Auto-accept incoming sessions in the background so the handshake
@@ -65,18 +67,20 @@ async def test_server_client_roundtrip():
                     assert announcement.prefix == "hello"
 
                     broadcast_consumer = await client.request_broadcast(announcement.prefix)
-                    catalog = await broadcast_consumer.catalog()
+                    catalog = await moq.media.catalog(broadcast_consumer)
                     track_name, audio = next(iter(catalog.audio.items()))
                     assert audio.codec == "opus"
 
-                    media_consumer = await broadcast_consumer.subscribe_media(track_name, audio)
+                    media_consumer = await moq.media.ContainerConsumer.subscribe(
+                        broadcast_consumer, track_name, audio.container
+                    )
 
                     payload = b"hello over the wire"
-                    media.write_frame(payload, 1_000_000)
+                    media.write_frame(payload, timedelta(microseconds=1_000_000))
 
                     async for frame in media_consumer:
                         assert frame.payload == payload
-                        assert frame.timestamp_us == 1_000_000
+                        assert frame.timestamp // timedelta(microseconds=1) == 1_000_000
                         break
 
                     break

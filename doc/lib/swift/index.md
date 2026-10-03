@@ -12,6 +12,12 @@ consumer, `Sendable` handles, and `Task` cancellation that reaches the native
 side. It depends on `MoqFFI`, which ships a prebuilt XCFramework with arm64
 slices for iOS 15+, the iOS Simulator, and macOS 12.3+.
 
+`Media` owns catalogs, encoded-media importers, and container consumers.
+`Media.TrackProducer.audio` / `.video` take a broadcast, an init record, and a
+`.named(name:)` or `.requested(request)` target. `Media.CatalogProducer(broadcast:)`
+updates catalog properties and sections without keeping the broadcast open.
+Its writes fail after closing or releasing the broadcast.
+
 ```swift ignore
 dependencies: [
     .package(url: "https://github.com/moq-dev/moq-swift", from: "<version>"),   // latest: see the badge above
@@ -33,7 +39,7 @@ for try await event in try session.consume.announced(prefix: "live/", filter: "*
     // Prefixes stay origin-relative; captures reports what each wildcard matched.
     print(announcement.captures ?? [])
     let broadcast = try await session.consume.requestBroadcast(path: announcement.prefix)
-    for try await catalog in try await broadcast.subscribeCatalog() {
+    for try await catalog in try await Media.CatalogConsumer.subscribe(broadcast: broadcast) {
         print(catalog)
     }
 }
@@ -43,7 +49,7 @@ for try await event in try session.consume.announced(prefix: "live/", filter: "*
 // Publish encoded frames, or raw pixels with the codec inside the binding (VideoToolbox).
 // opusInit, packet, pts, and rgba come from your encoder or capture source.
 let broadcast = try session.publish.createBroadcast(path: "my-stream.hang")
-let audio = try broadcast.publishAudio(format: .opus, initData: opusInit)
+let audio = try Media.TrackProducer.audio(broadcast: broadcast, initData: Media.AudioInit(format: .opus, data: opusInit))
 try audio.writeFrame(packet, timestampUs: 20_000)
 
 let video = try broadcast.encodeVideo(
@@ -58,7 +64,7 @@ session.shutdown()
 
 For already-encoded live output, call `audio.flush(timestampUs:)` after `writeFrame` with the same broadcast-clock PTS. It measures catalog jitter at the transport handoff. File, pipe, and network imports should omit `flush`; built-in encoders observe their own output.
 
-Call `audio.discontinuity()` when the source seeks, pauses, or changes its time base. It publishes a timeline marker and restarts handoff measurement without lowering advertised jitter. Resume with timestamps that continue forward on the broadcast media clock; this does not permit timestamp rewinds. On a track from `publishVideo`, resume with a keyframe: a delta frame before it fails.
+Call `audio.discontinuity()` when the source seeks, pauses, or changes its time base. It publishes a timeline marker and restarts handoff measurement without lowering advertised jitter. Resume with timestamps that continue forward on the broadcast media clock; this does not permit timestamp rewinds. On a track from `Media.TrackProducer.video`, resume with a keyframe: a delta frame before it fails.
 
 The three advertising operations: `session.publish.createBroadcast(path:)`
 returns an unannounced producer, invisible to everyone; `broadcast.announce(route:)` /
@@ -94,8 +100,8 @@ QUIC-only relay, and `delayUs` changes the head start, in microseconds.
 `accept()` or `reject(code:)`; `request.transport` is a `Transport` enum. JSON tracks live under `Json` and take `Codable` types
 (`Json.SnapshotProducer<Value>(broadcast:track:)`, `Json.StreamConsumer<Value>(track:)`), and the
 rest of the [shared feature list](/lib/#what-every-binding-can-do) maps one
-to one: `fetchGroup`/`fetchMediaGroup`, `dynamic()` for tracks and `dynamic(prefix:)` for broadcasts, `appendDatagram`/
-`datagrams`, `setCatalogSection`, `demand()` for `name`, `used()`, and `unused()`. `session.bandwidth()`
+to one: `fetchGroup`/`Media.ContainerGroupConsumer.fetch`, `dynamic()` for tracks and `dynamic(prefix:)` for broadcasts, `appendDatagram`/
+`datagrams`, `Media.CatalogProducer.setSection`, `demand()` for `name`, `used()`, and `unused()`. `session.bandwidth()`
 divides the connection's send estimate; pass it to `encodeVideo` /
 `encodeAudio` or `reserve` a share for an app-owned track. `MoqError.isAuth` and
 `isShutdown` classify errors. `protocolError` is the structured protocol failure

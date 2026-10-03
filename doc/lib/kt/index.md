@@ -13,6 +13,12 @@ cancellation that reaches the native consumer. It pulls in `dev.moq:moq-ffi`,
 which carries the native binaries for Android (arm64-v8a, armeabi-v7a,
 x86\_64) and desktop JVM (Linux x86\_64/aarch64, macOS arm64, Windows x64).
 
+`dev.moq.media` owns catalogs, encoded imports, and container consumers. `TrackProducer.audio`
+/ `.video` take a broadcast, a `Named` or `Requested` target, and an init record.
+`CatalogProducer(broadcast)` holds its broadcast weakly and fails with `Closed` after it closes.
+Construct readers with `CatalogConsumer.subscribe`, `ContainerConsumer.subscribe`, or
+`ContainerGroupConsumer.fetch`.
+
 ```kotlin ignore
 dependencies {
     implementation("dev.moq:moq:<version>")   // latest: see the badge above
@@ -22,6 +28,7 @@ dependencies {
 
 ```kotlin
 import dev.moq.*
+import dev.moq.media.*
 
 // Subscribe. The Flow is live, so run it in its own coroutine.
 Moq.connect("https://relay.example.com", ClientConfig(tls = ClientTls(roots = listOf("ca.pem")))).use { moq ->
@@ -30,7 +37,7 @@ Moq.connect("https://relay.example.com", ClientConfig(tls = ClientTls(roots = li
         // Prefixes stay origin-relative; captures reports what each wildcard matched.
         println(event.announce.captures)
         val broadcast = moq.requestBroadcast(event.announce.prefix)
-        println(broadcast.catalog())
+        println(catalog(broadcast))
     }
 }
 ```
@@ -40,7 +47,7 @@ Moq.connect("https://relay.example.com", ClientConfig(tls = ClientTls(roots = li
 // opusInit, packet, pts, and rgba come from your encoder or capture source.
 Moq.connect("https://relay.example.com").use { moq ->
     val broadcast = moq.createBroadcast("my-stream.hang")
-    val audio = broadcast.publishAudio(AudioInit(format = AudioFormat.OPUS, data = opusInit))
+    val audio = dev.moq.media.TrackProducer.audio(broadcast, Named(null), AudioInit(format = AudioFormat.OPUS, data = opusInit))
     audio.writeFrame(Frame(payload = packet, timestampUs = 20_000u))
 
     val video = broadcast.encodeVideo(
@@ -52,7 +59,7 @@ Moq.connect("https://relay.example.com").use { moq ->
 }
 ```
 
-`MediaProducer.flush(timestampUs)` records a locally encoded frame's transport handoff on the broadcast media clock. Call it after `writeFrame` for live encoder output; omit it for file, pipe, and network imports. `MediaProducer` is a typealias, so the generated method is available directly.
+`media.TrackProducer.flush(timestampUs)` records a locally encoded frame's transport handoff on the broadcast media clock. Call it after `writeFrame` for live encoder output; omit it for file, pipe, and network imports. `media.TrackProducer` is a typealias, so the generated method is available directly.
 
 Call `media.discontinuity()` when the source seeks, pauses, or changes its time base. It publishes a timeline marker and restarts handoff measurement without lowering advertised jitter. Resume with timestamps that continue forward on the broadcast media clock; this does not permit timestamp rewinds. On a video track, resume with a keyframe: a delta frame before it fails.
 
@@ -92,8 +99,8 @@ JSON tracks live in the `dev.moq.json` package and take `@Serializable` types:
 `publishTrack`, `SnapshotConsumer(track, SnapshotConfig())` one from
 `subscribeTrack`, and `valuesAs<T>()` decodes. The rest of
 the [shared feature list](/lib/#what-every-binding-can-do) maps one to one:
-`fetchGroup`/`fetchMediaGroup`, `dynamic()` for tracks and `dynamic(prefix)` for broadcasts, `appendDatagram`/`datagrams()`,
-`setCatalogSection`, `demand()` for `name()`, `used()`, and `unused()`. `session.bandwidth()` divides the
+`fetchGroup`/`media.ContainerGroupConsumer.fetch`, `dynamic()` for tracks and `dynamic(prefix)` for broadcasts, `appendDatagram`/`datagrams()`,
+`media.CatalogProducer.setSection`, `demand()` for `name()`, `used()`, and `unused()`. `session.bandwidth()` divides the
 connection's send estimate; pass it to `encodeVideo` / `encodeAudio` or
 `reserve` a share for an app-owned track. `MoqException.isAuth` and
 `isShutdown` classify errors. Microsecond fields read back as a

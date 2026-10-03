@@ -22,7 +22,7 @@ from datetime import timedelta
 import moq
 
 READ_CHUNK = 64 * 1024
-MAX_AGE = timedelta(seconds=1)  # subscribe_media congestion-control / lookahead window
+MAX_AGE = timedelta(seconds=1)  # container consumer congestion-control / lookahead window
 
 # Synthetic audio: a 48 kHz mono tone, encoded as Opus.
 AUDIO_TRACK = "tone"
@@ -55,7 +55,9 @@ async def publish(url: str, broadcast: str) -> None:
     async with moq.Client(url, tls_verify=False) as client:
         # Hold the producer for the lifetime of the publish loop; finish() unpublishes.
         producer = client.create_broadcast(broadcast)
-        media = producer.publish_video_stream(moq.VideoFormat.AVC3)
+        media = moq.media.TrackStreamProducer.video(
+            producer, moq.media.VideoInit(format=moq.media.VideoFormat.AVC3, data=b"")
+        )
         audio = producer.encode_audio(
             AUDIO_TRACK,
             moq.AudioEncoderInput(format=moq.AudioSampleFormat.F32, sample_rate=AUDIO_RATE, channels=1),
@@ -86,11 +88,11 @@ async def publish(url: str, broadcast: str) -> None:
         media.finish()
 
 
-async def _catalog_with_video(consumer: moq.BroadcastConsumer) -> moq.Catalog:
+async def _catalog_with_video(consumer: moq.BroadcastConsumer) -> moq.media.Catalog:
     # The catalog is a live track. A lazy publisher (e.g. the browser, which only
     # encodes on demand) may announce video in a *later* update, not the first
     # snapshot, so wait for a catalog that actually has a video track.
-    catalog_consumer = await consumer.subscribe_catalog()
+    catalog_consumer = await moq.media.CatalogConsumer.subscribe(consumer)
     async for catalog in catalog_consumer:
         if catalog.video:
             return catalog
@@ -105,8 +107,8 @@ async def subscribe(url: str, broadcast: str, timeout: float) -> None:
         track_name = next(iter(catalog.video))
         video = catalog.video[track_name]
 
-        media = await consumer.subscribe_media(
-            track_name, video.container, moq.Subscription(max_age=MAX_AGE)
+        media = await moq.media.ContainerConsumer.subscribe(
+            consumer, track_name, video.container, subscription=moq.Subscription(max_age=MAX_AGE)
         )
 
         total = 0

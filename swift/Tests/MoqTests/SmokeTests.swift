@@ -192,21 +192,29 @@ final class SmokeTests: XCTestCase {
 
     func testVideoHintsReachMediaPublishApi() throws {
         let broadcast = try BroadcastProducer()
-        let hint = VideoHint(
-            coded: Dimensions(width: 1920, height: 1080),
+        let hint = Media.VideoHint(
+            coded: Media.Dimensions(width: 1920, height: 1080),
             bitrate: 4_000_000,
             framerate: 60,
             optimizeForLatency: true
         )
-        let media = try broadcast.publishVideo(format: .avc3, hint: hint)
+        let media = try Media.TrackProducer.video(broadcast: broadcast, initData: Media.VideoInit(format: .avc3, data: Data(), hint: hint))
         try media.finish()
         try broadcast.close()
     }
 
     func testVideoPropertiesUseDefaultedFields() throws {
         let broadcast = try BroadcastProducer()
-        try broadcast.setVideoProperties(VideoProperties(rotation: 315))
+        try Media.CatalogProducer(broadcast: broadcast).setVideoProperties(Media.VideoProperties(rotation: 315))
         try broadcast.close()
+    }
+
+    func testCatalogHandleClosesWithBroadcast() throws {
+        let broadcast = try BroadcastProducer()
+        let catalog = try Media.CatalogProducer(broadcast: broadcast)
+        try catalog.setSection(name: "app", json: "{\"value\":42}")
+        try broadcast.close()
+        XCTAssertThrowsError(try catalog.removeSection(name: "app"))
     }
 
     func testBroadcastConsumerFetchesCachedGroup() async throws {
@@ -412,7 +420,7 @@ final class SmokeTests: XCTestCase {
         }
 
         let consumer = try await origin.consume().requestBroadcast(path: "video-decode-frame")
-        let catalogs = try await consumer.subscribeCatalog()
+        let catalogs = try await Media.CatalogConsumer.subscribe(broadcast: consumer)
         // XCTUnwrap takes an autoclosure, which can't hold an await.
         let nextCatalog = try await catalogs.next()
         let catalog = try XCTUnwrap(nextCatalog)

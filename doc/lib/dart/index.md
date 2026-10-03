@@ -17,6 +17,13 @@ Media frames use `keyframe` to mark a group start or a video keyframe. For audio
 it is true only on the first frame of each group, even when every sample can be
 decoded independently.
 
+Import `package:moq/media.dart` with a prefix for catalogs, encoded-media imports, and
+container consumers. `TrackProducer.audio` / `.video` take a broadcast, an init record,
+and a `Named` or `Requested` target. `CatalogProducer(broadcast: ...)` owns catalog properties
+and sections; it holds the broadcast weakly and fails after the broadcast closes.
+`CatalogConsumer.subscribe`, `ContainerConsumer.subscribe`, and `ContainerGroupConsumer.fetch`
+construct the read side from a broadcast.
+
 ```bash
 dart pub add moq        # or: flutter pub add moq
 ```
@@ -117,10 +124,10 @@ uplink instead of each targeting the whole thing.
 
 Unlike the other bindings, the published Dart binaries carry **no codecs**:
 catalog and container types are there, so already-encoded frames flow through
-`MoqMediaProducer`/`MoqMediaConsumer`, but encoding is up to
+`media.TrackProducer`/`media.ContainerConsumer`, but encoding is up to
 `package:camera`, platform channels, or another codec package.
 
-`MediaProducer.flush(timestampUs: ...)` records the handoff of a locally encoded frame on the broadcast media clock. Call it after `writeFrame` only for live encoder output; file, pipe, and network imports stay clock-free. `MediaProducer` aliases the generated FFI object, so its method is available directly.
+`media.TrackProducer.flush(timestampUs: ...)` records the handoff of a locally encoded frame on the broadcast media clock. Call it after `writeFrame` only for live encoder output; file, pipe, and network imports stay clock-free. `media.TrackProducer` aliases the generated FFI object, so its method is available directly.
 
 Call `media.discontinuity()` when the source seeks, pauses, or changes its time base. It publishes a timeline marker and restarts handoff measurement without lowering advertised jitter. Resume with timestamps that continue forward on the broadcast media clock; this does not permit timestamp rewinds. On a video track, resume with a keyframe: a delta frame before it fails.
 

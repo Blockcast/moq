@@ -33,13 +33,13 @@ async def main():
                 continue  # AnnounceEventUpdate, AnnounceEventEnd, or AnnounceEventLive
             # A route covers a prefix and carries no broadcast, so resolve the path.
             broadcast = await client.request_broadcast(event.announce.prefix)
-            catalog = await broadcast.catalog()
+            catalog = await moq.media.catalog(broadcast)
 
             for name, track in catalog.audio.items():
-                frames = await broadcast.subscribe_media(name, track)
+                frames = await moq.media.ContainerConsumer.subscribe(broadcast, name, track.container)
                 async with frames:
                     async for frame in frames:
-                        print(f"Got frame: {len(frame.payload)} bytes, ts={frame.timestamp_us}")
+                        print(f"Got frame: {len(frame.payload)} bytes, ts={frame.timestamp}")
 
 
 asyncio.run(main())
@@ -49,6 +49,7 @@ asyncio.run(main())
 
 ```python
 import asyncio
+from datetime import timedelta
 import moq
 
 
@@ -57,13 +58,15 @@ async def main():
         broadcast = client.create_broadcast("my-stream")
 
         # Publish an Opus audio track (init bytes from your encoder)
-        audio = broadcast.publish_audio(moq.AudioFormat.OPUS, opus_init_bytes)
+        audio = moq.media.TrackProducer.audio(
+            broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_init_bytes)
+        )
 
         # Write frames
         # Audio has no keyframes, so `cut` is what gives it group boundaries.
-        audio.write_frame(payload, timestamp_us=0)
+        audio.write_frame(payload)
         audio.cut()
-        audio.write_frame(payload, timestamp_us=20000)
+        audio.write_frame(payload, timestamp=timedelta(milliseconds=20))
         audio.cut()
 
         broadcast.announce()
@@ -154,18 +157,12 @@ client = moq.Client(
 
 - **`BroadcastProducer()`**. Create a broadcast to publish tracks into.
   - `.dynamic() → BroadcastDynamic`
-  - `.publish_audio(format, init, *, label=None, track=None) → MediaProducer`. `init` is required: an OpusHead or AudioSpecificConfig resolves the whole rendition. `track` names the track; otherwise a unique name is derived from the format.
-  - `.publish_video(format, init=b"", *, label=None, hint=None, track=None) → MediaProducer`. `init` may be empty for a format that resolves in band; a `VideoHint` pins catalog fields the stream can't reveal (bitrate) or publishes the catalog before the first keyframe. `track` names the track as in `publish_audio`.
   - `.encode_video(input, output, *, bandwidth=None) → VideoProducer`. Encode raw `VideoFrame`s inside the binding; `.write(frame)` each one.
   - `.encode_audio(name, input, output, *, bandwidth=None) → AudioProducer`. Encode raw PCM `AudioFrame`s; the codec is `output.codec`, e.g. `AudioCodec.opus()`, with `output.frame_duration_us` setting the Opus frame length.
   - `.close()` ends the broadcast for good; a second call is a no-op.
 - **`BroadcastDynamic`**. Async source of tracks requested by subscribers.
   - `await .requested_track() → TrackRequest`. Call `.accept()` on it for a `TrackProducer`, or `.abort(code)` to reject.
   - Async iterator yielding `TrackRequest`
-- **`MediaProducer`**. Write frames to a track.
-  - `.write_frame(payload, timestamp_us=0)`
-  - `.cut()` / `.seek(sequence)` draw a group boundary (audio has none of its own)
-  - `.finish()`
 - **`TrackProducer` / `GroupProducer`**. Write raw payloads with no codec parsing.
   - `.write_frame(payload, timestamp=timedelta(0))` writes a payload with its presentation timestamp.
   - `.create_group(sequence)` creates a sparse or replayed group at an explicit sequence.
@@ -174,15 +171,35 @@ client = moq.Client(
   - `.abort(error_code)` terminates the track or group with an application error.
   - `.append_datagram(payload, timestamp=timedelta(0)) -> sequence` (`TrackProducer`) sends a best-effort datagram. Payloads are capped at 1200 bytes and there is no stream fallback.
 
+### Media
+
+`moq.media` owns catalogs, encoded-media importers, and container consumers.
+
+- `media.TrackProducer.audio(broadcast, AudioInit(...), *, target=Named())` and
+  `.video(broadcast, VideoInit(...), *, target=Named())` import complete encoded frames.
+  A `Named(name)` target chooses a name; `Named()` derives a unique name from the format.
+  `Requested(request)` takes over a pending subscriber request, whose name is already fixed.
+- `media.TrackStreamProducer.video(...)` infers video frame boundaries from a byte stream.
+- `media.ContainerProducer(broadcast, ContainerInit(...))` demuxes complete container chunks;
+  `media.ContainerStreamProducer(broadcast, format)` recovers framing from a byte stream.
+- `media.CatalogProducer(broadcast)` owns `set_video_properties`, `set_section`, and
+  `remove_section`. It holds the broadcast weakly; writes fail with `Error.Closed` after closing
+  or releasing the broadcast.
+- `await media.CatalogConsumer.subscribe(broadcast)` streams catalog snapshots;
+  `await media.catalog(broadcast)` reads one snapshot and releases its subscription.
+- `await media.ContainerConsumer.subscribe(broadcast, name, container, *, subscription=None)`
+  decodes live media. Pass the catalog rendition's `container`.
+- `await media.ContainerGroupConsumer.fetch(broadcast, name, sequence, container, *, options=None)`
+  fetches and decodes exactly one group.
+
+`media.TrackProducer.write_frame(payload, timestamp=timedelta(0))` and `.flush(timestamp)` use
+`timedelta`; returned `media.MediaFrame.timestamp` does too. `demand()` owns the track name and
+subscriber waits. `.cut()` / `.seek(sequence)` draw group boundaries; `.finish()` ends the import.
+
 ### Subscribing
 
 - **`BroadcastConsumer`**. Subscribe to tracks within a broadcast.
-  - `await .subscribe_catalog() → CatalogConsumer`
   - `await .subscribe_track(name, subscription=None) → TrackConsumer`
-  - `await .subscribe_media(name, track, subscription=None) → MediaConsumer`. `track` is the catalog record (e.g. `catalog.video[name]`); its container tells the decoder how to parse the bitstream.
-  - `await .catalog() → Catalog` (convenience)
-- **`CatalogConsumer`**. Async iterator of `Catalog`.
-- **`MediaConsumer`**. Async iterator of `MediaFrame`.
 - **`TrackConsumer`**. Async iterator of raw groups, in sequence order.
   - `await .next_group() → GroupConsumer | None`. Sequence order; what the default iteration yields.
   - `await .recv_group() → GroupConsumer | None`. Arrival order, which may be out of sequence. Prefer it when latency matters more than order.
@@ -194,7 +211,7 @@ client = moq.Client(
 - **`GroupConsumer`**. Async iterator of timestamped `Frame`s.
   - `.read_frame() -> Frame | None` returns a timestamped raw frame.
 
-Every handle whose cleanup is `cancel()` is an async context manager, so exiting `async with` releases it: the consumers (`CatalogConsumer`, `MediaConsumer`, `MediaGroupConsumer`, `TrackConsumer`, `AudioConsumer`, `GroupConsumer`, `json.SnapshotConsumer`, `json.StreamConsumer`, `AnnounceConsumer`, `AnnouncedBroadcast`) and the dynamic sources (`OriginDynamic`, `BroadcastDynamic`, `TrackDynamic`).
+Every handle whose cleanup is `cancel()` is an async context manager, so exiting `async with` releases it: the consumers (`media.CatalogConsumer`, `media.ContainerConsumer`, `media.ContainerGroupConsumer`, `TrackConsumer`, `AudioConsumer`, `GroupConsumer`, `json.SnapshotConsumer`, `json.StreamConsumer`, `AnnounceConsumer`, `AnnouncedBroadcast`) and the dynamic sources (`OriginDynamic`, `BroadcastDynamic`, `TrackDynamic`).
 
 ### Origin (advanced)
 
@@ -212,16 +229,16 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
 
 ### Types
 
-- **`Catalog`**. `.audio: dict[str, Audio]`, `.video: dict[str, Video]`, `.display`, `.rotation`, `.flip`.
+- **`media.Catalog`**. `.audio: dict[str, Audio]`, `.video: dict[str, Video]`, `.display`, `.rotation`, `.flip`.
 - **`Frame`**. `.payload: bytes`, `.timestamp: timedelta`. The unit of every write and every raw read.
-- **`MediaFrame`**. `.payload: bytes`, `.timestamp_us: int`, `.keyframe: bool`. Returned by media subscriptions. `keyframe` marks a group start or video keyframe; for audio it is true only at a group start.
+- **`media.MediaFrame`**. `.payload: bytes`, `.timestamp: timedelta`, `.keyframe: bool`. Returned by media subscriptions. `keyframe` marks a group start or video keyframe; for audio it is true only at a group start.
 - **`Datagram`**. `.sequence: int`, `.timestamp: timedelta`, `.payload: bytes`. Delivered only on datagram-capable transports and lite-05 or newer moq-lite.
-- **`Audio`**. `.codec`, `.sample_rate`, `.channel_count`, `.bitrate`, `.description`.
-- **`Video`**. `.codec`, `.coded: Dimensions`, `.display_aspect`, `.bitrate`, `.stalled`, `.framerate`, `.description`. A true `.stalled` recommends temporarily avoiding the rendition without making it unavailable.
+- **`media.Audio`**. `.codec`, `.sample_rate`, `.channel_count`, `.bitrate`, `.description`.
+- **`media.Video`**. `.codec`, `.coded: Dimensions`, `.display_aspect`, `.bitrate`, `.stalled`, `.framerate`, `.description`. A true `.stalled` recommends temporarily avoiding the rendition without making it unavailable.
 - **`Subscription`**. Subscriber delivery preferences: priority, staleness, and optional group range.
 - **`TrackInfo`**. Publisher track properties: priority, cache window, and timescale.
-- **`Dimensions`**. `.width: int`, `.height: int`.
-- **`Container`**. The catalog container enum, carried on each `Video`/`Audio` record.
+- **`media.Dimensions`**. `.width: int`, `.height: int`.
+- **`media.Container`**. The catalog container enum, carried on each `Video`/`Audio` record.
 
 ### Logging and errors
 
