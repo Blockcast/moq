@@ -12,7 +12,7 @@ C++17 bindings for [rs/moq-ffi](../../rs/moq-ffi): the sources `uniffi-bindgen-c
 
 ## Checking
 
-`just cpp check` builds and installs the package, builds the probe against it with `find_package` at C++17 and C++23 and with pkg-config at C++17, runs each, compiles the doc samples, and fails if a generated type lacks its short alias. The probe builds with exceptions and RTTI disabled.
+`just cpp check` builds and installs the package, builds the probe against it with `find_package` at C++17 and C++23 and, outside Windows, with pkg-config at C++17, runs each, compiles the doc samples (also outside Windows), and fails if a generated type lacks its short alias. The probe builds with exceptions and RTTI disabled.
 
 The generator is a fork, [kixelated/uniffi-bindgen-cpp](https://github.com/kixelated/uniffi-bindgen-cpp). It carries LiveKit's async support ported to uniffi 0.32, plus the `error_style = "expected"` option `uniffi.toml` turns on. The dev shell provides it. Without Nix:
 

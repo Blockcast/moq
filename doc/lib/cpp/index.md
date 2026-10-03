@@ -35,6 +35,8 @@ export PKG_CONFIG_PATH="moq-cpp-$ver-$target/lib/pkgconfig"
 c++ -std=c++17 app.cpp $(pkg-config --variable=sources moq-cpp) $(pkg-config --cflags --libs moq-cpp) -o app
 ```
 
+The Windows archive is built for MSVC, so use the CMake package there.
+
 The generated bindings ship as source (`share/moq-cpp/moq.cpp`) and compile inside
 your build, because `uniffi::expected` is `std::expected` or a bundled
 `tl::expected` depending on the standard. On MSVC, link the release runtime

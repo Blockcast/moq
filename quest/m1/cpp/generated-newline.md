@@ -27,4 +27,3 @@ permission to cut it.
 ## Related
 
 - [C++ through moq-ffi](/quest/m1/cpp/README.md) - the line this blocks
-- [MSVC pkg-config probe](/quest/m1/cpp/msvc-pkg-config.md) - the other `platform.yml` failure
