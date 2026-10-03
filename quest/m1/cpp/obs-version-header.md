@@ -22,4 +22,3 @@ the same shape if the plugin's own directory is ever on a C++ include path.
 ## Related
 
 - [C++ through moq-ffi](/quest/m1/cpp/README.md) - the line this blocks
-- [MSVC pkg-config probe](/quest/m1/cpp/msvc-pkg-config.md) - the other inherited `platform.yml` failure
