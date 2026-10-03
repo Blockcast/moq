@@ -1469,8 +1469,8 @@ async fn dynamic_track_request_can_publish_media() {
 	let consumer = broadcast.consume().unwrap();
 	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
 
-	// publish_media_on_track accepts the request (at the media timescale), which is what
-	// unblocks subscribe_media, so the subscribe runs on a concurrent task until then.
+	// Importing onto the request accepts it (at the media timescale), which is what
+	// unblocks the media subscribe, so it runs on a concurrent task until then.
 	let subscribe = {
 		let consumer = consumer.clone();
 		tokio::spawn(async move {

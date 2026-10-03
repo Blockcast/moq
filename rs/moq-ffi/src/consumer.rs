@@ -32,7 +32,7 @@ pub struct MoqSubscription {
 	/// `0` skips immediately; a larger value tolerates that much reordering.
 	///
 	/// Enforced both by the publisher's cache (sent on the wire) and by any local
-	/// buffering, such as `subscribe_media`'s jitter buffer.
+	/// buffering, such as [`MoqMediaContainerConsumer`]'s jitter buffer.
 	#[uniffi(default = 0)]
 	pub max_age_us: u64,
 	/// The lowest group to deliver (a floor), or null for none. A floor is not a

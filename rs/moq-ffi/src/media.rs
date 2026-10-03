@@ -532,7 +532,10 @@ impl MoqMediaCatalogProducer {
 			broadcast: Arc::downgrade(&broadcast),
 		}))
 	}
+
 	/// Replace shared video properties, clearing fields that are absent.
+	///
+	/// Rotation is clockwise and normalized to the nearest quarter turn.
 	pub fn set_video_properties(&self, properties: MoqVideoProperties) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let mut value = hang::catalog::VideoProperties::default();
@@ -552,6 +555,11 @@ impl MoqMediaCatalogProducer {
 	}
 
 	/// Set an application catalog section from JSON, refusing reserved section names.
+	///
+	/// `json` is any JSON document. Errors with [`MoqError::Json`] if it doesn't parse, or with
+	/// the reserved-section error if `name` is a HANG root (`video`, `audio`, `text`, `archive`, `clock`, `json`, `binary`, or
+	/// retired `timeline`) or an MSF root (`version`, `generatedAt`, `isComplete`, `tracks`, or
+	/// `initDataList`).
 	pub fn set_section(&self, name: String, json: String) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let value: serde_json::Value = serde_json::from_str(&json)?;
@@ -574,6 +582,7 @@ impl MoqMediaCatalogProducer {
 		})
 	}
 }
+
 /// A whole-frame importer for one codec track.
 ///
 /// Separate from [`ContainerProducer`] because a container publishes several tracks and takes
@@ -628,6 +637,8 @@ pub struct MoqMediaTrackStreamProducer {
 #[uniffi::export]
 impl MoqMediaTrackProducer {
 	/// Import complete encoded audio frames on a named or requested track.
+	///
+	/// [`MoqAudioInit::data`] is required: audio resolves its rendition entirely from those bytes.
 	#[uniffi::constructor]
 	pub fn audio(
 		broadcast: &MoqBroadcastProducer,
@@ -650,6 +661,9 @@ impl MoqMediaTrackProducer {
 #[uniffi::export]
 impl MoqMediaTrackProducer {
 	/// Import complete encoded video frames on a named or requested track.
+	///
+	/// [`MoqVideoInit::data`] may be empty for a format that resolves in band; a hint carrying the
+	/// codec publishes the catalog before the first keyframe.
 	#[uniffi::constructor]
 	pub fn video(
 		broadcast: &MoqBroadcastProducer,
@@ -694,6 +708,9 @@ impl MoqMediaContainerProducer {
 #[uniffi::export]
 impl MoqMediaTrackStreamProducer {
 	/// Import a video byte stream, inferring frame boundaries.
+	///
+	/// Only the self-delimiting formats work here (`Avc3`, `Hev1`, `Av01`); the rest need length
+	/// prefixes or an out-of-band config record. There is no audio counterpart for the same reason.
 	#[uniffi::constructor]
 	pub fn video(
 		broadcast: &MoqBroadcastProducer,

@@ -62,7 +62,7 @@ try broadcast.announce() // unannounced broadcasts are invisible
 
 Cancelling the surrounding Swift `Task` propagates through to the underlying `cancel()` calls on each consumer. `session.shutdown()` is an alias for `cancel(code: 0)` (code 0 means "no error").
 
-A note on enum casing: `MoqError` keeps Rust's PascalCase variants, each carrying `message: String` (e.g. `MoqError.Closed(message: "...")`); plain enums round-trip to lowerCamelCase (`AudioSampleFormat.s16`). Media.Audio codecs are objects with constructors (`AudioCodec.opus()`).
+A note on enum casing: `MoqError` keeps Rust's PascalCase variants, each carrying `message: String` (e.g. `MoqError.Closed(message: "...")`); plain enums round-trip to lowerCamelCase (`AudioSampleFormat.s16`). Audio codecs are objects with constructors (`AudioCodec.opus()`).
 
 ## API shape
 
@@ -102,7 +102,7 @@ swift/
   Package.swift.template      Released WRAPPER manifest (Moq + dep on moq-swift-ffi; REPLACE_FFI_VERSION)
   ffi/Package.swift.template  Released FFI manifest (MoqFFI + binaryTarget; REPLACE_URL/REPLACE_CHECKSUM)
   Sources/
-    Moq/                      Ergonomic wrapper (Client, Server, Origin, Broadcast, Track, Media, Media.Audio, …)
+    Moq/                      Ergonomic wrapper (Client, Server, Origin, Broadcast, Track, Media, Audio, …)
     MoqFFI/                   UniFFI-generated swift (populated by check.sh/package-ffi.sh, gitignored)
   Tests/MoqTests/             Smoke tests
   scripts/                    check.sh, package{,-ffi}.sh, verify{,-ffi}.sh, publish{,-ffi}.sh

@@ -50,8 +50,9 @@ Moq.connect("https://relay.example.com").use { moq ->
 The `dev.moq` package is intentionally thin: Kotlin has extension functions, so we keep the FFI objects and decorate them rather than re-wrapping every type.
 
 - **`Moq.connect(...)`**: a connection facade (`Moq.kt`), so you never hand-wire a `MoqClient`.
-- **Typealiases** (`Aliases.kt`): re-export the `Moq*`-prefixed FFI types under clean `dev.moq` names (`OriginProducer`, `BroadcastConsumer`, `Catalog`, `Frame`, ...), so you import `dev.moq.*` only. A couple of sealed types (`Container`, `MoqException`) are not aliased because Kotlin can't resolve their subtypes through a typealias; use `uniffi.moq.*` for those.
-- **Flow extensions** (`Flows.kt`): `updates()`, `groups()`, `frames()`, `catalog()` turn the pull-based consumers into coroutine `Flow`s with cancellation wired through. `frames()` covers the media, audio, and video consumers alike.
+- **Typealiases** (`Aliases.kt`): re-export the `Moq*`-prefixed FFI types under clean `dev.moq` names (`OriginProducer`, `BroadcastConsumer`, `Frame`, ...), so you import `dev.moq.*` only. `MoqException` is not aliased because Kotlin can't resolve its subtypes through a typealias; use `uniffi.moq.*` for it.
+- **Flow extensions** (`Flows.kt`): `updates()`, `groups()`, and `frames()` turn the pull-based consumers into coroutine `Flow`s with cancellation wired through.
+- **Media** (`dev.moq.media`): catalog, importers, and container consumers, with `catalog(broadcast)` for a one-shot catalog read and `frames()` for container-decoded media.
 - **Fetched media**: `ContainerGroupConsumer.fetch(...).frames()` streams the decoded frames of one retained group, then completes.
 - **Duration extensions** (`Durations.kt`): the FFI carries microseconds as integers, so `stats.rtt`, `backoff.initial`, `frame.timestamp`, and their siblings read back as a `kotlin.time.Duration`.
 - **`logLevel(...)`**: configures native Rust tracing without importing the raw bindings package.

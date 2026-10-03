@@ -123,7 +123,12 @@ fun ContainerGroupConsumer.frames(): Flow<MediaFrame> = flow {
 val MediaFrame.timestamp: Duration
     get() = timestampUs.toLong().microseconds
 
-/** Set an application catalog section from a serializable value. */
+/**
+ * Set an application catalog section from a serializable value, encoded with [MoqJson].
+ *
+ * A `String` argument resolves to the member `setSection(name, json)` instead, so it must
+ * already be encoded JSON.
+ */
 inline fun <reified T> CatalogProducer.setSection(name: String, value: T) {
     setSection(name, MoqJson.encodeToString(serializer<T>(), value))
 }

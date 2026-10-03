@@ -26,6 +26,7 @@ from moq_ffi import (
 )
 from moq_ffi import MoqDimensions as Dimensions
 from moq_ffi import (
+    MoqError,
     MoqMediaCatalogConsumer,
     MoqMediaCatalogProducer,
     MoqMediaContainerConfig,
@@ -179,9 +180,8 @@ class TrackProducer:
 class ContainerProducer:
     """Publish a container, which demuxes and publishes its own tracks.
 
-    Construct with :class:`ContainerProducer`. Unlike
-    :class:`TrackProducer` there is no per-frame timestamp: a container carries
-    its tracks' timing itself.
+    Unlike :class:`TrackProducer` there is no per-frame timestamp: a container
+    carries its tracks' timing itself.
     """
 
     def __init__(self, broadcast: BroadcastProducer, init: ContainerInit) -> None:
@@ -210,10 +210,7 @@ class ContainerProducer:
 
 
 class ContainerStreamProducer:
-    """Publish a container fed by a raw byte stream, which recovers its own framing.
-
-    Construct with :class:`ContainerStreamProducer`.
-    """
+    """Publish a container fed by a raw byte stream, which recovers its own framing."""
 
     def __init__(self, broadcast: BroadcastProducer, format: ContainerFormat) -> None:
         self._inner = MoqMediaContainerStreamProducer(broadcast._inner, format)
@@ -385,6 +382,8 @@ async def catalog(broadcast: BroadcastConsumer) -> Catalog:
     consumer = await CatalogConsumer.subscribe(broadcast)
     try:
         return await anext(consumer)
+    except StopAsyncIteration:
+        raise MoqError.Closed() from None
     finally:
         consumer.cancel()
 

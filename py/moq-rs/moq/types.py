@@ -63,14 +63,8 @@ from moq_ffi import (
 from moq_ffi import (
     MoqVideoPixelFormat as VideoPixelFormat,
 )
-from moq_ffi import (
-    MoqVideoProperties,
-)
 
 from ._records import Backoff, ConnectionStats, Datagram, Frame, Subscription, TrackInfo
-
-VideoProperties = MoqVideoProperties
-"""Video catalog properties shared by every rendition; ``None`` fields clear them."""
 
 __all__ = [
     "AudioCodec",

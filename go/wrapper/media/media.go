@@ -327,8 +327,6 @@ func (m *TrackProducer) Discontinuity() error {
 // the only thing that gives it groups: call it after every frame for one group (one QUIC
 // stream) the relay forwards without waiting, or at a segment cadence to align with video.
 // Video groups at its own keyframes and needs this only to override that.
-//
-// On a container this declares a new segment, rolling a group on every track it publishes.
 func (m *TrackProducer) Cut() error {
 	return m.inner.Cut()
 }

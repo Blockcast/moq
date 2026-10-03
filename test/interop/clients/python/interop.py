@@ -55,7 +55,9 @@ async def publish(url: str, broadcast: str) -> None:
     async with moq.Client(url, tls_verify=False) as client:
         # Hold the producer for the lifetime of the publish loop; finish() unpublishes.
         producer = client.create_broadcast(broadcast)
-        media = moq.media.TrackStreamProducer.video(producer, moq.media.VideoInit(format=moq.media.VideoFormat.AVC3, data=b""))
+        media = moq.media.TrackStreamProducer.video(
+            producer, moq.media.VideoInit(format=moq.media.VideoFormat.AVC3, data=b"")
+        )
         audio = producer.encode_audio(
             AUDIO_TRACK,
             moq.AudioEncoderInput(format=moq.AudioSampleFormat.F32, sample_rate=AUDIO_RATE, channels=1),
@@ -105,7 +107,9 @@ async def subscribe(url: str, broadcast: str, timeout: float) -> None:
         track_name = next(iter(catalog.video))
         video = catalog.video[track_name]
 
-        media = await moq.media.ContainerConsumer.subscribe(consumer, track_name, video.container, subscription=moq.Subscription(max_age=MAX_AGE))
+        media = await moq.media.ContainerConsumer.subscribe(
+            consumer, track_name, video.container, subscription=moq.Subscription(max_age=MAX_AGE)
+        )
 
         total = 0
 

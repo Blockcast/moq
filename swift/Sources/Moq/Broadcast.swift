@@ -9,8 +9,6 @@ public final class BroadcastConsumer: Sendable {
         self.ffi = ffi
     }
 
-
-
     /// Subscribe to a track by name, delivering raw frame payloads with no codec
     /// or container parsing. `subscription` tunes delivery priority, group range, and
     /// staleness; omit for defaults.
@@ -27,10 +25,6 @@ public final class BroadcastConsumer: Sendable {
     ) async throws -> GroupConsumer {
         GroupConsumer(try await ffi.fetchGroup(name: name, sequence: sequence, options: options))
     }
-
-
-
-
 
     /// Resolve a catalog rendition's `broadcast` reference to the broadcast serving its track.
     ///
@@ -109,22 +103,6 @@ public final class BroadcastProducer: Sendable {
         try ffi.unannounce()
     }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     /// Open a track for arbitrary byte payloads, with no codec or container.
     /// `info` sets track properties (priority, cache, timescale); omit for defaults.
     public func publishTrack(name: String, info: TrackInfo? = nil) throws -> TrackProducer {
@@ -162,10 +140,6 @@ public final class BroadcastProducer: Sendable {
     ) throws -> VideoProducer {
         VideoProducer(try ffi.encodeVideo(input: input, output: output, bandwidth: bandwidth?.ffi))
     }
-
-
-
-
 
     /// End the broadcast for good: retract it and serve no new tracks.
     ///
