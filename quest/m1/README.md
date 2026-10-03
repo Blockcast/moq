@@ -48,7 +48,6 @@ QUIC studies there on that rule.
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - a lite-07 SUBSCRIBE asks for past and live ranges in either order and replaces FETCH; relays fill misses by range, including over moq-transport
 - [Cross-relay bursts](/quest/m1/cross-relay-bursts.md) - bursty small-group tracks cross two relays without lost groups, unanswered FETCHes, or stalls
 - [Late lower groups](/quest/m1/lite-late-lower-group.md) - a moq-lite subscriber with a floor receives a group created below the first served one, as moq-transport does
-- [Reader end parity](/quest/m1/reader-end-parity.md) - JS readers see a track's end once the newest group reaches the declared end, as Rust readers do
 - [JS cache window](/quest/m1/js-prune-cache-window.md) - js/net ages idle groups on a cache window and keeps max_age as media-time staleness, as Rust does
 - [A watch and publish release ships assets()](/quest/m1/assets-release.md) - the release that lets the sites host the worklets
 - [Dogfood hosted worklets](/quest/m1/dogfood-assets.md) - moq.dev and the moq.pro dashboard host the worklets and call `assets()` after the release
