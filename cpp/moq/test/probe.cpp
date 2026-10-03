@@ -155,6 +155,8 @@ int main() {
     auto reading = consumer->read_frame();
     ok(track->write_frame({bytes("hello"), 1000}), "write_frame");
     auto frame = ok(reading.get(), "read_frame");
+    // get() consumed the state.
+    CHECK(!reading.valid());
     CHECK(frame.has_value());
     CHECK(frame->payload == bytes("hello"));
     CHECK(frame->timestamp_us == 1000);
