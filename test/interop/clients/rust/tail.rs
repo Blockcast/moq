@@ -49,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
                 ack == "clean end\n",
                 "reader did not acknowledge a clean end"
             );
-            broadcast.finish();
+            broadcast.close();
             eprintln!("tail acknowledged");
         }
         "subscribe" => {

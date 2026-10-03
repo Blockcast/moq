@@ -23,7 +23,8 @@ try {
 		const broadcast = origin.createBroadcast(Moq.Path.from(path));
 		const track = broadcast.createTrack("tail");
 		broadcast.announce();
-		while (!track.used.peek()) await track.used.changed();
+		const demand = track.demand();
+		while (!demand.used.peek()) await demand.used.changed();
 		// The end precedes the last group's data; the transport still has to drain it.
 		track.finishAt(GROUPS);
 		for (let sequence = 0; sequence < GROUPS; sequence++) {
