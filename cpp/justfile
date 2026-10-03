@@ -13,7 +13,8 @@ default:
 # on Unix; Windows uses MSVC.
 
 # Build and install cpp/moq, then build the probe against the installed package at C++17 and
-# C++23 through CMake, and at C++17 through pkg-config, and run each. Also compiles the doc samples.
+# C++23 through CMake (C++23 also the documented in-project way), and at C++17 through
+# pkg-config, and run each. Also compiles the doc samples.
 check $FILES="":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -53,6 +54,12 @@ check $FILES="":
     	cmake --build "$build/test-$std" --config Release
     	run "$build/test-$std"
     done
+
+    # The setup doc/lib/cpp documents: the standard set in the project, and also required on
+    # the app's own target.
+    cmake -S moq/test -B "$build/test-target-23" -DCMAKE_BUILD_TYPE=Debug -DPROBE_CXX_STANDARD=23 -DCMAKE_PREFIX_PATH="$prefix"
+    cmake --build "$build/test-target-23" --config Release
+    run "$build/test-target-23"
 
     # The samples in doc/lib/cpp compile against the installed headers.
     bash ../doc/lib/samples.sh cpp ../doc/lib/cpp/index.md >"$build/doc-samples.cpp"

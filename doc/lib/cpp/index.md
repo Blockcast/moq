@@ -25,6 +25,7 @@ and `moq-cpp.pc`. Targets: Linux x86\_64 and aarch64, macOS arm64, Windows x64.
 No Rust toolchain is needed to consume it.
 
 ```cmake ignore
+set(CMAKE_CXX_STANDARD 23)       # optional; see "C++ standard" below
 find_package(moq-cpp REQUIRED)   # with CMAKE_PREFIX_PATH at the unpacked archive
 target_link_libraries(app PRIVATE moq::cpp)
 ```
@@ -36,10 +37,20 @@ c++ -std=c++17 app.cpp $(pkg-config --variable=sources moq-cpp) $(pkg-config --c
 
 The generated bindings ship as source (`share/moq-cpp/moq.cpp`) and compile inside
 your build, because `uniffi::expected` is `std::expected` or a bundled
-`tl::expected` depending on the standard. Compile it with the same standard
-as the code that includes `<moq/moq.hpp>`; `find_package` does this for you,
-and a mismatch fails to link rather than corrupting memory. On MSVC, link the
-release runtime (`/MD`), which the Rust library uses in every configuration.
+`tl::expected` depending on the standard. On MSVC, link the release runtime
+(`/MD`), which the Rust library uses in every configuration.
+
+### C++ standard
+
+The bindings compile at your project's `CMAKE_CXX_STANDARD`, or the compiler's
+default (at least C++17) when it is unset, and must match the code that
+includes `<moq/moq.hpp>`. To use C++23, set it before `find_package`, or pass
+`-DCMAKE_CXX_STANDARD=23`. Raising the standard only on your own target
+(`target_compile_features(app PRIVATE cxx_std_23)`) does not reach the
+bindings, so the two disagree on `moq::expected` and the link fails with an
+undefined `moq_abi_std_expected` or `moq_abi_tl_expected` symbol rather than
+corrupting memory. With pkg-config, pass the same `-std` to the bindings
+source and to your code.
 
 From source, `add_subdirectory(cpp/moq)` in a checkout builds `moq-ffi` with
 cargo and renders the bindings with the pinned `uniffi-bindgen-cpp` (see
