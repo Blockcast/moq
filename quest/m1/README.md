@@ -61,7 +61,6 @@ QUIC studies there on that rule.
 - [Nightly tests on macOS and Windows](/quest/m1/nightly-platform-tests.md) - `moq-auth`, `hang`, `moq-tokio`, and `moq-native` tests run nightly where `Instant` and sockets differ, not just compile
 - [CI runner stalls](/quest/m1/ci-runner-stalls.md) - the 0.4 to 0.8 s freezes of both interop tracks on CI are attributed from a week of nightlies and fixed or told apart from playback bugs
 - [Catalog estimate rate](/quest/m1/catalog-estimate-rate.md) - a rising `jitter`/`delay` estimate republishes the catalog at most once a second, in js/publish and moq-mux
-- [Rewind detail](/quest/m1/timestamp-rewind-detail.md) - a refused timestamp rewind names the frame's timestamp and the live edge
 - [Subscriber max-delay](/quest/m1/subscriber-max-delay.md) - subscriber staleness becomes `max_delay`; publisher retention stays `max_age`
 - [Wire compatibility](/quest/m1/wire-compat.md) - a nightly run tests this checkout against the last published release for tokens, session wire, and catalog/container
 - [Same-hop importers](/quest/m1/hop-aligned-import.md) - importers fed one stream publish identical groups and timestamps, so failover between a redundant pair survives
