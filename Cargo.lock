@@ -4464,6 +4464,7 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "crc",
+ "criterion",
  "futures",
  "h264-parser",
  "hang",
