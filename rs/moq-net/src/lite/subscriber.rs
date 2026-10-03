@@ -712,16 +712,11 @@ impl<S: crate::transport::poll::Session> UniServe<S> {
 					let mut cx = std::task::Context::from_waker(waiter.waker());
 					// A decode error here is only logged; the peer hung up or spoke garbage
 					// before the stream had a type.
-					let kind = ready!(reader.poll_decode_peek::<lite::DataType>(&mut cx))?;
-					if self.subscriber.version.has_setup_stream() {
-						match kind {
-							lite::DataType::Setup => self.subscriber.peer_setup.claim()?,
-							lite::DataType::Group => {
-								ready!(self.subscriber.peer_setup.poll_probe_level(waiter));
-							}
-						}
+					let kind = ready!(reader.poll_decode::<lite::DataType>(&mut cx))?;
+					// Claim before decoding the body, so two incomplete SETUPs are duplicates too.
+					if matches!(kind, lite::DataType::Setup) && self.subscriber.version.has_setup_stream() {
+						self.subscriber.peer_setup.claim()?;
 					}
-					ready!(reader.poll_decode::<lite::DataType>(&mut cx))?;
 					let UniState::Start { reader } = std::mem::replace(&mut self.state, UniState::Done) else {
 						unreachable!()
 					};
@@ -1494,8 +1489,10 @@ mod tests {
 		);
 	}
 
+	/// A GROUP needs no negotiated extension, so it proceeds before SETUP, or after a
+	/// server's gated accept held it.
 	#[tokio::test(start_paused = true)]
-	async fn early_group_is_delivered_after_setup() {
+	async fn early_group_is_delivered() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			for pre_read in [false, true] {
 				let mut bytes = Vec::new();
@@ -1553,12 +1550,7 @@ mod tests {
 				);
 				let mut accept = UniAccept::new(subscriber, early);
 				assert!(accept.poll(&kio::Waiter::noop()).is_pending());
-				if !pre_read {
-					assert!(consumer.recv_group().now_or_never().is_none(), "GROUP waits for SETUP");
-					assert!(log.stops().is_empty());
-					peer_setup.set(lite::Setup::default());
-					assert!(accept.poll(&kio::Waiter::noop()).is_pending());
-				}
+				assert!(log.stops().is_empty());
 				let mut group = consumer.recv_group().await.unwrap().unwrap();
 				assert_eq!(group.sequence, 3);
 				let frame = group.read_frame().await.unwrap().unwrap();

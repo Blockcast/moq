@@ -29,9 +29,9 @@ implement in an afternoon. The wire spec is
 A dedicated ALPN selects the wire version for moq-lite 03 and newer. The
 legacy `moql` ALPN negotiates moq-lite 01 or 02 via `SETUP`. In moq-lite 05
 and newer, each side also sends a `SETUP` message with its capabilities.
-Rust holds unidirectional streams arriving before the peer's `SETUP` until the
-peer's `SETUP` arrives. Streams that depend on negotiated capabilities wait for
-`SETUP` in both Rust and JavaScript. A second Setup Stream closes the session
+Streams that depend on negotiated capabilities wait for the peer's `SETUP`;
+everything else proceeds immediately. A Rust server holds unidirectional streams
+that arrive before the client's `SETUP`, since it routes by the path in `SETUP`. A second Setup Stream closes the session
 with `PROTOCOL_VIOLATION`.
 Rust and TypeScript speak moq-lite 01 through 06 and moq-transport drafts
 14 through 22. Clients offer `moq-lite-06` first by default. moq-lite 07 is
