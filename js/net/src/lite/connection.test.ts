@@ -108,8 +108,23 @@ for (const [alpn, version] of [
 				}
 				expect((await pair.client.closed).closeCode).toBe(SessionCode.ProtocolViolation);
 			} finally {
-				connection.close();
+				connection.abort();
 			}
 		});
 	}
+
+	// The Setup Stream is claimed before its body decodes, so a truncated one leaves
+	// nothing for SETUP-gated streams to wait on.
+	test(`truncated SETUP closes ${alpn} with PROTOCOL_VIOLATION`, async () => {
+		const pair = createMockTransportPair(alpn);
+		const connection = new Connection({ url: new URL("https://relay.example/"), quic: pair.client, version });
+		try {
+			const writer = await Writer.open(pair.server, { version });
+			await writer.u53(DataType.Setup);
+			writer.close();
+			expect((await pair.client.closed).closeCode).toBe(SessionCode.ProtocolViolation);
+		} finally {
+			connection.abort();
+		}
+	});
 }

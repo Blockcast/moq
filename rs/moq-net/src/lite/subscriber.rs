@@ -741,9 +741,12 @@ impl<S: crate::transport::poll::Session> UniServe<S> {
 							self.subscriber.peer_setup.set(setup);
 							return Poll::Ready(Ok(()));
 						}
+						// The slot is claimed, so no other SETUP can arrive and the streams
+						// waiting on it would hang. The session cannot continue.
 						Err(err) => {
+							tracing::debug!(%err, "failed to read peer setup");
 							self.abort(&err);
-							return Poll::Ready(Ok(()));
+							return Poll::Ready(Err(Error::ProtocolViolation));
 						}
 					}
 				}

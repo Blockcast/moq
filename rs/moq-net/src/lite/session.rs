@@ -678,4 +678,36 @@ mod tests {
 			}
 		}
 	}
+
+	/// A SETUP that ends before its body decodes leaves nothing to wait on, since the
+	/// Setup Stream is already claimed.
+	#[tokio::test(start_paused = true)]
+	async fn truncated_setup_closes_the_session() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let mut truncated = Vec::new();
+			DataType::Setup.encode(&mut truncated, version).unwrap();
+			let session =
+				crate::lite::test_transport::ScriptedSession::eof(Vec::new()).with_incoming_unis(vec![truncated]);
+			let log = session.log.clone();
+			let mut started = start(Config {
+				runtime: crate::time::Clock::tokio(),
+				session,
+				setup_stream: None,
+				publish: None,
+				subscribe: None,
+				peer_hop: None,
+				version,
+				our_setup: Setup::default(),
+				peer_setup: None,
+			})
+			.unwrap();
+			let _ = started.driver.poll(&kio::Waiter::noop());
+			assert!(
+				log.closes()
+					.iter()
+					.any(|(code, _)| *code == SessionError::ProtocolViolation.to_code()),
+				"{version:?}: a truncated SETUP must close the session"
+			);
+		}
+	}
 }

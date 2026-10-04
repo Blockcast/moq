@@ -322,7 +322,11 @@ export class Connection implements Established {
 			this.#setupSeen = true;
 			// The peer sends exactly one SETUP, then FINs. Record it so capability-gated
 			// streams (e.g. PROBE) can react.
-			const setup = await Setup.decode(stream, this.#version);
+			// The slot is claimed, so no other SETUP can arrive and the streams waiting on it
+			// would hang. The session cannot continue.
+			const setup = await Setup.decode(stream, this.#version).catch((err: unknown) => {
+				throw new ProtocolViolation("invalid SETUP", { cause: err });
+			});
 			this.#peerSetup.set(setup);
 			this.#peerRole.set(setup.role);
 		} else {
