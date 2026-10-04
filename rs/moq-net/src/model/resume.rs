@@ -846,10 +846,10 @@ impl Fetching {
 	}
 }
 
-impl kio::Pollable for Fetching {
+impl kio::Task for Fetching {
 	type Output = Result<group::Consumer>;
 
-	fn poll(&self, waiter: &kio::Waiter) -> Poll<Self::Output> {
+	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
 		if let Some(mut group) = (Consumer {
 			state: self.state.clone(),
 		})
@@ -874,8 +874,8 @@ impl kio::Pollable for Fetching {
 				*inner = Some((id, track, fetch));
 			}
 
-			let (latched, track, fetch) = inner.as_ref().expect("latched above");
-			let err = match kio::Pollable::poll(&**fetch, waiter) {
+			let (latched, track, fetch) = inner.as_mut().expect("latched above");
+			let err = match kio::Task::poll(&mut **fetch, waiter) {
 				Poll::Ready(Err(err)) => err,
 				Poll::Ready(Ok(group)) => return Poll::Ready(Ok(group)),
 				Poll::Pending => {
@@ -1524,6 +1524,9 @@ struct SegmentSub {
 	id: u64,
 	start: Option<Position>,
 	end: Option<Position>,
+	/// Groups below this were handed out before the cursor subscribed: a warm cache
+	/// taking over a reader's cursors must not surface them again.
+	floor: u64,
 	/// Where the source is asked to start; see [`Segment::ask`].
 	ask: Option<Position>,
 	sub: SubState,
@@ -1575,7 +1578,7 @@ impl SegmentSub {
 
 	/// The first group this segment can serve, for the underlying read cursor.
 	fn first_group(&self) -> u64 {
-		self.start.map_or(0, |start| start.group)
+		self.start.map_or(0, |start| start.group).max(self.floor)
 	}
 
 	/// The exclusive group cap this segment can serve, for the underlying read
@@ -1786,6 +1789,17 @@ impl Subscriber {
 		for s in &mut self.segments {
 			s.pruned = !segments.iter().any(|n| n.id == s.id);
 		}
+		// A park replaces every segment with a cache of what they delivered (see
+		// [`Producer::park`]). Cursors still draining the replaced segments would hand
+		// that content out a second time, so the cache takes over from them, past what
+		// this reader was already handed. Groups they parked at the cap are in the
+		// cache too, and park again from there.
+		let parked = segments
+			.iter()
+			.any(|n| n.warm && !self.segments.iter().any(|s| s.id == n.id));
+		if parked {
+			self.segments.retain(|s| !s.pruned);
+		}
 		self.segments.retain(|s| !s.retired());
 
 		let nexts: Vec<_> = segments.iter().skip(1).map(|next| Some(next.track.clone())).collect();
@@ -1821,6 +1835,8 @@ impl Subscriber {
 						id: segment.id,
 						start: segment.start,
 						end: segment.end,
+						// A cache taking over (see above) starts past what this reader has.
+						floor: if segment.warm { self.next_sequence } else { 0 },
 						ask: segment.ask,
 						sub: SubState::Pending(sub),
 						terminal: None,
@@ -3242,6 +3258,85 @@ mod test {
 		assert_eq!(recv(&mut sub), 1);
 	}
 
+	/// A park that replaces a reader's segments with a cache of what they delivered
+	/// hands that reader nothing twice, however many times one open group (a catalog
+	/// taking deltas) changes route. A newcomer still gets the whole group, head first,
+	/// after the takeovers have pruned every segment that started at its head.
+	#[tokio::test]
+	async fn repeated_parks_mid_group_hand_the_head_out_once() {
+		let mut producer = Producer::new();
+		let (track, consumer) = track_pair("a");
+		producer.takeover(&consumer).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
+		group.write_frame(Timestamp::ZERO, b"0".to_vec()).unwrap();
+		let mut reading = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(read(&mut reading), b"0");
+
+		let mut routes = vec![(track, consumer, group)];
+		let mut heads = Vec::new();
+		let rounds = MAX_SEGMENTS as u64 + 1;
+		for frame in 1..=rounds {
+			// The cache holds the whole group so far, the way the origin rebuilds it.
+			let (cache, cache_consumer) = track_pair("cache");
+			let mut whole = cache.create_group(group::Info { sequence: 0 }).unwrap();
+			for f in 0..frame {
+				whole.write_frame(Timestamp::ZERO, f.to_string().into_bytes()).unwrap();
+			}
+			producer.park(&cache_consumer).unwrap();
+
+			let (next, next_consumer) = track_pair("next");
+			producer.takeover(&next_consumer).unwrap();
+			let mut continuation = next.create_group(group::Info { sequence: 0 }).unwrap();
+			continuation.start_at(frame).unwrap();
+			continuation
+				.write_frame(Timestamp::ZERO, frame.to_string().into_bytes())
+				.unwrap();
+
+			assert_eq!(read(&mut reading), frame.to_string().as_bytes());
+			recv_pending(&mut sub);
+			routes.push((next, next_consumer, continuation));
+			// The origin finishes a cache once the takeover lands, but holds its open
+			// group: dropping that would clear its frames.
+			cache.finish().unwrap();
+			heads.push(whole);
+		}
+
+		let mut late = producer.consume().subscribe(None);
+		let mut group = late.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		for frame in 0..=rounds {
+			assert_eq!(read(&mut group), frame.to_string().as_bytes());
+		}
+	}
+
+	/// A group held back at the reader's cap when a park replaces its segments comes
+	/// from the cache once the cap rises, exactly once.
+	#[tokio::test]
+	async fn a_park_reoffers_a_group_held_at_the_cap_once() {
+		let (mut track_a, consumer_a) = track_pair("a");
+		let mut producer = Producer::new();
+		producer.takeover(&consumer_a).unwrap();
+		let mut sub = producer.consume().subscribe(replay());
+		sub.end_at(..1);
+		write_group(&mut track_a, 0, "0");
+		write_group(&mut track_a, 1, "1");
+		assert_eq!(recv(&mut sub), 0);
+		recv_pending(&mut sub);
+
+		let (mut cache, cache_consumer) = track_pair("cache");
+		write_group(&mut cache, 0, "0");
+		write_group(&mut cache, 1, "1");
+		producer.park(&cache_consumer).unwrap();
+		let (mut track_b, consumer_b) = track_pair("b");
+		producer.takeover(&consumer_b).unwrap();
+		write_group(&mut track_b, 2, "2");
+
+		sub.end_at(..3);
+		assert_eq!(recv(&mut sub), 1);
+		assert_eq!(recv(&mut sub), 2);
+		recv_pending(&mut sub);
+	}
+
 	/// A parked beyond-cap group must not block in-range groups that arrive
 	/// behind it: a relay can ingest a burst micro-reordered (newest first).
 	#[tokio::test]
@@ -3622,6 +3717,87 @@ mod test {
 		let before = counter.count();
 		successor.abort(Error::Cancel).unwrap();
 		assert!(counter.count() > before, "the successor's abort lost its wakeup");
+		let result = next.as_mut().poll(&mut cx);
+		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
+	}
+
+	#[tokio::test]
+	async fn aborted_stamped_successor_wakes_a_parked_read() {
+		tokio::time::pause();
+		let (a, a_read) = track_pair("a");
+		let (mut b, b_read) = track_pair("b");
+		let mut head = a.create_group(0u64.into()).unwrap();
+		head.write_frame(Timestamp::ZERO, b"a0".to_vec()).unwrap();
+		let mut successor = b.create_group(1u64.into()).unwrap();
+		successor
+			.write_frame(Duration::from_secs(30).try_into().unwrap(), b"b1".to_vec())
+			.unwrap();
+		write_group_at(&mut b, 2, "b2", Duration::from_secs(1));
+		write_group_at(&mut b, 3, "edge", Duration::from_secs(20));
+		let mut producer = Producer::new();
+		producer.switch(a_read, None).unwrap();
+		producer.switch(b_read, Position::group(1)).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+		let mut reading = sub.recv_group().await.unwrap().unwrap();
+		assert_eq!(reading.sequence, 0, "the rewound successor extends the reach");
+		assert_eq!(read(&mut reading), b"a0");
+
+		let (counter, waker) = CountWaker::new();
+		let mut cx = std::task::Context::from_waker(&waker);
+		let mut next = std::pin::pin!(reading.read_frame());
+		assert!(next.as_mut().poll(&mut cx).is_pending());
+		let before = counter.count();
+		successor.abort(Error::Cancel).unwrap();
+		assert!(
+			counter.count() > before,
+			"the stamped successor's abort lost its wakeup"
+		);
+		let result = next.as_mut().poll(&mut cx);
+		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
+	}
+
+	/// Cache eviction removes an unstamped successor from its track, so the next
+	/// segment's first group becomes the bound for the read already parked on A.
+	#[tokio::test]
+	async fn evicted_unstamped_successor_re_resolves_across_segments() {
+		tokio::time::pause();
+		let (a, a_read) = track_pair("a");
+		let pool = crate::cache::Pool::new(crate::cache::Config::default().with_expiry(Duration::from_secs(1)));
+		let info = broadcast::Info {
+			pool: pool.clone(),
+			..Default::default()
+		};
+		let b = track::Producer::new(Arc::new(info), "b", None);
+		let (mut c, c_read) = track_pair("c");
+		let mut head = a.create_group(0u64.into()).unwrap();
+		head.write_frame(Timestamp::ZERO, b"a0".to_vec()).unwrap();
+		let successor = b.create_group(1u64.into()).unwrap();
+		// The live edge is protected from eviction and lies beyond B's segment.
+		let _protected = b.create_group(4u64.into()).unwrap();
+		write_group_at(&mut c, 2, "c2", Duration::from_secs(1));
+		write_group_at(&mut c, 3, "edge", Duration::from_secs(20));
+		let mut producer = Producer::new();
+		producer.switch(a_read, None).unwrap();
+		producer.switch(b.consume(), Position::group(1)).unwrap();
+		producer.switch(c_read, Position::group(2)).unwrap();
+		let mut sub = producer.consume().subscribe(None);
+		let mut reading = sub.recv_group().await.unwrap().unwrap();
+		assert_eq!(reading.sequence, 0, "the unstamped successor leaves reach unbounded");
+		assert_eq!(read(&mut reading), b"a0");
+
+		let (counter, waker) = CountWaker::new();
+		let mut cx = std::task::Context::from_waker(&waker);
+		let mut next = std::pin::pin!(reading.read_frame());
+		assert!(next.as_mut().poll(&mut cx).is_pending());
+		let before = counter.count();
+		crate::model::clock::advance(Duration::from_secs(2));
+		pool.gc(crate::model::clock::now());
+		assert!(successor.is_aborted(), "cache GC evicted the successor");
+		assert!(
+			b.consume().peek_group(1).is_none(),
+			"the slot was removed from the cache"
+		);
+		assert!(counter.count() > before, "the successor's eviction lost its wakeup");
 		let result = next.as_mut().poll(&mut cx);
 		assert!(matches!(result, Poll::Ready(Ok(None))), "the head is stale: {result:?}");
 	}
