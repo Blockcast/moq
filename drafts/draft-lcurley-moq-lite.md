@@ -468,7 +468,9 @@ The track's immutable publisher properties are not carried here; they are fetche
 The subscriber needs the track's TRACK_INFO (notably its timescale) to interpret FRAME messages, and MAY open the Track and Subscribe streams concurrently, buffering frames until it arrives.
 
 The publisher sends SUBSCRIBE_OK once the absolute start position is resolved, and SUBSCRIBE_END once no further groups will be produced and every Group Stream it opens for the subscription has been opened (see [SUBSCRIBE_OK](#subscribe-ok) and [SUBSCRIBE_END](#subscribe-end)).
-The publisher closes the stream (FIN) after SUBSCRIBE_END, once every counted Group Stream has finished or been reset.
+The publisher closes its side of the stream (FIN) after SUBSCRIBE_END, once every counted Group Stream has finished or been reset.
+After reading the publisher's FIN, the subscriber MUST close its side (FIN) once its tail accounting has settled: every received Group Stream has been read to its FIN, reset, or dropped, and every remaining counted stream has arrived or exhausted the subscriber's grace period.
+A publisher closing its session gracefully MUST wait for the subscriber's FIN or reset on every Subscribe Stream before closing the connection; a transport acknowledgement alone does not confirm the subscriber read the tail.
 Unbounded subscriptions stay open until SUBSCRIBE_END, and either endpoint MAY reset the stream at any time.
 
 ### Fetch
@@ -1350,6 +1352,7 @@ The `Message Length` describes the payload size on the wire.
 
 ## moq-lite-07
 
+- The subscriber FINs its Subscribe Stream after settling its tail; graceful session close waits for that FIN or reset.
 - Made TRACK_INFO Publisher Max Age optional, encoded as milliseconds plus one with zero meaning no limit.
 
 - Assigned `moq-lite-07-wip` as this draft's protocol identifier until it is finalized as `moq-lite-07`.

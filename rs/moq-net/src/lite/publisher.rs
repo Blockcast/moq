@@ -1077,7 +1077,7 @@ impl<S: crate::transport::poll::Session, R: Request<S>> RequestServe<S, R> {
 	fn poll_serve(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let mut cx = waiter.context();
 		loop {
-			// Once answered, the requester's FIN is the normal end, so `Finish` doesn't watch.
+			// Once answered, the requester's FIN is the normal end, not a cancel.
 			if matches!(self.state, RequestState::Resolve { .. } | RequestState::Serve(_))
 				&& let Poll::Ready(res) = self.poll_requester(&mut cx)
 			{
@@ -1133,6 +1133,12 @@ impl<S: crate::transport::poll::Session, R: Request<S>> RequestServe<S, R> {
 						stream.writer.finish()?;
 						*finished = true;
 					}
+					// A transport ACK does not say the application read the tail: a lite-07
+					// subscriber FINs once its tail accounting settles, so wait for that.
+					if R::GRACEFUL && self.shared.version.waits_for_subscriber_fin() {
+						ready!(self.poll_requester(&mut cx))?;
+					}
+					let stream = self.stream.as_mut().expect("stream present");
 					return stream.writer.poll_close(&mut cx);
 				}
 			}

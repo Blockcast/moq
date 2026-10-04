@@ -184,6 +184,15 @@ impl Version {
 		}
 	}
 
+	/// Whether subscription completion waits for the subscriber's FIN.
+	#[allow(clippy::match_like_matches_macro)]
+	pub(crate) fn waits_for_subscriber_fin(self) -> bool {
+		match self {
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06 => false,
+			_ => true,
+		}
+	}
+
 	/// Whether ANNOUNCE_REQUEST carries the hidden opt-in. Added in lite-07; older
 	/// requests decode as not opted in.
 	#[allow(clippy::match_like_matches_macro)]

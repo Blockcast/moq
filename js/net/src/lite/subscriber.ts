@@ -601,7 +601,11 @@ export class Subscriber {
 			const responses = supportsTrackStream(this.version)
 				? this.#runResponses(stream, entry)
 				: stream.reader.closed;
-			const closed = responses.then(() => this.#settleTail(entry));
+			let tailSettled = false;
+			const closed = responses.then(async () => {
+				await this.#settleTail(entry);
+				tailSettled = true;
+			});
 			// A reset that lands after the race below settled is moot; the race observes one before.
 			closed.catch(() => {});
 			const subscriptionUpdates =
@@ -629,7 +633,10 @@ export class Subscriber {
 			}
 
 			producer.close();
-			stream.close();
+			// A settled lite07 tail acknowledges completion with FIN, without cancelling
+			// the publisher's already-finished receive half.
+			if (tailSettled && this.version === Version.DRAFT_07) stream.writer.close();
+			else stream.close();
 			console.debug(`subscribe close: id=${id} broadcast=${broadcast} track=${request.name}`);
 		} catch (err) {
 			const e = await sessionCause(this.#quic, err);

@@ -3795,6 +3795,8 @@ enum TrackRunState<S: crate::transport::poll::Session> {
 		info: TrackInfoFetch<S>,
 	},
 	Serve(ServeLoop<S>),
+	/// Preserve the lite07 completion FIN until the publisher acknowledges it.
+	Finish(crate::coding::Writer<S::SendStream, Version>),
 	Done,
 }
 
@@ -3858,6 +3860,7 @@ impl<S: crate::transport::poll::Session> kio::Task for TrackServeRun<S> {
 				}
 				TrackRunState::Serve(serve_loop) => {
 					let teardown = ready!(serve_loop.poll(&self.serve, waiter));
+					let finished = matches!(teardown, ServeEnd::Finished);
 					let TrackRunState::Serve(mut serve_loop) = std::mem::replace(&mut self.state, TrackRunState::Done)
 					else {
 						unreachable!()
@@ -3882,12 +3885,22 @@ impl<S: crate::transport::poll::Session> kio::Task for TrackServeRun<S> {
 						}
 					}
 
-					if let Sub::Active(active) = &mut serve_loop.sub {
+					if let Sub::Active(mut active) = serve_loop.sub {
 						self.serve.subscriber.remove_subscribe(active.id);
-						let _ = active.stream.writer.finish();
+						if active.stream.writer.finish().is_ok()
+							&& finished && self.serve.subscriber.version.waits_for_subscriber_fin()
+						{
+							self.state = TrackRunState::Finish(active.stream.writer);
+							continue;
+						}
 					}
 
 					return Poll::Ready(());
+				}
+				TrackRunState::Finish(writer) => {
+					let mut cx = std::task::Context::from_waker(waiter.waker());
+					let _ = ready!(writer.poll_close(&mut cx));
+					self.state = TrackRunState::Done;
 				}
 				TrackRunState::Done => return Poll::Ready(()),
 			}

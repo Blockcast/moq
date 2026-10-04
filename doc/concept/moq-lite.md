@@ -61,6 +61,11 @@ a group at or past `SUBSCRIBE_END`, or a `SUBSCRIBE_END` below a group already
 received. moq-lite 05 specified an inclusive end, so there it only drops that
 group or the early boundary.
 
+On moq-lite 07, a subscription ends with both sides' FIN. The subscriber sends
+its FIN after settling the tail. A publisher closing gracefully waits for that
+FIN or a reset before closing the connection, within its close deadline.
+moq-lite 05 and 06 retain transport acknowledgement based draining.
+
 ## Group reads across failover
 
 Rust origin readers can keep reading an in-flight group after its source fails.
