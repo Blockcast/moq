@@ -22,7 +22,6 @@ QUIC studies there on that rule.
 
 ## Required
 
-- [moq-transport peers are plain clients](/quest/m1/ietf-cluster-off.md) - no moq-transport session negotiates the cluster extension, since cluster links are moq-lite only
 - [Bounded stats aggregate](/quest/m1/stats-aggregate-bound.md) - the stats aggregator folds departed nodes into a retired total after a grace window, so its memory stops growing with node churn
 - [Stats epochs](/quest/m1/stats-epoch.md) - each stats producer publishes under `.../node/<node>/@<epoch>`, so a restarted node never reuses a name
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - any node routes toward a broadcast's origin over CDN and P2P links alike, with per-origin routes and path-less announces
