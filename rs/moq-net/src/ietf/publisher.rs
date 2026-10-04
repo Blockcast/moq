@@ -652,6 +652,10 @@ where
 				}
 			};
 
+			// A relay's copy that went idle cannot say where its live edge is until its route
+			// answers again; answering from its cache would advertise a stale one.
+			kio::wait(|waiter| track.poll_live(waiter)).await;
+
 			// The filter and any fill are relative to the live edge, so snapshot it once:
 			// the fill ends exactly where a Next Object subscription begins, which is what
 			// lets the draft's current-group join (Next Object plus a StartGroup=1 fill)
@@ -6509,8 +6513,8 @@ struct LiveEdge {
 	/// The newest group sequence, `None` before any group exists.
 	latest: Option<u64>,
 	/// The precise Largest Object. `None` when the track is empty, or when the newest
-	/// group's frames cannot be read right now (none written yet, or a spliced track
-	/// between segments), in which case nothing is advertised and no fill is servable.
+	/// group's frames cannot be read right now (none written yet), in which case nothing
+	/// is advertised and no fill is servable.
 	largest: Option<Location>,
 	/// One past the Largest Object, which is where a Next Object subscription begins.
 	/// When the edge is imprecise this falls back to the next group boundary: never below
