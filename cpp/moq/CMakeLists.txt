@@ -9,7 +9,7 @@ endif()
 project(moq-cpp VERSION ${_version} LANGUAGES CXX)
 
 # Builds moq-ffi as a staticlib with cargo and renders its bindings with uniffi-bindgen-cpp,
-# the same no-Corrosion custom target rs/libmoq/CMakeLists.txt uses. Multi-config generators
+# the same no-Corrosion custom target rs/moq-c/CMakeLists.txt uses. Multi-config generators
 # (Visual Studio) have no CMAKE_BUILD_TYPE and get the release profile.
 set(_workspace "${CMAKE_CURRENT_SOURCE_DIR}/../..")
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -51,8 +51,8 @@ add_custom_target(moq_ffi ALL
     COMMENT "Building moq-ffi and rendering its C++ bindings"
     VERBATIM
 )
-# System libraries the staticlib needs from an external linker. moq-ffi and libmoq share one
-# dependency tree, so they share rs/libmoq/native-libs/, which says how to regenerate it.
+# System libraries the staticlib needs from an external linker. moq-ffi and moq-c share one
+# dependency tree, so they share rs/moq-c/native-libs/, which says how to regenerate it.
 if(APPLE)
     set(_platform apple)
 elseif(WIN32)
@@ -60,7 +60,7 @@ elseif(WIN32)
 else()
     set(_platform linux)
 endif()
-file(STRINGS "${_workspace}/rs/libmoq/native-libs/${_platform}.txt" _lines)
+file(STRINGS "${_workspace}/rs/moq-c/native-libs/${_platform}.txt" _lines)
 set(MOQ_NATIVE_LIBS "")
 foreach(_line IN LISTS _lines)
     string(STRIP "${_line}" _line)
@@ -76,7 +76,7 @@ endforeach()
 # The bindings compile here at the including project's CMAKE_CXX_STANDARD (else the compiler's
 # default, at least C++17) and with its flags; see src/moq.cpp. A standard raised only on a
 # consumer's own target does not reach this library.
-# Named moq-cpp so an in-tree build can sit beside libmoq's `moq` target.
+# Named moq-cpp so an in-tree build can sit beside moq-c's `moq` target.
 add_library(moq-cpp STATIC src/moq.cpp)
 add_library(moq::cpp ALIAS moq-cpp)
 add_dependencies(moq-cpp moq_ffi)

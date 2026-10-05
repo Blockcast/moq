@@ -38,6 +38,8 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
@@ -71,7 +73,7 @@ jobs:
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
-        run: ./cpp/moq/build.sh --target "$TARGET" --output dist
+        run: just cpp package --target "$TARGET" --output dist
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -93,9 +95,15 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
+      - name: Parse version
+        id: parse
+        run: just gh release parse-version cpp
+
       - name: Find previous tag
         id: prev_tag
-        run: .github/scripts/release.sh prev-tag cpp
+        run: just gh release prev-tag cpp
 
       - name: Download artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -107,8 +115,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TITLE: "moq C++ v${{ steps.parse.outputs.version }}"
           RELEASE_PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
-        run: RELEASE_TITLE="moq C++ v${RELEASE_TAG#cpp-v}" .github/scripts/release.sh create artifacts
+        run: just gh release create artifacts
 
   # The OBS plugin (cpp/obs) statically links the C++ package, so it ships with
   # every release: rebuild it against the release just published (no second
@@ -141,6 +150,8 @@ jobs:
         with:
           persist-credentials: false
 
+      - uses: ./.github/actions/just
+
       # The build job already checked the tag against this file.
       - name: Read C++ version
         id: parse
@@ -156,7 +167,7 @@ jobs:
           TARGET: ${{ matrix.target }}
           MOQ_RELEASE: ${{ steps.parse.outputs.version }}
         run: |
-          ./cpp/obs/build.sh --target "$TARGET" --moq-release "$MOQ_RELEASE" --output dist
+          just obs package --target "$TARGET" --moq-release "$MOQ_RELEASE" --output dist
 
       - name: Upload artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -176,6 +187,8 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - uses: ./.github/actions/just
 
       - name: Read plugin version
         id: parse
@@ -204,7 +217,7 @@ jobs:
           pattern: obs-moq-*
           merge-multiple: true
 
-      # release.sh prev-tag keys off the current tag, but the trigger here is a
+      # `just gh release prev-tag` keys off the current tag, but the trigger here is a
       # cpp-v* tag, so it can't find the previous obs-moq tag. Take the newest
       # existing obs-moq tag (excluding this version, for safe re-runs) so the
       # release notes span only since the last obs-moq release.
@@ -228,4 +241,4 @@ jobs:
           RELEASE_TAG: "obs-moq-v${{ steps.parse.outputs.version }}"
           RELEASE_TITLE: "obs-moq v${{ steps.parse.outputs.version }}"
           RELEASE_PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
-        run: .github/scripts/release.sh create artifacts
+        run: just gh release create artifacts

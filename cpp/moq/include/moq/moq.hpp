@@ -47,14 +47,11 @@ namespace moq {
 
 // Every generated `moq::MoqFoo` is also `moq::Foo`. `just cpp check` fails when one is missing.
 using AnnounceConsumer = MoqAnnounceConsumer;
-using AnnounceUpdate = MoqAnnounceUpdate;
 using AnnouncedBroadcast = MoqAnnouncedBroadcast;
 using AudioCodec = MoqAudioCodec;
 using AudioConsumer = MoqAudioConsumer;
 using AudioProducer = MoqAudioProducer;
 using Bandwidth = MoqBandwidth;
-using BinarySnapshotProducer = MoqBinarySnapshotProducer;
-using BinaryStreamProducer = MoqBinaryStreamProducer;
 using BroadcastConsumer = MoqBroadcastConsumer;
 using BroadcastDynamic = MoqBroadcastDynamic;
 using BroadcastProducer = MoqBroadcastProducer;
@@ -63,6 +60,8 @@ using CatalogConsumer = MoqCatalogConsumer;
 using Client = MoqClient;
 using ContainerProducer = MoqContainerProducer;
 using ContainerStreamProducer = MoqContainerStreamProducer;
+using FlateSnapshotProducer = MoqFlateSnapshotProducer;
+using FlateStreamProducer = MoqFlateStreamProducer;
 using GroupConsumer = MoqGroupConsumer;
 using GroupProducer = MoqGroupProducer;
 using GroupRequest = MoqGroupRequest;
@@ -88,6 +87,7 @@ using TrackProducer = MoqTrackProducer;
 using TrackRequest = MoqTrackRequest;
 using VideoConsumer = MoqVideoConsumer;
 using VideoProducer = MoqVideoProducer;
+using Announce = MoqAnnounce;
 using AnnounceConfig = MoqAnnounceConfig;
 using Audio = MoqAudio;
 using AudioDecoderOutput = MoqAudioDecoderOutput;
@@ -96,13 +96,13 @@ using AudioEncoderOutput = MoqAudioEncoderOutput;
 using AudioFrame = MoqAudioFrame;
 using AudioInit = MoqAudioInit;
 using Backoff = MoqBackoff;
-using BinaryConfig = MoqBinaryConfig;
 using Catalog = MoqCatalog;
 using ConnectionStats = MoqConnectionStats;
 using ContainerInit = MoqContainerInit;
 using Datagram = MoqDatagram;
 using Dimensions = MoqDimensions;
 using FetchGroupOptions = MoqFetchGroupOptions;
+using FlateConfig = MoqFlateConfig;
 using Frame = MoqFrame;
 using JsonSnapshotConfig = MoqJsonSnapshotConfig;
 using JsonStreamConfig = MoqJsonStreamConfig;
@@ -121,6 +121,7 @@ using VideoFrame = MoqVideoFrame;
 using VideoHint = MoqVideoHint;
 using VideoInit = MoqVideoInit;
 using VideoProperties = MoqVideoProperties;
+using AnnounceEvent = MoqAnnounceEvent;
 using AudioFormat = MoqAudioFormat;
 using AudioSampleFormat = MoqAudioSampleFormat;
 using ConnectionStatus = MoqConnectionStatus;
@@ -134,6 +135,7 @@ using VideoCodec = MoqVideoCodec;
 using VideoEncoderKind = MoqVideoEncoderKind;
 using VideoFormat = MoqVideoFormat;
 using VideoPixelFormat = MoqVideoPixelFormat;
+using VideoSurface = MoqVideoSurface;
 
 // The value of a fallible call, or the Error that stopped it. std::expected on C++23.
 template <typename T>

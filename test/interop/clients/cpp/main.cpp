@@ -118,7 +118,7 @@ int publish(const std::string &url, const std::string &path) {
     const auto forever = Clock::now() + std::chrono::hours(24);
     auto session = connect(url, forever);
 
-    // Hold the producer for the lifetime of the publish loop; finish() unpublishes.
+    // Hold the producer for the lifetime of the publish loop; close() unpublishes.
     auto broadcast = ok(session->publish()->create_broadcast(path), "create_broadcast");
     auto media = ok(broadcast->publish_video_stream({moq::VideoFormat::kAvc3, {}}), "publish_video_stream");
     moq::AudioEncoderOutput output{moq::AudioCodec::opus()};
@@ -156,7 +156,7 @@ int publish(const std::string &url, const std::string &path) {
     tone.join();
     ok(audio->finish(), "audio finish");
     ok(media->finish(), "video finish");
-    ok(broadcast->finish(), "broadcast finish");
+    ok(broadcast->close(), "broadcast close");
     session->cancel(0);
     moq::shutdown();
     return 0;

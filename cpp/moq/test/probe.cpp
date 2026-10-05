@@ -211,7 +211,7 @@ int main() {
     CHECK(!refused);
     CHECK(std::holds_alternative<moq::Error::kCancelled>(refused.error().get_variant()));
 
-    ok(broadcast->finish(), "broadcast finish");
+    ok(broadcast->close(), "broadcast close");
     session->cancel(0);
     served->cancel(0);
     server->cancel();

@@ -10,7 +10,7 @@ runs against the generated C++ bindings, in `just obs test`.
 ## Plan
 
 [#4281](https://github.com/moq-dev/moq/pull/4281) replaced about 2k lines of
-libmoq-stubbed OBS tests with suites that drive the real moq-ffi over an
+moq-c-stubbed OBS tests with suites that drive the real moq-ffi over an
 in-process relay. The old "restart rejects uncommitted stats" case in
 `cpp/obs/test/moq-output-test.cpp` (see `2ae9f9a5d^`) used a stubbed
 `moq_session_snapshot` hook to restart the output inside the stats call.

@@ -2,7 +2,7 @@
 
 ## Goal
 
-`OBS (macOS)` in `platform.yml` builds the plugin against the in-tree
+`OBS (macOS)` in `obs.yml` builds the plugin against the in-tree
 `cpp/moq`. Today it fails with `no newline at end of file
 [-Werror,-Wnewline-eof]` on the rendered `moq.hpp`, `moq.cpp`, and
 `moq_scaffolding.hpp`.

@@ -26,8 +26,8 @@ CI on Windows, macOS, and Linux.
 
 ## Required
 
-- The first `cpp-v*` release from `release-cpp.yml`, the tarballs the port fetches
+- [First C++ package release](/quest/m1/cpp/release.md) - the tarballs the port fetches
 
 ## Related
 
-- [Conan remote](/quest/m2/cpp-conan.md) - the same tarball through Conan
+- [Conan remote](/quest/m3/cpp-conan.md) - the same tarball through Conan

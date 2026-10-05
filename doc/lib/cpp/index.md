@@ -14,7 +14,7 @@ C++17 is the floor; C++20 adds `co_await` on a future, and C++23 makes
 `moq::expected` a `std::expected`. The bindings are generated from the same
 [UniFFI](https://mozilla.github.io/uniffi-rs/) crate as the other wrappers, so
 a method means the same thing here as in Python or Go. For a plain C ABI, use
-[libmoq](/lib/c/).
+[moq-c](/lib/c/).
 
 ## Install
 
@@ -58,7 +58,7 @@ From source, `add_subdirectory(cpp/moq)` in a checkout builds `moq-ffi` with
 cargo and renders the bindings with the pinned `uniffi-bindgen-cpp` (see
 [`cpp/moq`](https://github.com/moq-dev/moq/tree/main/cpp/moq)), then exposes
 the same `moq::cpp` target. The package is `moq-cpp`, so it installs beside
-libmoq's `moq` package without colliding.
+the C package, `moq-c`, without colliding.
 
 ## Example
 
@@ -97,7 +97,7 @@ moq::VideoEncoderOutput output{moq::VideoCodec::kH264, "camera", std::nullopt, s
 auto video = (*broadcast)->encode_video({moq::VideoPixelFormat::kRgba, 1280, 720, 30}, output, nullptr);
 (void)(*video)->write({0, rgba});
 (void)(*broadcast)->announce({});
-(void)(*broadcast)->finish();   // keep the producer alive while publishing, then finish explicitly
+(void)(*broadcast)->close();    // keep the producer alive while publishing, then close explicitly
 ```
 
 ## Futures

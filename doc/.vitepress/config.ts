@@ -133,7 +133,11 @@ export default defineConfig({
 								{ text: "Deployment", link: "/setup/prod" },
 							],
 						},
-						{ text: "moq-cli", link: "/bin/cli" },
+						{
+							text: "moq-cli",
+							link: "/bin/cli",
+							items: [{ text: "Inspect a relay", link: "/bin/inspect" }],
+						},
 						{
 							text: "Gateways",
 							items: [
@@ -172,7 +176,7 @@ export default defineConfig({
 								{ text: "moq-auth", link: "/lib/rs/moq-auth" },
 								{ text: "moq-room", link: "/lib/rs/moq-room" },
 								{ text: "moq-json", link: "/lib/rs/moq-json" },
-								{ text: "moq-binary", link: "/lib/rs/moq-binary" },
+								{ text: "moq-flate", link: "/lib/rs/moq-flate" },
 							],
 						},
 						{
@@ -187,7 +191,7 @@ export default defineConfig({
 								{ text: "@moq/auth", link: "/lib/js/auth" },
 								{ text: "@moq/signals", link: "/lib/js/signals" },
 								{ text: "@moq/json", link: "/lib/js/json" },
-								{ text: "@moq/binary", link: "/lib/js/binary" },
+								{ text: "@moq/flate", link: "/lib/js/flate" },
 							],
 						},
 						{ text: "Swift", link: "/lib/swift/" },

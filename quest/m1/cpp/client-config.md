@@ -2,7 +2,7 @@
 
 ## Goal
 
-moq-ffi's `MoqClient` offers every connection knob libmoq's `moq_client_config`
+moq-ffi's `MoqClient` offers every connection knob moq-c's `moq_client_config`
 does, and reports the defaults and supported values a settings UI is built
 from, so the OBS **Advanced** settings get back the ones the migration to the
 generated C++ dropped: protocol version, connect timeout, Happy Eyeballs delay,
@@ -13,14 +13,14 @@ again, under the same keys.
 ## Plan
 
 - moq-ffi: the knobs map onto the same `moq_tokio` `connect::Config` and
-  `quic::Config` fields `rs/libmoq/src/client.rs` fills. Settle the shape with
+  `quic::Config` fields `rs/moq-c/src/client.rs` fills. Settle the shape with
   the maintainer first: one setter per knob, matching the existing `set_*`, or
   a `MoqClientConfig` record whose generated defaults are the library's. The
   record is the recommendation, since it also gives a settings UI its defaults
   in every language, the way `moq_client_defaults` does for C. A
   backend-dependent default (GSO, MTU discovery, congestion control) stays
   absent rather than guessed.
-- Also report what libmoq enumerates today: the supported protocol versions
+- Also report what moq-c enumerates today: the supported protocol versions
   (`moq_versions`) for the version menu, and whether this build can write qlog
   (`moq_qlog_supported`), so the plugin hides a field it can't honor.
 - `cpp/obs/src/moq-settings.cpp`: restore the fields and their `Configure`

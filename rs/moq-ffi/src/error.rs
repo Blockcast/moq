@@ -151,7 +151,7 @@ fn stream_kind(err: &moq_net::StreamError) -> MoqProtocolKind {
 
 /// Error returned by all UniFFI-exported functions.
 ///
-/// Exports `Display`, which the bindings that support it surface as the error's string form.
+/// Exports `Display`, which the bindings surface as the error's string form.
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 #[uniffi::export(Display)]
 #[non_exhaustive]

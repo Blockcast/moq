@@ -20,7 +20,7 @@ fresh keyframe wait.
 Codex flagged it on [#4281](https://github.com/moq-dev/moq/pull/4281)
 ([finding](https://github.com/moq-dev/moq/pull/4281#discussion_r4113081104),
 [reply](https://github.com/moq-dev/moq/pull/4281#discussion_r4114013943)).
-The migration kept the libmoq behavior and said it would go to the maintainer
+The migration kept the moq-c behavior and said it would go to the maintainer
 as a follow-up, but nothing was filed. The maintainer decided in the 09-28
 merged-PR audit that it blocks the line.
 

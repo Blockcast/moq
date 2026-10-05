@@ -9,7 +9,7 @@ bare "Reconnecting".
 
 ## Plan
 
-- `MoqSession` gains the negotiated version, the way libmoq's
+- `MoqSession` gains the negotiated version, the way moq-c's
   `moq_session_snapshot` carries `protocol`; it changes across reconnects, so
   read it live rather than once at connect.
 - The reconnect loop's last failure is visible while it retries. Today
