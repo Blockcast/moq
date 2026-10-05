@@ -27,7 +27,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:kixelated/quest/362489bcf02833d8674cff339463b086442cf92d";
+      url = "github:kixelated/quest/5ff9229d277a4580296795a82f427f5ec30072c7";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
       inputs.crane.follows = "crane";
@@ -158,6 +158,8 @@
             # time (bindgenHook above provides libclang). Linux-only; macOS uses
             # ScreenCaptureKit.
             pkgs.pipewire
+            # Isolated X11 server for SHM/GetImage capture measurements.
+            pkgs.xvfb-run
           ];
 
         # Where the shell's libasound looks for PCM plugins.
@@ -242,6 +244,8 @@
         # `cargo metadata` in `just rs check-changed`.
         devTools = with pkgs; [
           jq
+          # Runs the moq.sh installer tests under a strict POSIX shell.
+          dash
         ];
 
         # Linters / formatters used by `just check` and `just fix`, which
@@ -456,7 +460,7 @@
             moq-relay
             moq-bench
             moq-boy
-            libmoq
+            moq-c
             moq-gst
             ;
 
