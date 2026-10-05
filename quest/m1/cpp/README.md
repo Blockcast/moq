@@ -65,8 +65,14 @@ Confirmed in [#4100](https://github.com/moq-dev/moq/pull/4100):
 - MSVC is covered by `cpp.yml` on every pull request, not a branch
   dispatch of the nightly.
 
+Decided in the 2026-10-05 audit: the [FFI shape](/quest/m1/ffi-shape/README.md)
+line (#4519) lands first, and this line ports `cpp/moq`, `cpp/obs`, and the
+C++ interop client onto the reshaped moq-ffi, since its branch still calls
+APIs FFI shape deleted.
+
 ## Required
 
+- [FFI shape](/quest/m1/ffi-shape/README.md) - lands first; this line ports onto its moq-ffi
 - [Generated bindings end with a newline](/quest/m1/cpp/generated-newline.md) - uniffi-bindgen-cpp stops tripping `-Wnewline-eof`, so the macOS OBS job builds again
 - [macOS alias check](/quest/m1/cpp/macos-alias-check.md) - `just cpp check` passes its alias step with the BSD `sed` macOS ships
 - [Client settings parity](/quest/m1/cpp/client-config.md) - moq-ffi offers moq-c's client knobs, and the OBS advanced settings get back the ones the migration dropped
