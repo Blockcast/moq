@@ -40,7 +40,9 @@ async def test_server_client_roundtrip():
     async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
         # Publish a broadcast on the server side.
         broadcast = server.create_broadcast("hello")
-        media = broadcast.publish_audio(moq.AudioFormat.OPUS, opus_head())
+        media = moq.media.TrackProducer.audio(
+            broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_head())
+        )
         broadcast.announce()
 
         # Auto-accept incoming sessions in the background so the handshake
@@ -65,18 +67,20 @@ async def test_server_client_roundtrip():
                     assert announcement.prefix == "hello"
 
                     broadcast_consumer = await client.request_broadcast(announcement.prefix)
-                    catalog = await broadcast_consumer.catalog()
+                    catalog = await moq.media.catalog(broadcast_consumer)
                     track_name, audio = next(iter(catalog.audio.items()))
                     assert audio.codec == "opus"
 
-                    media_consumer = await broadcast_consumer.subscribe_media(track_name, audio)
+                    media_consumer = await moq.media.ContainerConsumer.subscribe(
+                        broadcast_consumer, track_name, audio.container
+                    )
 
                     payload = b"hello over the wire"
-                    media.write_frame(payload, 1_000_000)
+                    media.write_frame(payload, timedelta(microseconds=1_000_000))
 
                     async for frame in media_consumer:
                         assert frame.payload == payload
-                        assert frame.timestamp_us == 1_000_000
+                        assert frame.timestamp // timedelta(microseconds=1) == 1_000_000
                         break
 
                     break
@@ -383,3 +387,69 @@ async def test_route_update_observes_restart():
                 await serve_task
             except asyncio.CancelledError:
                 pass
+
+
+async def test_client_context_keeps_the_body_error():
+    """An error in the body survives the context manager, and the session is still
+    cancelled. A live subscribed track never drains, so draining on the way out would
+    wait out the deadline and replace the body's error with a delivery timeout."""
+    async with moq.Server("127.0.0.1:0", tls_generate=["localhost"]) as server:
+        sessions: list = []
+        reading: list = []
+        accepted = asyncio.Event()
+
+        async def accept_loop() -> None:
+            async for request in server:
+                sessions.append(await request.accept())
+                accepted.set()
+
+        async def drain(reader: moq.TrackConsumer) -> None:
+            async for _ in reader:
+                pass
+
+        accept_task = asyncio.create_task(accept_loop())
+        broadcast = None
+        session = None
+        try:
+            with pytest.raises(ZeroDivisionError):
+                async with moq.Client(
+                    f"https://{server.local_addr}",
+                    tls_verify=False,
+                    bind="127.0.0.1:0",
+                ) as client:
+                    # Held past the context manager, so the exit has to cancel it
+                    # rather than lean on the last session reference dropping.
+                    session = client.session
+                    assert session is not None
+                    broadcast = client.create_broadcast("live")
+                    broadcast.announce()
+                    track = broadcast.publish_track("data")
+                    await asyncio.wait_for(accepted.wait(), timeout=5.0)
+                    consume = sessions[0].consume()
+                    async for announcement in routes(consume.announced()):
+                        assert announcement.prefix == "live"
+                        break
+                    consumer = await asyncio.wait_for(consume.request_broadcast("live"), timeout=5.0)
+                    reader = await asyncio.wait_for(consumer.subscribe_track("data"), timeout=5.0)
+                    reading.append(asyncio.create_task(drain(reader)))
+                    await asyncio.wait_for(track.demand().used(), timeout=5.0)
+                    raise ZeroDivisionError("boom")
+            # The error exits the context without draining, but the session is over.
+            assert session is not None
+            await asyncio.wait_for(session.closed(), timeout=5.0)
+        finally:
+            accept_task.cancel()
+            try:
+                await accept_task
+            except asyncio.CancelledError:
+                pass
+            if session is not None:
+                # Tear down before the readers so this is deterministic whether or not
+                # the exit above cancelled, and a failure surfaces as a failure rather
+                # than a wedged event loop.
+                session.cancel(0)
+            for task in reading:
+                task.cancel()
+            await asyncio.gather(*reading, return_exceptions=True)
+            if broadcast is not None:
+                broadcast.close()

@@ -19,15 +19,18 @@ so `go get moq.dev/moq@latest` always pulls the latest native core.
 go get moq.dev/moq@latest
 ```
 
-```go
-import "moq.dev/moq"
-```
-
 `CGO_ENABLED=1` is required (the default on Unix); the prebuilt `libmoq_ffi.a` comes transitively from `moq.dev/moq-ffi`, so there is no Rust toolchain or shared-library setup.
 
 ## Quick start
 
 ```go
+import (
+	"context"
+	"fmt"
+	"log"
+	"moq.dev/moq"
+)
+
 ctx := context.Background()
 
 client, err := moq.Dial(ctx, "https://relay.example.com")
@@ -71,19 +74,20 @@ Incoming server requests expose the query-free `Path()` before `Accept()`. It
 is consistent across transports and returns an empty string for the root or
 missing path. `Query()` returns the encoded query and may contain credentials.
 
+Media lives in `moq.dev/moq/media`. `NewAudioTrackProducer` / `NewVideoTrackProducer`
+take a broadcast, a `Named` or `Requested` target, and an `AudioInit` / `VideoInit`.
+A `Named` target chooses a track name or lets the importer derive one; a `Requested`
+target takes over a subscriber's pending request. A duplicate name fails.
+`VideoInit.Hint` seeds fields the bitstream cannot supply. `NewContainerProducer` /
+`NewContainerStreamProducer` demux whole chunks or a byte stream into their own tracks.
+`NewCatalogProducer` holds its broadcast weakly and owns catalog properties and sections.
+`NewCatalogConsumer`, `NewContainerConsumer`, and `NewContainerGroupConsumer` read
+catalog snapshots, live media, and one fetched media group. Frames and `Flush` use
+`time.Duration`; `Demand()` owns track names and subscriber waits.
+
 `BroadcastProducer.Dynamic()` accepts subscriber-requested tracks. Call
-`TrackRequest.Accept()` for raw tracks, or `BroadcastProducer.PublishAudioOnTrack()` /
-`PublishVideoOnTrack()`
-for media tracks whose timescale should be selected by the importer.
-
-`PublishAudio`, `PublishVideo`, `PublishContainer`, their `OnTrack` variants, and
-`PublishVideoStream` / `PublishContainerStream` accept
-`WithVideoHint(moq.VideoHint{...})` for video catalog fields that are known
-before the stream reveals them.
-
-`WithAudioTrack(name)` / `WithVideoTrack(name)` name the track instead of
-deriving a unique name from the format. A duplicate name fails, and the
-`OnTrack` variants refuse it because the request already names the track.
+`TrackRequest.Accept()` for raw tracks, or pass the request as `media.Requested`
+so the media importer selects the timescale.
 
 JSON tracks live in the `moq.dev/moq/json` subpackage, mirroring the `moq-json` crate.
 Import it under an alias next to `encoding/json`. Each type wraps a track:
@@ -96,9 +100,10 @@ carry every record in order. Producers accept any `encoding/json` value; consume
 ```go
 import moqjson "moq.dev/moq/json"
 
-track, err := broadcast.PublishTrack("status", nil)
-status, err := moqjson.NewSnapshotProducer(broadcast, track, moqjson.SnapshotOptions{Compression: true})
-err = status.Update(map[string]any{"viewers": 42})
+broadcast, _ := client.CreateBroadcast("room")
+track, _ := broadcast.PublishTrack("status", nil)
+status, _ := moqjson.NewSnapshotProducer(broadcast, track, moqjson.SnapshotOptions{Compression: true})
+_ = status.Update(map[string]any{"viewers": 42})
 ```
 
 Producers take `SnapshotOptions` or `StreamOptions`; both consumers take
@@ -125,7 +130,7 @@ Raw tracks support best-effort datagrams alongside groups: `TrackProducer.Append
 sends one `Frame` and returns its sequence number, while `TrackConsumer.RecvDatagram`
 and `TrackConsumer.Datagrams` receive them in arrival order. Payloads are capped at
 1200 bytes. Datagram delivery requires a datagram-capable transport and lite-05 or
-newer moq-lite; IETF moq-transport, pre-lite-05, WebSocket, and TCP paths do not
+newer moq-lite, or moq-transport; pre-lite-05, WebSocket, and TCP paths do not
 deliver them, and there is no stream fallback.
 
 ## Versioning
@@ -136,4 +141,4 @@ The committed `go.mod` carries a `require moq.dev/moq-ffi v0.0.0` **placeholder*
 
 ## Local development
 
-Run `just go check`: it builds `moq-ffi` for the host, regenerates the bindings, stages both modules into `dist/` with a `replace` wiring the wrapper to the local ffi, and runs `go build`/`go vet`/`go test`. It also runs `scripts/publish-wrapper.test.sh`, which exercises the publisher's release/no-op/recovery paths against a scratch bare repo standing in for the mirror. See [../ffi/README.md](../ffi/README.md) for the `uniffi-bindgen-go` install.
+Run `just go check`: it builds `moq-ffi` for the host, regenerates the bindings, stages both modules into `dist/` with a `replace` wiring the wrapper to the local ffi, and runs `go build`/`go vet`/`go test`. See [../ffi/README.md](../ffi/README.md) for the `uniffi-bindgen-go` install.

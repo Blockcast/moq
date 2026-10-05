@@ -6,6 +6,7 @@ import (
 	"log"
 
 	"moq.dev/moq"
+	moqmedia "moq.dev/moq/media"
 )
 
 // Subscribe to a broadcast and print its catalog. These examples have no Output
@@ -56,10 +57,8 @@ func ExampleClient_CreateBroadcast() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	// Closing ends the broadcast for good.
-	defer broadcast.Close()
 
-	media, err := broadcast.PublishAudio(moq.AudioFormatOpus, opusHead())
+	media, err := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.AudioFormatOpus, Data: opusHead()})
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -68,6 +67,11 @@ func ExampleClient_CreateBroadcast() {
 	if err := media.WriteFrame(moq.Frame{Payload: []byte("opus frame")}); err != nil {
 		log.Fatal(err)
 	}
+
+	// Finish before closing: Close drains, and a live track never drains.
+	_ = media.Finish()
+	// Closing ends the broadcast for good.
+	broadcast.Close()
 }
 
 // Connect with pinned TLS material and read a stats snapshot.
@@ -89,14 +93,14 @@ func ExampleClient_Session_stats() {
 }
 
 // Publish a video track with catalog hints known before the first keyframe.
-func ExampleBroadcastProducer_PublishVideo_videoHint() {
+func Example_mediaVideoHint() {
 	broadcast, err := moq.NewBroadcastProducer()
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer broadcast.Close()
 
-	media, err := broadcast.PublishVideo(moq.VideoFormatAvc3, nil, moq.WithVideoHint(moq.VideoHint{}))
+	media, err := moqmedia.NewVideoTrackProducer(broadcast, moqmedia.Named{}, moqmedia.VideoInit{Format: moqmedia.VideoFormatAvc3, Data: nil, Hint: &moqmedia.VideoHint{}})
 	if err != nil {
 		log.Fatal(err)
 	}

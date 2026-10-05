@@ -10,7 +10,13 @@ description: Async sequences for iOS and macOS via the Moq package
 The `Moq` Swift package: de-prefixed types, `AsyncSequence` on every
 consumer, `Sendable` handles, and `Task` cancellation that reaches the native
 side. It depends on `MoqFFI`, which ships a prebuilt XCFramework with arm64
-slices for iOS 15+, the iOS Simulator, and macOS 12.3+.
+slices for iOS 16+, the iOS Simulator, and macOS 12.3+.
+
+`Media` owns catalogs, encoded-media importers, and container consumers.
+`Media.TrackProducer.audio` / `.video` take a broadcast, an init record, and a
+`.named(name:)` or `.requested(request)` target. `Media.CatalogProducer(broadcast:)`
+updates catalog properties and sections without keeping the broadcast open.
+Its writes fail after closing or releasing the broadcast.
 
 ```swift ignore
 dependencies: [
@@ -33,7 +39,7 @@ for try await event in try session.consume.announced(prefix: "live/", filter: "*
     // Prefixes stay origin-relative; captures reports what each wildcard matched.
     print(announcement.captures ?? [])
     let broadcast = try await session.consume.requestBroadcast(path: announcement.prefix)
-    for try await catalog in try await broadcast.subscribeCatalog() {
+    for try await catalog in try await Media.CatalogConsumer.subscribe(broadcast: broadcast) {
         print(catalog)
     }
 }
@@ -43,7 +49,7 @@ for try await event in try session.consume.announced(prefix: "live/", filter: "*
 // Publish encoded frames, or raw pixels with the codec inside the binding (VideoToolbox).
 // opusInit, packet, pts, and rgba come from your encoder or capture source.
 let broadcast = try session.publish.createBroadcast(path: "my-stream.hang")
-let audio = try broadcast.publishAudio(format: .opus, initData: opusInit)
+let audio = try Media.TrackProducer.audio(broadcast: broadcast, initData: Media.AudioInit(format: .opus, data: opusInit))
 try audio.writeFrame(packet, timestampUs: 20_000)
 
 let video = try broadcast.encodeVideo(
@@ -52,13 +58,16 @@ let video = try broadcast.encodeVideo(
 )
 try video.write(VideoFrame(timestampUs: pts, data: rgba))
 try broadcast.announce()
+try audio.finish()
+try video.finish()
+try broadcast.close()
 
-session.shutdown()
+try await session.shutdown()
 ```
 
 For already-encoded live output, call `audio.flush(timestampUs:)` after `writeFrame` with the same broadcast-clock PTS. It measures catalog jitter at the transport handoff. File, pipe, and network imports should omit `flush`; built-in encoders observe their own output.
 
-Call `audio.discontinuity()` when the source seeks, pauses, or changes its time base. It publishes a timeline marker and restarts handoff measurement without lowering advertised jitter. Resume with timestamps that continue forward on the broadcast media clock; this does not permit timestamp rewinds. On a track from `publishVideo`, resume with a keyframe: a delta frame before it fails.
+Call `audio.discontinuity()` when the source seeks, pauses, or changes its time base. It publishes a timeline marker and restarts handoff measurement without lowering advertised jitter. Resume with timestamps that continue forward on the broadcast media clock; this does not permit timestamp rewinds. On a track from `Media.TrackProducer.video`, resume with a keyframe: a delta frame before it fails.
 
 The three advertising operations: `session.publish.createBroadcast(path:)`
 returns an unannounced producer, invisible to everyone; `broadcast.announce(route:)` /
@@ -98,16 +107,26 @@ starts. A second response throws `AlreadyResponded`; calls after cancel throw
 `Cancelled`; `request.transport` is a `Transport` enum. JSON tracks live under `Json` and take `Codable` types
 (`Json.SnapshotProducer<Value>(broadcast:track:)`, `Json.StreamConsumer<Value>(track:)`), and the
 rest of the [shared feature list](/lib/#what-every-binding-can-do) maps one
-to one: `fetchGroup`/`fetchMediaGroup`, `dynamic()` for tracks and `dynamic(prefix:)` for broadcasts, `appendDatagram`/
-`datagrams`, `setCatalogSection`, `demand()` for `name`, `used()`, and `unused()`. `session.bandwidth()`
+to one: `fetchGroup`/`Media.ContainerGroupConsumer.fetch`, `dynamic()` for tracks and `dynamic(prefix:)` for broadcasts, `appendDatagram`/
+`datagrams`, `Media.CatalogProducer.setSection`, `demand()` for `name`, `used()`, and `unused()`. `session.bandwidth()`
 divides the connection's send estimate; pass it to `encodeVideo` /
 `encodeAudio` or `reserve` a share for an app-owned track. `MoqError.isAuth` and
 `isShutdown` classify errors. `protocolError` is the structured protocol failure
-(scope, verbatim code, kind) when the peer sent one.
+(scope, verbatim code, kind) when the peer sent one. An error's `description` is
+the Rust error message.
 
 `encodeAudio` encodes raw PCM inside the binding. Its codec is an object,
-`AudioCodec.opus()`, and `AudioEncoderOutput.frameDurationUs` sets the Opus
-frame length: 2500, 5000, 10000, 20000 (the default), 40000, or 60000.
+`AudioCodec.opus()` or `AudioCodec.aac()`, and
+`AudioEncoderOutput.frameDurationUs` sets the Opus frame length: 2500, 5000,
+10000, 20000 (the default), 40000, or 60000. 0 takes the codec's own frame,
+which AAC needs. AAC-LC encodes through the platform's encoder, so a host
+without one refuses it.
+
+Audio `channels` also names the speaker layout, by the WAVE convention: 1 is
+mono, 2 stereo, 3 2.1, 4 quad, 5 5.0, 6 5.1, 7 6.1, and 8 7.1, interleaved
+front left, front right, center, LFE, back, then side. Decoding remixes to the
+count you ask for; past 8 channels the samples pass through but can't be
+remixed.
 
 Each frame from `decodeVideo` owns its decoded picture until it is released,
 including after the consumer is cancelled. `frame.pixels(format:)` converts it
@@ -142,3 +161,5 @@ not the same as zero.
 - Packages SPM resolves: [moq-dev/moq-swift](https://github.com/moq-dev/moq-swift), [moq-dev/moq-swift-ffi](https://github.com/moq-dev/moq-swift-ffi)
 
 Raw track publisher metadata has an optional maximum age. Omitting it imposes no publisher age limit; zero keeps the live edge. Local cache limits still apply, and media imports explicitly retain 30 seconds. See [publisher retention](/concept/moq-lite).
+
+Use `try await session.shutdown()` to drain finished tracks before disconnecting. It throws if delivery has not completed within one second. `session.cancel(code: 0)` remains immediate. Finish or abort live tracks before shutdown. IETF media streams are not drained yet.

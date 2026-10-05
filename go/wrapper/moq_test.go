@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"moq.dev/moq"
+	moqmedia "moq.dev/moq/media"
 )
 
 // testTimeout bounds the blocking stream calls so a regression fails the test
@@ -133,7 +134,7 @@ func TestPublishAudioLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	media, err := broadcast.PublishAudio(moq.AudioFormatOpus, opusHead())
+	media, err := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.AudioFormatOpus, Data: opusHead()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +257,11 @@ func TestVideoPropertiesUseDefaultedFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	rotation := 315.0
-	if err := broadcast.SetVideoProperties(moq.VideoProperties{Rotation: &rotation}); err != nil {
+	catalogProducer, err := moqmedia.NewCatalogProducer(broadcast)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := catalogProducer.SetVideoProperties(moqmedia.VideoProperties{Rotation: &rotation}); err != nil {
 		t.Fatal(err)
 	}
 	if err := broadcast.Close(); err != nil {
@@ -314,7 +319,7 @@ func testDecodeVideoFrame(t *testing.T, surface bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	catalog, err := bc.Catalog(ctx)
+	catalog, err := moqmedia.CatalogSnapshot(ctx, bc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -450,7 +455,7 @@ func TestFetchGroupAndServeDynamicMiss(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := produced.WriteFrame(moq.Frame{Payload: []byte("archive"), Timestamp: time.Duration(request.Sequence() * 20_000) * time.Microsecond}); err != nil {
+	if err := produced.WriteFrame(moq.Frame{Payload: []byte("archive"), Timestamp: time.Duration(request.Sequence()*20_000) * time.Microsecond}); err != nil {
 		t.Fatal(err)
 	}
 	if err := produced.Finish(); err != nil {
@@ -473,7 +478,7 @@ func TestUnknownFormat(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A bad format is no longer expressible: it is an enum. Bad init bytes still are.
-	if _, err := broadcast.PublishAudio(moq.AudioFormatOpus, nil); err == nil {
+	if _, err := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.AudioFormatOpus, Data: nil}); err == nil {
 		t.Fatal("expected error for unknown format")
 	}
 }
@@ -487,7 +492,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	media, err := broadcast.PublishAudio(moq.AudioFormatOpus, opusHead())
+	media, err := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.AudioFormatOpus, Data: opusHead()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -515,7 +520,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	catalog, err := bc.Catalog(ctx)
+	catalog, err := moqmedia.CatalogSnapshot(ctx, bc)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -524,7 +529,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	}
 
 	var trackName string
-	var audio moq.Audio
+	var audio moqmedia.Audio
 	for name, a := range catalog.Audio {
 		trackName, audio = name, a
 	}
@@ -532,7 +537,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 		t.Fatalf("audio = %+v, want opus/48000/2", audio)
 	}
 
-	mediaConsumer, err := bc.SubscribeMedia(ctx, trackName, audio.Container, nil)
+	mediaConsumer, err := moqmedia.NewContainerConsumer(ctx, bc, moqmedia.ContainerConfig{Name: trackName, Container: audio.Container, Subscription: nil})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -550,7 +555,7 @@ func TestLocalPublishConsumeAudio(t *testing.T) {
 	if frame == nil {
 		t.Fatal("expected a frame")
 	}
-	if string(frame.Payload) != string(payload) || frame.TimestampUs != 1_000_000 {
+	if string(frame.Payload) != string(payload) || uint64(frame.Timestamp.Microseconds()) != 1_000_000 {
 		t.Fatalf("frame = %+v, want payload=%q ts=1000000", frame, payload)
 	}
 }
@@ -788,12 +793,12 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 	}
 
 	type subscribeResult struct {
-		media *moq.MediaConsumer
+		media *moqmedia.ContainerConsumer
 		err   error
 	}
 	subscribe := make(chan subscribeResult, 1)
 	go func() {
-		media, err := consumer.SubscribeMedia(ctx, "requested-audio", moq.LegacyContainer(), nil)
+		media, err := moqmedia.NewContainerConsumer(ctx, consumer, moqmedia.ContainerConfig{Name: "requested-audio", Container: moqmedia.LegacyContainer(), Subscription: nil})
 		subscribe <- subscribeResult{media: media, err: err}
 	}()
 
@@ -809,14 +814,15 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 		t.Fatalf("request name = %q, want requested-audio", name)
 	}
 
-	media, err := broadcast.PublishAudioOnTrack(request, moq.AudioFormatOpus, opusHead())
+	media, err := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Requested{Request: request}, moqmedia.AudioInit{Format: moqmedia.AudioFormatOpus, Data: opusHead()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	mediaName, err := media.Name()
+	mediaDemand, err := media.Demand()
 	if err != nil {
 		t.Fatal(err)
 	}
+	mediaName := mediaDemand.Name()
 	if mediaName != "requested-audio" {
 		t.Fatalf("media name = %q, want requested-audio", mediaName)
 	}
@@ -824,7 +830,7 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 		t.Fatalf("request name after accept error = %v, want ErrClosed", err)
 	}
 
-	var mediaConsumer *moq.MediaConsumer
+	var mediaConsumer *moqmedia.ContainerConsumer
 	select {
 	case res := <-subscribe:
 		if res.err != nil {
@@ -848,7 +854,7 @@ func TestDynamicTrackRequestCanPublishAudio(t *testing.T) {
 	if frame == nil {
 		t.Fatal("expected a frame")
 	}
-	if string(frame.Payload) != string(payload) || frame.TimestampUs != 20_000 {
+	if string(frame.Payload) != string(payload) || uint64(frame.Timestamp.Microseconds()) != 20_000 {
 		t.Fatalf("frame = %+v, want payload=%q ts=20000", frame, payload)
 	}
 	if err := media.Finish(); err != nil {

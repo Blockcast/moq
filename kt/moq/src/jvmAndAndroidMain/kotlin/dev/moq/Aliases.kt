@@ -89,18 +89,6 @@ typealias GroupProducer = uniffi.moq.MoqGroupProducer
 typealias GroupConsumer = uniffi.moq.MoqGroupConsumer
 
 // Media (codec-aware) producers and consumers.
-/** The write side of a media track; discontinuity() marks a break between pre-framed payloads. */
-typealias MediaProducer = uniffi.moq.MoqMediaProducer
-/** The write side of a media track fed a raw byte stream, with frame boundaries inferred. */
-typealias MediaStreamProducer = uniffi.moq.MoqMediaStreamProducer
-/** The write side of a container, which publishes each track it describes. */
-typealias ContainerProducer = uniffi.moq.MoqContainerProducer
-/** The write side of a container fed a raw byte stream. */
-typealias ContainerStreamProducer = uniffi.moq.MoqContainerStreamProducer
-/** The read side of a media track: yields frames with codec metadata in decode order. */
-typealias MediaConsumer = uniffi.moq.MoqMediaConsumer
-/** A finite fetched media group: yields container-decoded frames until the group ends. */
-typealias MediaGroupConsumer = uniffi.moq.MoqMediaGroupConsumer
 /** A demand-observable raw-audio track producer with explicit timeline re-anchoring after idle gaps. */
 typealias AudioProducer = uniffi.moq.MoqAudioProducer
 /** The read side of a raw-audio track: yields decoded PCM frames. */
@@ -109,40 +97,12 @@ typealias AudioConsumer = uniffi.moq.MoqAudioConsumer
 typealias VideoConsumer = uniffi.moq.MoqVideoConsumer
 /** The write side of a raw-video track; pixels written here are encoded inside the FFI boundary. */
 typealias VideoProducer = uniffi.moq.MoqVideoProducer
-/** The read side of a broadcast's catalog: yields updates as the set of tracks changes. */
-typealias CatalogConsumer = uniffi.moq.MoqCatalogConsumer
 
 // Data types.
-/** A broadcast's catalog: its tracks and their properties, plus any application sections. */
-typealias Catalog = uniffi.moq.MoqCatalog
 /** A datagram-delivered frame, tagged with a per-track sequence number. */
 typealias Datagram = uniffi.moq.MoqDatagram
 /** A payload plus the timestamp it should be presented at. */
 typealias Frame = uniffi.moq.MoqFrame
-/** A media [Frame] whose keyframe flag marks group starts or video keyframes; audio flags only group starts. */
-typealias MediaFrame = uniffi.moq.MoqMediaFrame
-/** The catalog description of a video track, including whether the publisher recommends temporarily avoiding it. */
-typealias Video = uniffi.moq.MoqVideo
-/** Caller-provided catalog fields for a video track. */
-typealias VideoHint = uniffi.moq.MoqVideoHint
-/** A single audio codec an importer can parse. */
-typealias AudioFormat = uniffi.moq.MoqAudioFormat
-/** A single video codec an importer can parse. */
-typealias VideoFormat = uniffi.moq.MoqVideoFormat
-/** A container that publishes its own tracks. */
-typealias ContainerFormat = uniffi.moq.MoqContainerFormat
-/** Catalog properties shared by every video rendition; absent fields clear those properties. */
-typealias VideoProperties = uniffi.moq.MoqVideoProperties
-/** An audio codec, its required init bytes, and an optional label. */
-typealias AudioInit = uniffi.moq.MoqAudioInit
-/** A video codec, optional init bytes, a label, and catalog hints. */
-typealias VideoInit = uniffi.moq.MoqVideoInit
-/** A container format and its leading bytes. */
-typealias ContainerInit = uniffi.moq.MoqContainerInit
-/** The catalog description of an audio track: codec, sample rate, channels, and container. */
-typealias Audio = uniffi.moq.MoqAudio
-/** A width and height pair, in pixels. */
-typealias Dimensions = uniffi.moq.MoqDimensions
 /** A path-prefix route: the prefix it covers, relay hop ids (oldest first), and advertised costs (warm cost, lower wins, plus undiscounted cold defaulting to cost). */
 typealias Route = uniffi.moq.MoqRoute
 /** Tunes how a track subscription is delivered: priority, group ordering, and range. */
@@ -153,7 +113,7 @@ typealias FetchGroupOptions = uniffi.moq.MoqFetchGroupOptions
 typealias TrackInfo = uniffi.moq.MoqTrackInfo
 /** One audio frame: PCM payload bytes plus a presentation timestamp. */
 typealias AudioFrame = uniffi.moq.MoqAudioFrame
-/** Selects the audio encoder codec. Build one with `AudioCodec.opus()`. */
+/** Selects the audio encoder codec. Build one with `AudioCodec.opus()` or `AudioCodec.aac()`. */
 typealias AudioCodec = uniffi.moq.MoqAudioCodec
 /** A raw PCM sample format, mirroring WebCodecs `AudioData.format`. */
 typealias AudioSampleFormat = uniffi.moq.MoqAudioSampleFormat

@@ -102,7 +102,8 @@ func subscriptionFFI(s *Subscription) (*ffi.MoqSubscription, error) {
 
 // TrackInfo holds publisher-side track properties: priority, how long a
 // non-latest group is cached (nil for no limit), and the timescale in ticks per
-// second (nil for microseconds).
+// second (nil for microseconds). A zero Priority is the least urgent, not the
+// default; set 127 for the midpoint a nil TrackInfo uses.
 type TrackInfo struct {
 	Priority  uint8
 	MaxAge    *time.Duration

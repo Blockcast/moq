@@ -17,11 +17,19 @@ Media frames use `keyframe` to mark a group start or a video keyframe. For audio
 it is true only on the first frame of each group, even when every sample can be
 decoded independently.
 
+Import `package:moq/media.dart` with a prefix for catalogs, encoded-media imports, and
+container consumers. `TrackProducer.audio` / `.video` take a broadcast, an init record,
+and a `Named` or `Requested` target. `CatalogProducer(broadcast: ...)` owns catalog properties
+and sections; it holds the broadcast weakly and fails after the broadcast closes.
+`CatalogConsumer.subscribe`, `ContainerConsumer.subscribe`, and `ContainerGroupConsumer.fetch`
+construct the read side from a broadcast.
+
 ```bash
 dart pub add moq        # or: flutter pub add moq
 ```
 
 ```dart
+import 'package:moq/media.dart' as media;
 import 'package:moq/moq.dart';
 
 final moq = await Moq.connect('https://relay.example.com');
@@ -41,16 +49,22 @@ moq
   }
 });
 final broadcast = await moq.requestBroadcast('live/camera');
+final catalog = await media.CatalogConsumer.subscribe(broadcast: broadcast);
+print(await catalog.next());
 ```
 
 ```dart
 // Publish. bytes comes from your encoder or application source.
 final mine = moq.createBroadcast('live/camera');
 final track = mine.publishTrack(name: 'video', info: null);
-track.appendGroup().writeFrame(frame: Frame(payload: bytes));
+final group = track.appendGroup();
+group.writeFrame(frame: Frame(payload: bytes));
+group.finish();
 mine.announce(route: MoqRoute());
+track.finish();
+mine.close();
 
-moq.close();
+await moq.close();
 ```
 
 ```dart
@@ -111,7 +125,8 @@ A supplied origin replaces its side; pass fresh origins for isolation, or the
 same origin on both sides to share it. Origins are captured when accept starts.
 A second response throws `AlreadyResponded`; calls after `cancel()` throw `Cancelled`. Incoming requests report a `MoqTransport` enum.
 `ProtocolMoqException` carries a `MoqProtocolException` as `details` (scope, verbatim
-code, kind) when the peer sent a session or stream code.
+code, kind) when the peer sent a session or stream code. An exception's
+`toString()` is the Rust error message.
 
 `moq.bandwidth()` divides the connection's send estimate; `reserve` a share
 for an app-owned encoder so several publishers on one session split the
@@ -119,10 +134,10 @@ uplink instead of each targeting the whole thing.
 
 Unlike the other bindings, the published Dart binaries carry **no codecs**:
 catalog and container types are there, so already-encoded frames flow through
-`MoqMediaProducer`/`MoqMediaConsumer`, but encoding is up to
+`media.TrackProducer`/`media.ContainerConsumer`, but encoding is up to
 `package:camera`, platform channels, or another codec package.
 
-`MediaProducer.flush(timestampUs: ...)` records the handoff of a locally encoded frame on the broadcast media clock. Call it after `writeFrame` only for live encoder output; file, pipe, and network imports stay clock-free. `MediaProducer` aliases the generated FFI object, so its method is available directly.
+`media.TrackProducer.flush(timestampUs: ...)` records the handoff of a locally encoded frame on the broadcast media clock. Call it after `writeFrame` only for live encoder output; file, pipe, and network imports stay clock-free. `media.TrackProducer` aliases the generated FFI object, so its method is available directly.
 
 Call `media.discontinuity()` when the source seeks, pauses, or changes its time base. It publishes a timeline marker and restarts handoff measurement without lowering advertised jitter. Resume with timestamps that continue forward on the broadcast media clock; this does not permit timestamp rewinds. On a video track, resume with a keyframe: a delta frame before it fails.
 
@@ -150,3 +165,5 @@ not the same as zero. `rttUs` is microseconds; the `rtt` extension reads it as a
 - Packages: [moq](https://pub.dev/packages/moq), [moq\_ffi](https://pub.dev/packages/moq_ffi)
 
 Raw track publisher metadata has an optional maximum age. Omitting it imposes no publisher age limit; zero keeps the live edge. Local cache limits still apply, and media imports explicitly retain 30 seconds. See [publisher retention](/concept/moq-lite).
+
+Await `session.shutdown()` or `moq.close()` to drain finished tracks before disconnecting. These futures fail if delivery has not completed within one second. `session.cancel(code: 0)` remains immediate. Finish or abort live tracks before shutdown. IETF media streams are not drained yet.

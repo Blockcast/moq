@@ -37,12 +37,11 @@ impl Producer {
 		self.inner.lock().unwrap().track.subscribe(None)
 	}
 
-	/// Whether any consumer for the underlying track currently exists.
+	/// A watch-only handle to the underlying track's subscriber demand.
 	///
-	/// The demand signal for a producer serving on request: an unused track is cached state nobody is
-	/// watching, safe to drop and recreate on the next request.
-	pub fn is_used(&self) -> bool {
-		self.inner.lock().unwrap().track.is_used()
+	/// Weak, so holding it neither keeps the track open nor contends with publishing.
+	pub fn demand(&self) -> moq_net::track::Demand {
+		self.inner.lock().unwrap().track.demand()
 	}
 
 	/// Publish a new value, superseding the previous one, and return the frame's encoded size.

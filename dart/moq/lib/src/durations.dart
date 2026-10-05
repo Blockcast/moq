@@ -45,12 +45,6 @@ extension FrameDuration on MoqFrame {
   Duration get timestamp => Duration(microseconds: timestampUs);
 }
 
-/// Duration view over a media frame's presentation time.
-extension MediaFrameDuration on MoqMediaFrame {
-  /// Presentation timestamp.
-  Duration get timestamp => Duration(microseconds: timestampUs);
-}
-
 /// Duration view over a datagram's presentation time.
 extension DatagramDuration on MoqDatagram {
   /// Presentation timestamp.

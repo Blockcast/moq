@@ -13,6 +13,12 @@ async iterators for announcements, groups, and frames, and no `Moq` prefixes.
 Python 3.10+, with wheels for Linux x86\_64/aarch64, macOS arm64, and Windows
 x64.
 
+`moq.media` owns catalog snapshots, encoded-media importers, and container consumers.
+Use `Named(name)` or `Requested(request)` as the target for `TrackProducer.audio` / `.video`.
+`CatalogProducer(broadcast)` holds the broadcast weakly and owns catalog properties and sections;
+its writes fail with `Error.Closed` after the broadcast closes or is released.
+`MediaFrame.timestamp`, media writes, and `flush` use `datetime.timedelta`.
+
 ```bash
 pip install moq-rs      # or: uv add moq-rs
 ```
@@ -29,10 +35,10 @@ async def main():
             announcement = event.announce
             print(announcement.captures)  # what * matched, or None for a partial overlap
             broadcast = await client.request_broadcast(announcement.prefix)
-            catalog = await broadcast.catalog()
+            catalog = await moq.media.catalog(broadcast)
             name, track = next(iter(catalog.audio.items()))
-            async for frame in await broadcast.subscribe_media(name, track):
-                print(frame.timestamp_us, len(frame.payload))
+            async for frame in await moq.media.ContainerConsumer.subscribe(broadcast, name, track.container):
+                print(frame.timestamp, len(frame.payload))
 
 asyncio.run(main())
 ```
@@ -46,8 +52,8 @@ async def main():
         broadcast = client.create_broadcast("my-stream.hang")
 
         # Already-encoded frames: the catalog is filled from the bitstream
-        audio = broadcast.publish_audio(moq.AudioFormat.OPUS, opus_init_bytes)
-        audio.write_frame(payload, timestamp_us=0)
+        audio = moq.media.TrackProducer.audio(broadcast, moq.media.AudioInit(format=moq.media.AudioFormat.OPUS, data=opus_init_bytes))
+        audio.write_frame(payload)
         audio.cut()   # audio has no keyframes, so this is what gives it groups
 
         # Or raw pixels, encoded inside the binding (VideoToolbox, Media Foundation, NVENC, openh264)
@@ -68,13 +74,18 @@ async def main():
         status.update({"state": "live", "viewers": 42})
 
         broadcast.announce()
+        audio.finish()
+        video.finish()
+        events.finish()
+        status.finish()
+        broadcast.close()
 
 asyncio.run(main())
 ```
 
-For already-encoded live output, call `audio.flush(timestamp_us)` after each `audio.write_frame` with the same broadcast-clock PTS. It samples the transport handoff for catalog jitter. File, pipe, and network imports should omit `flush`; raw-pixel and PCM encoders inside the binding measure their own output.
+For already-encoded live output, call `audio.flush(timestamp)` after each `audio.write_frame` with the same broadcast-clock PTS. It samples the transport handoff for catalog jitter. File, pipe, and network imports should omit `flush`; raw-pixel and PCM encoders inside the binding measure their own output.
 
-Call `audio.discontinuity()` when the source seeks, pauses, or changes its time base. It publishes a timeline marker and restarts handoff measurement without lowering advertised jitter. Resume with timestamps that continue forward on the broadcast media clock; this does not permit timestamp rewinds. On a track from `publish_video` or `publish_video_on_track`, resume with a keyframe: a delta frame before it fails.
+Call `audio.discontinuity()` when the source seeks, pauses, or changes its time base. It publishes a timeline marker and restarts handoff measurement without lowering advertised jitter. Resume with timestamps that continue forward on the broadcast media clock; this does not permit timestamp rewinds. On a track from `moq.media.TrackProducer.video`, resume with a keyframe: a delta frame before it fails.
 
 The three advertising operations, as the other bindings spell them:
 `client.create_broadcast(path)` (or `OriginProducer.create_broadcast`) returns
@@ -108,8 +119,8 @@ QUIC-only relay, or a `websocket_delay` `timedelta` to change the head start.
 
 Everything in the [shared feature list](/lib/#what-every-binding-can-do) is
 here: `moq.Server` with per-request accept/reject, `fetch_group` and
-`fetch_media_group`, `dynamic()` handlers for on-demand tracks and
-`dynamic(prefix)` for broadcasts, `append_datagram`/`recv_datagram`, `set_catalog_section`,
+`moq.media.ContainerGroupConsumer.fetch`, `dynamic()` handlers for on-demand tracks and
+`dynamic(prefix)` for broadcasts, `append_datagram`/`recv_datagram`, `moq.media.CatalogProducer.set_section`,
 and a producer's `demand()`, a `TrackDemand` whose
 `used()`/`unused()` let capture idle when nobody is subscribed.
 `await request.accept(publish=None, consume=None)` inherits the server defaults.
@@ -117,13 +128,22 @@ A supplied origin replaces its side; pass fresh origins for isolation, or the
 same origin on both sides to share it. Origins are captured when accept starts.
 A second response raises `AlreadyResponded`; calls after cancel raise `Cancelled`. `session.bandwidth()` divides the connection's send estimate;
 pass it to `encode_video` / `encode_audio` or `reserve` a share for an
-app-owned track. `moq.is_auth(err)` and `moq.is_shutdown(err)` classify errors. `moq.protocol_error(err)` is the structured protocol failure (scope, verbatim code, kind) when the peer sent one.
+app-owned track. `moq.is_auth(err)` and `moq.is_shutdown(err)` classify errors. `moq.protocol_error(err)` is the structured protocol failure (scope, verbatim code, kind) when the peer sent one. `str(err)` is the Rust error message.
 Each server request reports a `moq.Transport` enum, including QUIC, Iroh,
 WebSocket, TCP, and Unix sockets.
 
 `encode_audio` encodes raw PCM inside the binding. Its codec is an object,
-`moq.AudioCodec.opus()`, and `AudioEncoderOutput.frame_duration_us` sets the
-Opus frame length: 2500, 5000, 10000, 20000 (the default), 40000, or 60000.
+`moq.AudioCodec.opus()` or `moq.AudioCodec.aac()`, and
+`AudioEncoderOutput.frame_duration_us` sets the Opus frame length: 2500, 5000,
+10000, 20000 (the default), 40000, or 60000. 0 takes the codec's own frame,
+which AAC needs. AAC-LC encodes through the platform's encoder, so a host
+without one refuses it.
+
+Audio `channels` also names the speaker layout, by the WAVE convention: 1 is
+mono, 2 stereo, 3 2.1, 4 quad, 5 5.0, 6 5.1, 7 6.1, and 8 7.1, interleaved
+front left, front right, center, LFE, back, then side. Decoding remixes to the
+count you ask for; past 8 channels the samples pass through but can't be
+remixed.
 
 Each frame from `decode_video` owns its decoded picture until it is released,
 including after the consumer is cancelled. `frame.pixels(format)` converts it on
@@ -158,3 +178,5 @@ not the same as zero.
 - Raw bindings: [`moq-ffi`](https://pypi.org/project/moq-ffi/) on PyPI, for the unwrapped API
 
 Raw track publisher metadata has an optional maximum age. Omitting it imposes no publisher age limit; zero keeps the live edge. Local cache limits still apply, and media imports explicitly retain 30 seconds. See [publisher retention](/concept/moq-lite).
+
+Await `session.shutdown()` to drain finished tracks before disconnecting. It raises if delivery has not completed within one second. `cancel(code)` stays immediate. Session and client async context managers await shutdown on a clean exit and cancel on an error, so the body's exception survives; finish or abort live tracks first. IETF media streams are not drained yet.

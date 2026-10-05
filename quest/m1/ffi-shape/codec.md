@@ -22,7 +22,7 @@ The video encoder's output mirrors moq-video's `encode::Gop`:
 `Keyframe { interval }` variant, defaulting to keyframes at two seconds, and
 documented as non-exhaustive like the core. The wrappers expose it as an enum
 their callers construct, not one they are asked to match, so
-[intra-refresh bindings](/quest/m2/intra-refresh/bindings.md) adds the refresh
+[intra-refresh bindings](/quest/m3/intra-refresh-bindings.md) adds the refresh
 variant additively instead of breaking `gop` a second time. Go gets no uniffi
 default, so its zero value must read as keyframe mode.
 
@@ -31,7 +31,3 @@ The audio and video frame and decoder-output records carry microsecond fields
 should become owned `timedelta` / `time.Duration` records like net's.
 
 Public API: breaking in every binding. Wire: none.
-
-## Required
-
-- [Media](/quest/m1/ffi-shape/media.md) - the catalog handle the encoders register into
