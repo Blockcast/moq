@@ -174,7 +174,7 @@ export class LiteAuthWire implements AuthWire {
 	}
 
 	async present(token: Uint8Array): Promise<Stream> {
-		const stream = await Stream.open(this.#quic);
+		const stream = await Stream.open(this.#quic, { version: this.#version });
 		await stream.writer.u53(StreamId.Auth);
 		await new AuthMessage(token).encode(stream.writer, this.#version);
 		return stream;

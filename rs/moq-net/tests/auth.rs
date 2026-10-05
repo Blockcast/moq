@@ -137,11 +137,14 @@ async fn granted(session: &Session) -> Grant {
 async fn wait_announced(origin: &origin::Consumer, path: &str, active: bool) {
 	let mut announced = origin.announced();
 	let mut live = std::collections::HashSet::new();
-	let apply = |live: &mut std::collections::HashSet<String>, update: moq_net::announce::Update| {
-		match update.kind.is_active() {
-			true => live.insert(update.prefix.to_string()),
-			false => live.remove(update.prefix.as_str()),
-		};
+	let apply = |live: &mut std::collections::HashSet<String>, event: moq_net::announce::Event| match event {
+		moq_net::announce::Event::Start(update) | moq_net::announce::Event::Update(update) => {
+			live.insert(update.prefix.to_string());
+		}
+		moq_net::announce::Event::End(update) => {
+			live.remove(update.prefix.as_str());
+		}
+		moq_net::announce::Event::Live => {}
 	};
 	// Take in the replay first, so a retraction is judged against what is announced now
 	// rather than against an empty start.
@@ -1229,7 +1232,10 @@ async fn a_narrowing_resets_a_fetch_in_flight(version: &'static str) {
 				Err(err) => break err,
 			}
 		};
-		assert!(unauthorized(&err), "{err:?}");
+		// The narrowing also retracts the route, and a fetch-only track whose route
+		// leaves ends `Dropped` locally, so the reader may see either. The wire carries
+		// the revocation regardless.
+		assert!(unauthorized(&err) || matches!(err, moq_net::Error::Dropped), "{err:?}");
 		let resets = pair.server_transport.resets();
 		assert!(resets.contains(&StreamError::Unauthorized.to_code()), "{resets:x?}");
 		drop(group);

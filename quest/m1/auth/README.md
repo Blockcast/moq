@@ -91,6 +91,7 @@ existing lite-06 ALPN.
 
 ## Required
 
+- [WebSocket refusal](/quest/m1/auth/ws-unauthorized.md) - the relay serves WebSocket through moq-tokio, so a refused token closes the session as Unauthorized, as QUIC does
 - [Lite NOT_SUPPORTED](/quest/m1/auth/not-supported.md) - a lite acceptor answers AUTH_ERROR NOT_SUPPORTED after a grant too, and lite messages cap at moq-transport's 65,535 bytes
 - [AUTH violations](/quest/m1/auth/violations.md) - every AUTH protocol violation closes the session in Rust and JS, lite and IETF
 - [JS fetch grant watch](/quest/m1/auth/js-fetch-watch.md) - a JS `fetchGroup` ends `Unauthorized` when its path leaves the grant

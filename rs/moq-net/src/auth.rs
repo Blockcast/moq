@@ -994,17 +994,19 @@ impl Enforce {
 		};
 
 		loop {
-			let Some(update) = ready_or!(announced.poll_next(waiter)) else {
+			let Some(event) = ready_or!(announced.poll_next(waiter)) else {
 				return Poll::Ready(None);
 			};
-			match update.kind {
-				crate::announce::Kind::Announced if !self.live.contains(&update.prefix) => {
+			match event {
+				crate::announce::Event::Start(update) | crate::announce::Event::Update(update)
+					if !self.live.contains(&update.prefix) =>
+				{
 					if !permit.matches(update.prefix.as_str()) {
 						return Poll::Ready(Some(update.prefix));
 					}
 					self.live.insert(update.prefix);
 				}
-				crate::announce::Kind::Retracted => {
+				crate::announce::Event::End(update) => {
 					self.live.remove(&update.prefix);
 				}
 				_ => {}

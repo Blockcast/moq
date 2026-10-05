@@ -2,6 +2,7 @@ import { type Dispose, type Getter, race, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
+import { Withdrawal } from "../connection/withdrawal.ts";
 import { error, NotFound, reason, StreamCode, StreamError, unauthorized } from "../error.ts";
 import type * as group from "../group.ts";
 import { Cost, type Hop, type Route, routesEqual } from "../hop.ts";
@@ -33,6 +34,7 @@ import {
 	hasAnnounceId,
 	hasAnnounceOk,
 	hasDatagrams,
+	hasLargest,
 	hasProbeRtt,
 	hasRouteCost,
 	hasStreamCount,
@@ -325,6 +327,7 @@ function positionCursor(track: track.Subscriber, version: Version, startGroup: n
  * @internal
  */
 export class Publisher {
+	#withdrawal = new Withdrawal();
 	// The version of the connection.
 	readonly version: Version;
 
@@ -399,7 +402,12 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	async runAnnounce(msg: AnnounceRequest, stream: Stream) {
+	runAnnounce(msg: AnnounceRequest, stream: Stream): Promise<void> {
+		return this.#withdrawal.track(this.#runAnnounce(msg, stream));
+	}
+
+	async #runAnnounce(msg: AnnounceRequest, stream: Stream) {
+		if (this.#withdrawal.closing.peek()) return;
 		console.debug(`announce: prefix=${msg.prefix}`);
 
 		// Keyed by suffix, valued by identity plus route, so a republish diffs as
@@ -534,7 +542,7 @@ export class Publisher {
 			}
 
 			for (;;) {
-				const woke = await race([changed, stream.reader.closed]);
+				const woke = await race([changed, stream.reader.closed, this.#withdrawal.closing]);
 				dispose();
 				if (woke !== "changed") break;
 
@@ -560,6 +568,11 @@ export class Publisher {
 				}
 
 				active = updated;
+			}
+			if (this.#withdrawal.closing.peek()) {
+				for (const suffix of active.keys()) await retract(suffix);
+				stream.close();
+				await stream.writer.closed;
 			}
 		} finally {
 			dispose();
@@ -920,11 +933,37 @@ export class Publisher {
 
 				// Exactly-once arrival-order serving. This synchronous package-internal pop
 				// and frameRange call are the operation's linearization point.
+				// Popping or filtering a group removes the subscriber's view of its edge.
+				const largest = !startSent && hasLargest(this.version) ? track.largest() : undefined;
 				const recv = hooks.tryRecvGroup(track);
 				switch (recv.kind) {
 					case "error":
 						throw recv.error;
 					case "idle":
+						// A start past everything the track has (a subscriber resuming just after
+						// what it holds) is answered at once with the largest position, on
+						// versions that carry it: a quiet track may not reach that start for a
+						// while, and the subscriber judges what it holds against the answer.
+						if (emitRange && !startSent && hasLargest(this.version) && bounds.startGroup !== undefined) {
+							const startFrame = bounds.startFrame;
+							if (
+								largest !== undefined &&
+								(bounds.startGroup > largest.group ||
+									(bounds.startGroup === largest.group && startFrame > largest.frame))
+							) {
+								startSent = true;
+								hooks.replaceGroups(track, {
+									start: { included: bounds.startGroup },
+									end: bounds.endGroup === undefined ? undefined : { included: bounds.endGroup },
+								});
+								const start = new SubscribeStart(bounds.startGroup, largest);
+								if (
+									!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version)))
+								)
+									return;
+								continue;
+							}
+						}
 						// Before lite-07, an end declared ahead of the live edge goes out as
 						// soon as it is known, while the remaining groups are still being
 						// produced. The lite-07 count is not final until those groups open.
@@ -976,7 +1015,7 @@ export class Publisher {
 						!(await controls.response(
 							encodeSubscribeResponse(
 								stream,
-								{ start: new SubscribeStart(group.sequence) },
+								{ start: new SubscribeStart(group.sequence, largest) },
 								this.version,
 							),
 						))
@@ -1098,7 +1137,7 @@ export class Publisher {
 
 				// Convert the timestamp to the track's advertised timescale, matching #serveGroup.
 				const ts = Math.round(datagram.timestamp.as(timescale));
-				const body = new DatagramMessage(sub, datagram.sequence, ts, datagram.payload).encode();
+				const body = new DatagramMessage(sub, datagram.sequence, ts, datagram.payload).encode(this.version);
 
 				// No group fallback: drop anything that doesn't fit a single datagram.
 				if (body.byteLength > maxSize) {
@@ -1162,6 +1201,7 @@ export class Publisher {
 			// in the order we asked, which is oldest-first, exactly backwards for live media.
 			// Failing here drops the group and lets the next one compete for the next slot.
 			const stream = await Writer.tryOpen(this.#quic, {
+				version: this.version,
 				sendOrder: priority.rank(group.sequence),
 				cancel: unsubscribed,
 				waitUntilAvailable: false,
@@ -1346,6 +1386,10 @@ export class Publisher {
 	async runEnforce(setupAnswered: Promise<void>): Promise<void> {
 		if (!this.#grant) return;
 		await enforceGrant({ quic: this.#quic, advertised: this.#advertised, grant: this.#grant, setupAnswered });
+	}
+
+	withdraw(): Promise<void> {
+		return this.#withdrawal.close();
 	}
 
 	close() {

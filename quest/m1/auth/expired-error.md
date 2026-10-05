@@ -21,3 +21,7 @@ refusal as final.
 Moved from m2 into the auth line: relay tokens refuse an expired
 token with `AUTH_ERROR { Expired }`, so without this moq-net cannot tell it
 apart from `Unauthorized`.
+
+## Required
+
+- [WebSocket refusal](/quest/m1/auth/ws-unauthorized.md) - both transports refuse a token at the session level

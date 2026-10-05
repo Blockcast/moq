@@ -15,6 +15,16 @@ import { wireOf } from "./wire.ts";
 
 const url = new URL("https://localhost:4443/test");
 
+/** The next route event, skipping the live marker. */
+async function nextRoute<E extends { kind: string }>(announced: {
+	next(): Promise<E | undefined>;
+}): Promise<Exclude<E, { kind: "live" }> | undefined> {
+	for (;;) {
+		const event = await announced.next();
+		if (event?.kind !== "live") return event as Exclude<E, { kind: "live" }> | undefined;
+	}
+}
+
 function patterns(...prefixes: string[]): Path.Patterns {
 	return new Path.Patterns(prefixes.map((prefix) => Path.Pattern.subtree(prefix)));
 }
@@ -59,16 +69,16 @@ describe.each([Lite.ALPN_06, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", (pro
 		expect(serverGrant?.publish.equals(patterns(""))).toBe(true);
 		expect(serverGrant?.subscribe.equals(patterns(""))).toBe(true);
 
-		client.close();
-		server.close();
+		client.abort();
+		server.abort();
 	});
 
 	test("a token without an acceptor reports unsupported", async () => {
 		const { client, server } = await connect({ publish: new OriginProducer(), protocol });
 		await waitFor(client.auth.grant, (g) => g !== undefined);
 		await expect(client.auth.add("token")).rejects.toBeInstanceOf(Unsupported);
-		client.close();
-		server.close();
+		client.abort();
+		server.abort();
 	});
 
 	test("an out-of-scope broadcast closes the session and names the path", async () => {
@@ -91,7 +101,7 @@ describe.each([Lite.ALPN_06, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", (pro
 		const info = await transport.closed;
 		expect(info.closeCode).toBe(SessionCode.Unauthorized);
 		expect(info.reason).toBe("unauthorized: foo/bar");
-		server.close();
+		server.abort();
 	});
 
 	test("a revoked grant withdraws its broadcasts without closing the session", async () => {
@@ -111,22 +121,22 @@ describe.each([Lite.ALPN_06, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", (pro
 		origin.createBroadcast(Path.from("a/x")).announce();
 
 		const announced = server.announced();
-		const first = await announced.next();
+		const first = await nextRoute(announced);
 		expect(first?.prefix).toBe(Path.from("a/x"));
-		expect(first?.kind).toBe("announced");
+		expect(first?.kind).toBe("start");
 
 		issued[0]?.revoke(SessionCode.Unauthorized, "expired");
-		const second = await announced.next();
+		const second = await nextRoute(announced);
 		expect(second?.prefix).toBe(Path.from("a/x"));
-		expect(second?.kind).toBe("retracted");
+		expect(second?.kind).toBe("end");
 
 		// The union is empty but still a grant, and a new token restores it.
 		const empty = await waitFor(client.auth.grant, (g) => g !== undefined && g.publish.size === 0);
 		expect(empty?.subscribe.size).toBe(0);
 		const token = await client.auth.add("again");
 		expect(token.grant.peek()?.publish.equals(patterns("a"))).toBe(true);
-		const third = await announced.next();
-		expect(third?.kind).toBe("announced");
+		const third = await nextRoute(announced);
+		expect(third?.kind).toBe("start");
 
 		let closed = false;
 		void transport.closed.then(() => {
@@ -136,8 +146,8 @@ describe.each([Lite.ALPN_06, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", (pro
 		expect(closed).toBe(false);
 
 		announced.close();
-		client.close();
-		server.close();
+		client.abort();
+		server.abort();
 	});
 
 	test("a refused token surfaces the acceptor's code and reason", async () => {
@@ -155,8 +165,8 @@ describe.each([Lite.ALPN_06, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", (pro
 		const err = await client.auth.add("forged").catch((e: unknown) => e);
 		expect(err).toBeInstanceOf(SessionError);
 		expect((err as SessionError).code).toBe(SessionCode.Unauthorized);
-		client.close();
-		server.close();
+		client.abort();
+		server.abort();
 	});
 
 	test("closing the session drops the grant", async () => {
@@ -164,11 +174,11 @@ describe.each([Lite.ALPN_06, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", (pro
 		await waitFor(client.auth.grant, (g) => g !== undefined && g.publish.size > 0);
 
 		// Checked before any stream notices the transport closing.
-		client.close();
+		client.abort();
 		const closed = client.auth.grant.peek();
 		expect(closed?.publish.size).toBe(0);
 		expect(closed?.subscribe.size).toBe(0);
-		server.close();
+		server.abort();
 	});
 
 	test("an acceptor that ends a grant sees its stream close", async () => {
@@ -184,8 +194,8 @@ describe.each([Lite.ALPN_06, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", (pro
 			// A regression leaves `closed` pending, so bound the wait rather than hang the runner.
 			expect(await withTimeout(Promise.resolve(issued.closed), 1000, "the grant stream never closed")).toBeNull();
 		} finally {
-			client.close();
-			server.close();
+			client.abort();
+			server.abort();
 		}
 	});
 
@@ -203,8 +213,8 @@ describe.each([Lite.ALPN_06, Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", (pro
 		const empty = await waitFor(client.auth.grant, (g) => g !== undefined);
 		expect(empty?.publish.size).toBe(0);
 		expect(empty?.subscribe.size).toBe(0);
-		client.close();
-		server.close();
+		client.abort();
+		server.abort();
 	});
 });
 
@@ -257,8 +267,8 @@ describe.each([Ietf.ALPN.DRAFT_17, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 		});
 		await new Promise((resolve) => setTimeout(resolve, 10));
 		expect(closed).toBe(false);
-		client.close();
-		server.close();
+		client.abort();
+		server.abort();
 	});
 });
 
@@ -292,16 +302,16 @@ test("lite-06 carries literal and wildcard grants exactly", async () => {
 		expect(got?.publish.equals(parse(publish))).toBe(true);
 		expect(got?.subscribe.equals(parse(subscribe))).toBe(true);
 	}
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 test.each([Lite.ALPN_05, Ietf.ALPN.DRAFT_16])("%s has no grant", async (protocol) => {
 	const { client, server } = await connect({ publish: new OriginProducer(), protocol });
 	expect(client.auth.grant.peek()).toBeUndefined();
 	await expect(client.auth.add("token")).rejects.toBeInstanceOf(Unsupported);
-	client.close();
-	server.close();
+	client.abort();
+	server.abort();
 });
 
 // moq-transport has no stream code for it, so only moq-lite resets with UNAUTHORIZED.
@@ -363,7 +373,7 @@ test("a revoked grant resets its subscriptions with UNAUTHORIZED", async () => {
 		resets.mockRestore();
 		downSub.close();
 		upSub.close();
-		client.close();
-		server.close();
+		client.abort();
+		server.abort();
 	}
 });

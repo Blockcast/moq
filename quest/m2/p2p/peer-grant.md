@@ -62,3 +62,7 @@ Additive.
 ## Required
 
 - [In-band auth](/quest/m1/auth/README.md) - relay tokens reach `main` with this line, so the relay owns AUTH and knows the session's paths
+
+## Related
+
+- [Route trust](/quest/m1/cluster-routing/route-trust.md) - extends the grant with the node ids its holder may advertise routes for, a second purpose beside serving paths

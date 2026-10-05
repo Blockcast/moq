@@ -11,7 +11,6 @@ import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 import { Milli, Timestamp } from "../time.ts";
-import { DEFAULT_MAX_AGE_MS } from "../track.ts";
 import { AnnounceRequest } from "./announce.ts";
 import { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
@@ -48,6 +47,7 @@ test.each([Version.DRAFT_01, Version.DRAFT_03, Version.DRAFT_06])(
 		await Promise.resolve();
 		const failure = new Error("peer stopped receiving announcements");
 		const stream = new Stream({
+			version: version,
 			readable: new ReadableStream<Uint8Array>(),
 			writable: new WritableStream<Uint8Array>({
 				write() {
@@ -99,6 +99,7 @@ test.each([
 
 	const written: Uint8Array[] = [];
 	const stream = new Stream({
+		version: version,
 		readable: new ReadableStream<Uint8Array>(),
 		writable: new WritableStream<Uint8Array>({
 			write(chunk) {
@@ -135,8 +136,8 @@ async function subscribeEnd(sequences: number[], version: Version = Version.DRAF
 	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video");
 
-	const client = await Stream.open(pair.client);
-	const server = await Stream.accept(pair.server);
+	const client = await Stream.open(pair.client, { version });
+	const server = await Stream.accept(pair.server, version);
 	if (!server) throw new Error("publisher never accepted the subscribe stream");
 
 	const msg = new Subscribe({ id: 0n, broadcast: Path.from("test"), track: "video", priority: 0 });
@@ -198,8 +199,8 @@ async function groupSendOrders(options: { priority: number; sequences: number[];
 	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video");
 
-	const client = await Stream.open(pair.client);
-	const server = await Stream.accept(pair.server);
+	const client = await Stream.open(pair.client, { version: Version.DRAFT_05 });
+	const server = await Stream.accept(pair.server, Version.DRAFT_05);
 	if (!server) throw new Error("publisher never accepted the subscribe stream");
 
 	const msg = replaySubscribe({
@@ -282,8 +283,8 @@ test("lite draft-05: a subscribe update re-ranks a group already on the wire", a
 	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video");
 
-	const client = await Stream.open(pair.client);
-	const server = await Stream.accept(pair.server);
+	const client = await Stream.open(pair.client, { version: Version.DRAFT_05 });
+	const server = await Stream.accept(pair.server, Version.DRAFT_05);
 	if (!server) throw new Error("publisher never accepted the subscribe stream");
 
 	const msg = replaySubscribe({
@@ -346,8 +347,8 @@ test("lite draft-05: a subscribe update during the stream open still ranks the g
 		return open(options);
 	};
 
-	const client = await Stream.open(pair.client);
-	const server = await Stream.accept(pair.server);
+	const client = await Stream.open(pair.client, { version: Version.DRAFT_05 });
+	const server = await Stream.accept(pair.server, Version.DRAFT_05);
 	if (!server) throw new Error("publisher never accepted the subscribe stream");
 
 	const msg = replaySubscribe({
@@ -395,8 +396,8 @@ test("lite draft-05: many concurrent groups share one subscription listener", as
 	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video");
 
-	const client = await Stream.open(pair.client);
-	const server = await Stream.accept(pair.server);
+	const client = await Stream.open(pair.client, { version: Version.DRAFT_05 });
+	const server = await Stream.accept(pair.server, Version.DRAFT_05);
 	if (!server) throw new Error("publisher never accepted the subscribe stream");
 
 	const msg = replaySubscribe({
@@ -454,7 +455,7 @@ test("lite draft-05: the fetch response ranks the publisher's own writes", async
 	group.close();
 	track.writeGroup(group);
 
-	const client = await Stream.open(pair.client);
+	const client = await Stream.open(pair.client, { version: Version.DRAFT_05 });
 
 	// Accept by hand rather than via Stream.accept, so the test keeps the writable the
 	// publisher ranks (a real WebTransportSendStream takes the same assignment).
@@ -462,7 +463,7 @@ test("lite draft-05: the fetch response ranks the publisher's own writes", async
 	const accepted = await incoming.read();
 	incoming.releaseLock();
 	if (accepted.done) throw new Error("publisher never saw the fetch stream");
-	const server = new Stream(accepted.value);
+	const server = new Stream({ ...accepted.value, version: Version.DRAFT_05 });
 
 	const msg = new Fetch({ broadcast: Path.from("test"), track: "video", priority: 3, group: 7 });
 	try {
@@ -548,7 +549,7 @@ async function servedSubscription(
 	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video", { maxAge: options.maxAge });
 
-	const client = await Stream.open(pair.client);
+	const client = await Stream.open(pair.client, { version: version });
 
 	// Accept by hand rather than via Stream.accept, so the gate sits between the publisher
 	// and the wire.
@@ -558,7 +559,7 @@ async function servedSubscription(
 	if (accepted.done) throw new Error("publisher never accepted the subscribe stream");
 
 	const gate = gateWrites(accepted.value.writable, options.gated ?? false);
-	const server = new Stream({ readable: accepted.value.readable, writable: gate.writable });
+	const server = new Stream({ readable: accepted.value.readable, writable: gate.writable, version: version });
 
 	const msg = replaySubscribe({
 		id: 0n,
@@ -600,7 +601,7 @@ async function servedSubscription(
 			clearTimeout(timer);
 			if (!next || next.done) return undefined;
 
-			const reader = new Reader(next.value);
+			const reader = new Reader(next.value, undefined, version);
 			await reader.u53(); // stream type
 			const header = await GroupMessage.decode(reader, version);
 
@@ -928,8 +929,8 @@ test("lite draft-06: scheduling updates apply while SUBSCRIBE_START is blocked",
 
 		expect(sub.track.subscription.peek()).toEqual({
 			priority: 9,
-			maxAge: DEFAULT_MAX_AGE_MS,
-			groups: { end: { excluded: 6 } },
+			maxAge: TEST_MAX_AGE_MS,
+			groups: { start: undefined, end: { excluded: 6 } },
 		});
 		expect(ranges).not.toHaveBeenCalled();
 
@@ -1049,8 +1050,8 @@ test("lite draft-07: subscribe end waits for groups below a declared finish", as
 	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video");
 
-	const client = await Stream.open(pair.client);
-	const server = await Stream.accept(pair.server);
+	const client = await Stream.open(pair.client, { version: Version.DRAFT_07 });
+	const server = await Stream.accept(pair.server, Version.DRAFT_07);
 	if (!server) throw new Error("publisher never accepted the subscribe stream");
 	void publisher.runSubscribe(
 		new Subscribe({ id: 0n, broadcast: Path.from("test"), track: "video", priority: 0 }),
@@ -1104,8 +1105,8 @@ async function heldOpenEnd() {
 		return createUni(options);
 	});
 
-	const client = await Stream.open(pair.client);
-	const server = await Stream.accept(pair.server);
+	const client = await Stream.open(pair.client, { version: Version.DRAFT_07 });
+	const server = await Stream.accept(pair.server, Version.DRAFT_07);
 	if (!server) throw new Error("publisher never accepted the subscribe stream");
 	void publisher.runSubscribe(
 		new Subscribe({ id: 0n, broadcast: Path.from("test"), track: "video", priority: 0 }),
@@ -1181,8 +1182,8 @@ async function serve(
 	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video");
 
-	const client = await Stream.open(pair.client);
-	const server = await Stream.accept(pair.server);
+	const client = await Stream.open(pair.client, { version: Version.DRAFT_06 });
+	const server = await Stream.accept(pair.server, Version.DRAFT_06);
 	if (!server) throw new Error("publisher never accepted the subscribe stream");
 
 	const msg = new Subscribe({
@@ -1224,7 +1225,7 @@ async function serve(
 			clearTimeout(timer);
 			if (!next || next.done) break;
 
-			const stream = new Reader(next.value);
+			const stream = new Reader(next.value, undefined, Version.DRAFT_06);
 			await stream.u53(); // stream type
 			const header = await GroupMessage.decode(stream, Version.DRAFT_06);
 
@@ -1370,8 +1371,8 @@ async function saturatedGroup() {
 	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video");
 
-	const client = await Stream.open(pair.client);
-	const server = await Stream.accept(pair.server);
+	const client = await Stream.open(pair.client, { version: Version.DRAFT_05 });
+	const server = await Stream.accept(pair.server, Version.DRAFT_05);
 	if (!server) throw new Error("publisher never accepted the subscribe stream");
 
 	const msg = new Subscribe({ id: 0n, broadcast: Path.from("test"), track: "video", priority: 0 });
@@ -1449,8 +1450,8 @@ test("lite draft-05: a blocked group header is reset when the group expires", as
 	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
 	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video");
-	const client = await Stream.open(pair.client);
-	const server = await Stream.accept(pair.server);
+	const client = await Stream.open(pair.client, { version: Version.DRAFT_05 });
+	const server = await Stream.accept(pair.server, Version.DRAFT_05);
 	if (!server) throw new Error("publisher never accepted the subscribe stream");
 
 	try {
@@ -1536,8 +1537,8 @@ test("runProbe rounds a fractional smoothedRtt instead of killing the stream", a
 	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop());
 
 	// The subscriber opens the probe stream; the publisher only replies on it.
-	const client = await Stream.open(pair.client);
-	const server = await Stream.accept(pair.server);
+	const client = await Stream.open(pair.client, { version: Version.DRAFT_05 });
+	const server = await Stream.accept(pair.server, Version.DRAFT_05);
 	if (!server) throw new Error("publisher never accepted the probe stream");
 
 	// `runProbe` loops until the stream closes, so close it rather than leaving the
@@ -1606,8 +1607,8 @@ test("lite draft-05: a group that goes stale while its stream opens writes nothi
 		return stale;
 	});
 
-	const client = await Stream.open(pair.client);
-	const server = await Stream.accept(pair.server);
+	const client = await Stream.open(pair.client, { version: Version.DRAFT_05 });
+	const server = await Stream.accept(pair.server, Version.DRAFT_05);
 	if (!server) throw new Error("publisher never accepted the subscribe stream");
 
 	try {
@@ -1667,8 +1668,8 @@ test("lite draft-06: a grant that shrinks while the broadcast resolves resets th
 	const grant = new Signal<Grant | undefined>(grantOf("live"));
 	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume(), grant);
 
-	const client = await Stream.open(pair.client);
-	const server = await Stream.accept(pair.server);
+	const client = await Stream.open(pair.client, { version: Version.DRAFT_06 });
+	const server = await Stream.accept(pair.server, Version.DRAFT_06);
 	if (!server) throw new Error("publisher never accepted the subscribe stream");
 
 	const resets = spyOn(Writer.prototype, "reset");
@@ -1711,8 +1712,8 @@ test("lite draft-06: a grant that shrinks mid-fetch resets the fetch", async () 
 	group.writeString("first");
 	track.writeGroup(group);
 
-	const client = await Stream.open(pair.client);
-	const server = await Stream.accept(pair.server);
+	const client = await Stream.open(pair.client, { version: Version.DRAFT_06 });
+	const server = await Stream.accept(pair.server, Version.DRAFT_06);
 	if (!server) throw new Error("publisher never accepted the fetch stream");
 
 	const resets = spyOn(Writer.prototype, "reset");
@@ -1733,5 +1734,45 @@ test("lite draft-06: a grant that shrinks mid-fetch resets the fetch", async () 
 		client.close();
 		broadcast.close();
 		origin.close();
+	}
+});
+
+test.each([0, 1])("lite draft-07 reports the cached largest position when starting at group %s", async (startGroup) => {
+	const version = Version.DRAFT_07;
+	const pair = createMockTransportPair(ALPN_07_WIP);
+	const origin = new OriginProducer();
+	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
+	const broadcast = publish(origin, Path.from("quiet"));
+	const track = broadcast.createTrack("video");
+	const group = new GroupProducer(0);
+	group.writeString("cached");
+	group.close();
+	track.writeGroup(group);
+	const client = await Stream.open(pair.client, { version });
+	const server = await Stream.accept(pair.server, version);
+	if (!server) throw new Error("missing subscribe stream");
+	const running = publisher.runSubscribe(
+		replaySubscribe({
+			id: 0n,
+			broadcast: Path.from("quiet"),
+			track: "video",
+			priority: 0,
+			startGroup,
+		}),
+		server,
+	);
+	try {
+		const response = await decodeSubscribeResponse(client.reader, version);
+		if (!("start" in response)) throw new Error("expected SUBSCRIBE_OK");
+		expect(response.start.group).toBe(startGroup);
+		expect(response.start.largest).toEqual({ group: 0, frame: 0 });
+	} finally {
+		client.close();
+		publisher.close();
+		broadcast.close();
+		origin.close();
+		pair.client.close();
+		pair.server.close();
+		await running;
 	}
 });

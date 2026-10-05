@@ -2,7 +2,6 @@ export * from "./adapter.ts";
 export * as Auth from "./auth.ts";
 export * as Cluster from "./cluster.ts";
 export * from "./connection.ts";
-export * from "./control.ts";
 export * from "./fetch.ts";
 export * from "./goaway.ts";
 export * from "./hidden.ts";

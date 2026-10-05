@@ -22,6 +22,10 @@ pub(crate) struct Peer {
 
 	/// MoQ Auth: whether both sides negotiated the Auth request streams.
 	pub auth: bool,
+
+	/// MoQ Active Count: whether the REQUEST_OK answering SUBSCRIBE_NAMESPACE counts the
+	/// NAMESPACE messages before the subscription is caught up, in both directions.
+	pub active_count: bool,
 }
 
 /// Shared slot for [`Peer`], filled when the peer's SETUP is read.
@@ -82,6 +86,7 @@ mod tests {
 			solicit: None,
 			hidden: false,
 			auth: false,
+			active_count: false,
 		};
 
 		let slot = PeerSetup::default();
@@ -94,6 +99,7 @@ mod tests {
 			solicit: Some(true),
 			hidden: true,
 			auth: true,
+			active_count: true,
 		});
 
 		assert_eq!(slot.get().await, first);

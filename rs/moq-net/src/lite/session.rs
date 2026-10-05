@@ -26,29 +26,112 @@ pub(crate) struct SessionStart<S: crate::transport::poll::Session> {
 /// the session, so the caller can inspect the advertised path (and gate on it) before
 /// serving. lite-05+ only.
 ///
-/// Blocks on the peer's Setup Stream, which every lite-05+ endpoint opens at startup.
-/// Almost always the first unidirectional stream; any other uni stream that races
-/// ahead of it is `STOP_SENDING`-ed and skipped (we don't support proactive uni
-/// PUBLISH, so nothing legitimate precedes the SETUP today). The eventual home for
-/// out-of-order tolerance is the full session loop with deferred origin binding.
+/// Other uni streams racing ahead of SETUP are held for the normal session
+/// classifier. QUIC stream credit bounds the held queue.
 ///
-/// Pass the returned [`Setup`] to [`start`] as its `peer_setup` so PROBE gating still
-/// resolves without re-reading the (consumed) stream.
+/// Pass the result to [`start`] as its `peer_setup` so capability gating resolves
+/// without re-reading SETUP, and every held stream is handed back to the driver.
 pub async fn accept_setup<S: crate::transport::poll::Session>(
 	session: &mut S,
 	version: Version,
-) -> Result<Setup, Error> {
-	loop {
-		let stream = session.accept_uni().await.map_err(Error::from_transport)?;
-		let mut reader = Reader::new(stream, version);
+) -> Result<AcceptedSetup<S>, Error> {
+	let mut accept = SetupAccept::<S> {
+		version,
+		pending: Vec::new(),
+		early: Vec::new(),
+		setup: None,
+	};
+	kio::wait(|waiter| accept.poll(session, waiter)).await
+}
 
-		match reader.decode::<DataType>().await? {
-			DataType::Setup => return reader.decode::<Setup>().await,
-			// A non-SETUP uni stream this early is unexpected (GROUP needs a prior
-			// subscribe). Reject it and keep waiting rather than failing the session.
-			_ => reader.abort(&Error::UnexpectedStream),
+struct SetupAccept<S: crate::transport::poll::Session> {
+	version: Version,
+	pending: Vec<Reader<S::RecvStream, Version>>,
+	early: Vec<Reader<S::RecvStream, Version>>,
+	setup: Option<Reader<S::RecvStream, Version>>,
+}
+
+impl<S: crate::transport::poll::Session> SetupAccept<S> {
+	fn poll(&mut self, session: &mut S, waiter: &kio::Waiter) -> Poll<Result<AcceptedSetup<S>, Error>> {
+		let Self {
+			version,
+			pending,
+			early,
+			setup,
+		} = self;
+		let version = *version;
+
+		let mut cx = Context::from_waker(waiter.waker());
+		let mut accept_error = None;
+		while let Poll::Ready(stream) = session.poll_accept_uni(&mut cx) {
+			match stream {
+				Ok(stream) => pending.push(Reader::new(stream, version)),
+				Err(err) => {
+					accept_error = Some(Error::from_transport(err));
+					break;
+				}
+			}
 		}
+		let mut index = 0;
+		while index < pending.len() {
+			let kind = match pending[index].poll_decode_peek::<u64>(&mut cx) {
+				Poll::Pending => {
+					index += 1;
+					continue;
+				}
+				Poll::Ready(Ok(kind)) => kind,
+				Poll::Ready(Err(
+					Error::Cancel
+					| Error::Stream(_)
+					| Error::Remote(_)
+					| Error::Transport(_)
+					| Error::Decode(crate::DecodeError::Short),
+				)) => {
+					pending.swap_remove(index);
+					continue;
+				}
+				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
+			};
+			let mut reader = pending.swap_remove(index);
+			if kind != DataType::Setup as u64 {
+				early.push(reader);
+				continue;
+			}
+			if setup.is_some() {
+				return Poll::Ready(Err(Error::ProtocolViolation));
+			}
+			ready!(reader.poll_decode::<DataType>(&mut cx))?;
+			*setup = Some(reader);
+		}
+		// A closed transport can still yield a complete buffered SETUP. Decode it
+		// before reporting the terminal error from accepting the next stream.
+		let result = setup
+			.as_mut()
+			.map(|reader| reader.poll_decode::<Setup>(&mut cx))
+			.unwrap_or(Poll::Pending);
+		let setup = match result {
+			Poll::Ready(result) => result?,
+			Poll::Pending => match accept_error {
+				Some(err) => return Poll::Ready(Err(err)),
+				None => return Poll::Pending,
+			},
+		};
+		// A stream need not have delivered even its type yet. Keep it intact for the
+		// session instead of letting it block SETUP or dropping it at the handoff.
+		early.append(pending);
+		Poll::Ready(Ok(AcceptedSetup {
+			setup,
+			early: std::mem::take(early),
+		}))
 	}
+}
+
+/// The peer's pre-read SETUP and the streams held until it arrived.
+pub struct AcceptedSetup<S: crate::transport::poll::Session> {
+	/// The SETUP decoded before origin binding.
+	pub setup: Setup,
+	/// Streams with their type still buffered for the session classifier.
+	pub early: Vec<Reader<S::RecvStream, Version>>,
 }
 
 /// Everything one moq-lite session needs to start.
@@ -92,7 +175,7 @@ pub struct Config<S: crate::transport::poll::Session> {
 	/// The peer's SETUP, when it was already read before [`start`] (e.g. a server that
 	/// gated on the client's path via [`accept_setup`]). Seeds the peer-setup slot so
 	/// the Setup Stream isn't expected again. `None` reads it from the wire as usual.
-	pub peer_setup: Option<Setup>,
+	pub peer_setup: Option<AcceptedSetup<S>>,
 
 	/// The session's auth handle, created before [`start`] so a server can take the
 	/// peer's token requests during its handshake. Supports AUTH exactly when `version`
@@ -174,9 +257,12 @@ where
 	// When the caller already read it (a gated server accept), seed the slot so the
 	// Setup stream isn't expected on the wire again.
 	let peer_setup_slot = PeerSetup::default();
-	if let Some(setup) = peer_setup {
-		peer_setup_slot.set(setup);
-	}
+	let early = if let Some(accepted) = peer_setup {
+		peer_setup_slot.set(accepted.setup);
+		accepted.early
+	} else {
+		Vec::new()
+	};
 	let peer_setup = peer_setup_slot;
 
 	// GOAWAY wiring: the public Session holds one half (send trigger, received
@@ -234,13 +320,14 @@ where
 			started: false,
 			_setup: setup_token,
 		},
+		local_close: Default::default(),
 		setup: version
 			.has_setup_stream()
 			.then(|| SendSetup::new(session.clone(), our_setup, version)),
 		goaway: Some(SendGoaway::new(runtime, session.clone(), goaway, version)),
 		session_stream: setup_stream,
 		publisher,
-		subscriber: SubscriberDriver::new(subscriber),
+		subscriber: SubscriberDriver::new(subscriber, early),
 		session,
 	};
 
@@ -257,6 +344,7 @@ where
 pub(crate) struct Driver<S: crate::transport::poll::Session> {
 	/// Presenting our tokens, one AUTH stream each.
 	auth: Present<S>,
+	pub(crate) local_close: std::sync::Arc<std::sync::atomic::AtomicBool>,
 	/// Advertising our capabilities, or `None` once sent (or on a version with no
 	/// Setup Stream).
 	setup: Option<SendSetup<S>>,
@@ -282,7 +370,9 @@ where
 			Ok(()) => Error::Cancel,
 			Err(err) => err.clone(),
 		});
-		if let Err(err) = &res {
+		if self.local_close.load(std::sync::atomic::Ordering::Relaxed) {
+			self.subscriber.close();
+		} else if let Err(err) = &res {
 			// Every track this session was receiving ends with its error.
 			self.subscriber.abort(err);
 		}
@@ -304,13 +394,18 @@ where
 		Poll::Ready(res)
 	}
 
+	/// Start withdrawing this session's announcements.
+	pub(crate) fn close(&self) {
+		self.publisher.close();
+	}
+
 	/// Whether no stream still owes the peer data, for a draining close.
 	pub(crate) fn drained(&self) -> bool {
 		self.publisher.drained()
 	}
 
 	fn poll_protocol(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		let mut cx = Context::from_waker(waiter.waker());
+		let mut cx = waiter.context();
 
 		// Presenting tokens ends the session only when the peer breaks the protocol.
 		if let Poll::Ready(err) = self.auth.poll(waiter) {
@@ -417,6 +512,8 @@ enum PresentState<S: crate::transport::poll::Session> {
 }
 
 impl<S: crate::transport::poll::Session> kio::Task for PresentToken<S> {
+	type Output = ();
+
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		let err = ready!(self.poll_present(waiter));
 		let answered = matches!(self.state, PresentState::Run { answered: true, .. });
@@ -674,7 +771,7 @@ impl<S: crate::transport::poll::Session> SendGoaway<S> {
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		let mut cx = Context::from_waker(waiter.waker());
+		let mut cx = waiter.context();
 		loop {
 			match &mut self.state {
 				SendGoawayState::Waiting => {
@@ -804,5 +901,99 @@ mod tests {
 		.expect("the session outlived a malformed AUTH_ERROR");
 		assert!(matches!(res, Err(Error::ProtocolViolation)), "{res:?}");
 		assert_eq!(log.closes()[0].0, SessionError::ProtocolViolation.to_code());
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn accept_setup_does_not_wait_on_an_early_stream_header() {
+		let version = Version::Lite05;
+		let mut setup = Vec::new();
+		DataType::Setup.encode(&mut setup, version).unwrap();
+		Setup::default().encode(&mut setup, version).unwrap();
+		let mut session =
+			crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![Vec::new(), setup]);
+		let accepted = accept_setup(&mut session, version).await.unwrap();
+		assert_eq!(accepted.early.len(), 1);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn accept_setup_refuses_two_incomplete_setup_streams() {
+		use futures::FutureExt;
+		let mut session =
+			crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_unis(vec![vec![1], vec![1]]);
+		assert!(matches!(
+			accept_setup(&mut session, Version::Lite05).now_or_never(),
+			Some(Err(Error::ProtocolViolation))
+		));
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn duplicate_setup_closes_the_session() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			for complete in [false, true] {
+				let mut first = Vec::new();
+				DataType::Setup.encode(&mut first, version).unwrap();
+				if complete {
+					Setup::default().encode(&mut first, version).unwrap();
+				}
+				let session = crate::lite::test_transport::ScriptedSession::new(Vec::new())
+					.with_incoming_unis(vec![first.clone(), first]);
+				let log = session.log.clone();
+				let mut started = start(Config {
+					runtime: crate::time::Clock::tokio(),
+					session,
+					setup_stream: None,
+					publish: None,
+					subscribe: None,
+					peer_hop: None,
+					version,
+					our_setup: Setup::default(),
+					peer_setup: None,
+					client: false,
+					auth: crate::auth::Handle::new(version.has_auth()),
+				})
+				.unwrap();
+				let _ = started.driver.poll(&kio::Waiter::noop());
+				assert!(
+					log.closes()
+						.iter()
+						.any(|(code, _)| *code == SessionError::ProtocolViolation.to_code()),
+					"{version:?}, complete={complete}: duplicate SETUP must close the session"
+				);
+			}
+		}
+	}
+
+	/// A SETUP that ends before its body decodes leaves nothing to wait on, since the
+	/// Setup Stream is already claimed.
+	#[tokio::test(start_paused = true)]
+	async fn truncated_setup_closes_the_session() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let mut truncated = Vec::new();
+			DataType::Setup.encode(&mut truncated, version).unwrap();
+			let session =
+				crate::lite::test_transport::ScriptedSession::eof(Vec::new()).with_incoming_unis(vec![truncated]);
+			let log = session.log.clone();
+			let mut started = start(Config {
+				runtime: crate::time::Clock::tokio(),
+				session,
+				setup_stream: None,
+				publish: None,
+				subscribe: None,
+				peer_hop: None,
+				version,
+				our_setup: Setup::default(),
+				peer_setup: None,
+				client: false,
+				auth: crate::auth::Handle::new(version.has_auth()),
+			})
+			.unwrap();
+			let _ = started.driver.poll(&kio::Waiter::noop());
+			assert!(
+				log.closes()
+					.iter()
+					.any(|(code, _)| *code == SessionError::ProtocolViolation.to_code()),
+				"{version:?}: a truncated SETUP must close the session"
+			);
+		}
 	}
 }

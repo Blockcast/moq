@@ -19,6 +19,7 @@ async function roundTrip(write: (w: Writer) => Promise<void>): Promise<Reader> {
 				chunks.push(new Uint8Array(chunk));
 			},
 		}),
+		Lite.Version.DRAFT_06,
 	);
 	await write(writer);
 	writer.close();
@@ -30,7 +31,7 @@ async function roundTrip(write: (w: Writer) => Promise<void>): Promise<Reader> {
 		buf.set(chunk, offset);
 		offset += chunk.byteLength;
 	}
-	return new Reader(undefined, buf);
+	return new Reader(undefined, buf, Lite.Version.DRAFT_06);
 }
 
 test("AUTH round-trips its token", async () => {
