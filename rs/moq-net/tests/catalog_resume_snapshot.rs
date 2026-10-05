@@ -27,7 +27,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 }
 
 /// Returns `Ok(first payload of the group the fresh reader got)` or `Err(reason)`.
-async fn scenario(version: &str, resume_at: Option<u64>, peer_reads: bool) -> Result<(u64, Vec<u8>), String> {
+async fn scenario(version: &str, resume: Resume, peer_reads: bool) -> Result<(u64, Vec<u8>), String> {
 	let publisher = produce_origin(1);
 	let relay = produce_origin(2);
 
@@ -54,8 +54,27 @@ async fn scenario(version: &str, resume_at: Option<u64>, peer_reads: bool) -> Re
 	consumer.routed("demo").await.unwrap();
 	let remote = consumer.request_broadcast("demo").await.unwrap();
 
+	// A frame-precise resume on the relay itself, as a downstream peer without the head
+	// widening sends on the wire: the relay's own upstream SUBSCRIBE must widen it.
+	let _local = if let Resume::Local(resume_frame) = resume {
+		let start = track::Position {
+			group: sequence,
+			frame: resume_frame,
+		};
+		let mut sub = remote
+			.track("catalog.json")
+			.unwrap()
+			.subscribe(track::Subscription::default().with_start(start))
+			.await
+			.unwrap();
+		let group = sub.recv_group().await.unwrap().unwrap();
+		Some((sub, group))
+	} else {
+		None
+	};
+
 	// A mesh peer resumes the catalog mid-group over a session: it already holds frame 0.
-	let _resumed = if let Some(resume_frame) = resume_at {
+	let _resumed = if let Resume::Peer(resume_frame) = resume {
 		let peer = produce_origin(3);
 		let mut options = MockConnectOptions::new(version);
 		options.server_publish = Some(relay.consume());
@@ -107,10 +126,20 @@ async fn scenario(version: &str, resume_at: Option<u64>, peer_reads: bool) -> Re
 	}
 }
 
-async fn run(resume_at: Option<u64>, peer_reads: bool) {
+/// Where the mid-group resume comes from, if any.
+#[derive(Clone, Copy)]
+enum Resume {
+	None,
+	/// A mesh peer over a session, which widens its own upstream start.
+	Peer(u64),
+	/// A subscriber on the relay itself, so only the relay's widening can help.
+	Local(u64),
+}
+
+async fn run(resume: Resume, peer_reads: bool) {
 	let mut failures = Vec::new();
 	for version in VERSIONS {
-		let result = tokio::time::timeout(TEST_TIMEOUT, scenario(version, resume_at, peer_reads))
+		let result = tokio::time::timeout(TEST_TIMEOUT, scenario(version, resume, peer_reads))
 			.await
 			.unwrap_or_else(|_| Err("scenario timed out".into()));
 		match result {
@@ -128,24 +157,30 @@ async fn run(resume_at: Option<u64>, peer_reads: bool) {
 /// The regression: a resume at (G, 1) must not keep a fresh reader from G's snapshot.
 #[tokio::test(start_paused = true)]
 async fn fresh_reader_gets_snapshot_after_mid_group_resume() {
-	run(Some(1), false).await;
+	run(Resume::Peer(1), false).await;
+}
+
+/// The same resume arriving frame-precise at the relay, as from a not-yet-upgraded peer.
+#[tokio::test(start_paused = true)]
+async fn fresh_reader_gets_snapshot_after_local_mid_group_resume() {
+	run(Resume::Local(1), false).await;
 }
 
 /// Control: with no prior resume the fresh reader gets the snapshot.
 #[tokio::test(start_paused = true)]
 async fn fresh_reader_gets_snapshot_without_resume() {
-	run(None, false).await;
+	run(Resume::None, false).await;
 }
 
 /// Control: the same resume from the head of the group, (G, 0).
 #[tokio::test(start_paused = true)]
 async fn fresh_reader_gets_snapshot_after_head_resume() {
-	run(Some(0), false).await;
+	run(Resume::Peer(0), false).await;
 }
 
 /// Variant: the peer also reads its own copy from the head before the fresh reader
 /// arrives, so both the peer's copy and the relay's must hold frame 0.
 #[tokio::test(start_paused = true)]
 async fn fresh_reader_gets_snapshot_after_peer_fetches_head() {
-	run(Some(1), true).await;
+	run(Resume::Peer(1), true).await;
 }
