@@ -11,7 +11,7 @@ and verb maps to a Rust one. A docs page shows the layers in each language.
 ## Plan
 
 Lands after the release, as one binding break in Python, Go, Swift, and
-Kotlin (Dart is unpublished), so its PRs retarget to `dev`.
+Kotlin (Dart is unpublished).
 
 Settled shape:
 
@@ -59,7 +59,3 @@ work no child does:
 
 - [Request accept](/quest/m1/ffi-shape/request-accept.md) - a request's origins are `accept()` arguments, removing the last root setters
 - [Codecs](/quest/m1/ffi-shape/codec.md) - audio and video encoders and decoders move under their own namespaces with one constructor shape
-
-## Related
-
-- [Track demand](/quest/m1/track-demand.md) - the same `demand()` cleanup in Rust and JS

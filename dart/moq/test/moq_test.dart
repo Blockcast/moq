@@ -87,7 +87,7 @@ void main() {
     expect(frame, isNotNull);
     expect(utf8.decode(frame!.payload), 'dart round trip');
 
-    client.close();
+    await client.close();
     serverSession.cancel(code: 0);
     server.cancel();
   });
@@ -131,7 +131,7 @@ void main() {
         (await announcement.timeout(timeout) as AnnounceEventStart).announce;
     expect(announced.prefix, 'live');
 
-    client.close();
+    await client.close();
     serverSession.cancel(code: 0);
     track.finish();
     broadcast.close();

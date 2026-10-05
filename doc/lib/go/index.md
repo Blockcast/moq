@@ -23,6 +23,8 @@ go get moq.dev/moq@latest
 ```
 
 ```go
+import "fmt"
+import "log"
 import "moq.dev/moq"
 import moqmedia "moq.dev/moq/media"
 
@@ -62,6 +64,8 @@ for event, err := range announced.All(ctx) {
 ```
 
 ```go
+import "time"
+
 // Publish encoded frames, or raw pixels with the codec inside the binding.
 // opusInit, packet, pts, and rgba come from your encoder or capture source.
 broadcast, _ := client.CreateBroadcast("my-stream.hang")
@@ -76,6 +80,8 @@ video, _ := broadcast.EncodeVideo(
 )
 _ = video.Write(moq.VideoFrame{TimestampUs: pts, Data: rgba})
 _ = broadcast.Announce(moq.Route{})
+_ = audio.Finish()
+_ = video.Finish()
 broadcast.Close()    // keep the producer reachable while publishing, then close explicitly
 ```
 
@@ -141,7 +147,19 @@ of the [shared feature list](/lib/#what-every-binding-can-do) maps one to
 one: `FetchGroup`/`media.NewContainerGroupConsumer`, `Dynamic()` with `All(ctx)`,
 `Session.Bandwidth()` to divide the send estimate,
 `AppendDatagram`/`Datagrams(ctx)`, `media.CatalogProducer.SetSection`, `Demand()` for `Name`, `Used`, and `Unused`,
-`Session().Stats()`. `moq.IsAuthError` and `moq.IsShutdown` classify errors. `moq.ProtocolError(err)` is the structured protocol failure (scope, verbatim code, kind) when the peer sent one.
+`Session().Stats()`. `moq.IsAuthError` and `moq.IsShutdown` classify errors. `moq.ProtocolError(err)` is the structured protocol failure (scope, verbatim code, kind) when the peer sent one. `err.Error()` is the Rust error message.
+
+`EncodeAudio` encodes raw PCM inside the binding. Its codec is `OpusAudioCodec()`
+or `AacAudioCodec()`, and `AudioEncoderOutput.FrameDurationUs` sets the Opus
+frame length: 2500, 5000, 10000, 20000 (the default), 40000, or 60000. 0 takes
+the codec's own frame, which AAC needs. AAC-LC encodes through the platform's
+encoder, so a host without one refuses it.
+
+Audio `Channels` also names the speaker layout, by the WAVE convention: 1 is
+mono, 2 stereo, 3 2.1, 4 quad, 5 5.0, 6 5.1, 7 6.1, and 8 7.1, interleaved
+front left, front right, center, LFE, back, then side. Decoding remixes to the
+count you ask for; past 8 channels the samples pass through but can't be
+remixed.
 
 Each `VideoDecodedFrame` from `DecodeVideo` owns its decoded picture until
 `Close`, including after the consumer is cancelled. `Pixels(format)` converts it
@@ -177,3 +195,5 @@ available, which is not the same as zero.
 - Mirrors the vanity path resolves to: [moq-dev/moq-go](https://github.com/moq-dev/moq-go) (wrapper), [moq-dev/moq-go-ffi](https://github.com/moq-dev/moq-go-ffi) (raw bindings and static libraries)
 
 Raw track publisher metadata has an optional maximum age. Omitting it imposes no publisher age limit; zero keeps the live edge. Local cache limits still apply, and media imports explicitly retain 30 seconds. See [publisher retention](/concept/moq-lite).
+
+`session.Shutdown(ctx)` drains finished tracks and returns a delivery error if the one-second deadline expires. Cancelling the context aborts immediately. `client.Close()` waits for shutdown and returns the same error; `session.Cancel(code)` remains immediate. Finish or abort live tracks before shutdown. IETF media streams are not drained yet.

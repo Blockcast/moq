@@ -19,15 +19,18 @@ so `go get moq.dev/moq@latest` always pulls the latest native core.
 go get moq.dev/moq@latest
 ```
 
-```go
-import "moq.dev/moq"
-```
-
 `CGO_ENABLED=1` is required (the default on Unix); the prebuilt `libmoq_ffi.a` comes transitively from `moq.dev/moq-ffi`, so there is no Rust toolchain or shared-library setup.
 
 ## Quick start
 
 ```go
+import (
+	"context"
+	"fmt"
+	"log"
+	"moq.dev/moq"
+)
+
 ctx := context.Background()
 
 client, err := moq.Dial(ctx, "https://relay.example.com")
@@ -97,9 +100,10 @@ carry every record in order. Producers accept any `encoding/json` value; consume
 ```go
 import moqjson "moq.dev/moq/json"
 
-track, err := broadcast.PublishTrack("status", nil)
-status, err := moqjson.NewSnapshotProducer(broadcast, track, moqjson.SnapshotOptions{Compression: true})
-err = status.Update(map[string]any{"viewers": 42})
+broadcast, _ := client.CreateBroadcast("room")
+track, _ := broadcast.PublishTrack("status", nil)
+status, _ := moqjson.NewSnapshotProducer(broadcast, track, moqjson.SnapshotOptions{Compression: true})
+_ = status.Update(map[string]any{"viewers": 42})
 ```
 
 Producers take `SnapshotOptions` or `StreamOptions`; both consumers take
@@ -126,7 +130,7 @@ Raw tracks support best-effort datagrams alongside groups: `TrackProducer.Append
 sends one `Frame` and returns its sequence number, while `TrackConsumer.RecvDatagram`
 and `TrackConsumer.Datagrams` receive them in arrival order. Payloads are capped at
 1200 bytes. Datagram delivery requires a datagram-capable transport and lite-05 or
-newer moq-lite; IETF moq-transport, pre-lite-05, WebSocket, and TCP paths do not
+newer moq-lite, or moq-transport; pre-lite-05, WebSocket, and TCP paths do not
 deliver them, and there is no stream fallback.
 
 ## Versioning
@@ -137,4 +141,4 @@ The committed `go.mod` carries a `require moq.dev/moq-ffi v0.0.0` **placeholder*
 
 ## Local development
 
-Run `just go check`: it builds `moq-ffi` for the host, regenerates the bindings, stages both modules into `dist/` with a `replace` wiring the wrapper to the local ffi, and runs `go build`/`go vet`/`go test`. It also runs `scripts/publish-wrapper.test.sh`, which exercises the publisher's release/no-op/recovery paths against a scratch bare repo standing in for the mirror. See [../ffi/README.md](../ffi/README.md) for the `uniffi-bindgen-go` install.
+Run `just go check`: it builds `moq-ffi` for the host, regenerates the bindings, stages both modules into `dist/` with a `replace` wiring the wrapper to the local ffi, and runs `go build`/`go vet`/`go test`. See [../ffi/README.md](../ffi/README.md) for the `uniffi-bindgen-go` install.

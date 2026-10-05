@@ -190,9 +190,12 @@ final class Moq {
   Bandwidth bandwidth() => session.bandwidth();
 
   /// Gracefully close the session and stop the client.
-  void close() {
-    session.shutdown();
-    _client.cancel();
+  Future<void> close() async {
+    try {
+      await session.shutdown();
+    } finally {
+      _client.cancel();
+    }
   }
 }
 

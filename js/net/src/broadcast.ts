@@ -10,6 +10,7 @@ import { Route } from "./hop.ts";
 import { hooks, type TrackSequence } from "./internal.ts";
 import * as Path from "./path.ts";
 import * as track from "./track.ts";
+import { untilAborted } from "./util/abort.ts";
 import { registerWire, trackOf, type Broadcast as Wire } from "./wire.ts";
 
 /** The origin callback a created broadcast uses to advertise its exact path. @internal */
@@ -59,7 +60,7 @@ function closeState(state: BroadcastState) {
 // `register` is set on the subscribing (consumer) side: the fresh producer is cached in
 // `state.tracks` so repeat subscriptions to the same track fan out from one upstream subscription
 // instead of opening a new one, mirroring the Rust `broadcast::Consumer::track` weak-dedup. The
-// consumer wire watches the producer's demand ({@link track.Producer.used}) and tears the upstream
+// consumer wire watches the producer's demand ({@link track.Demand.used}) and tears the upstream
 // down once its last subscriber leaves, closing the producer, which evicts the cache entry below.
 // The publishing side leaves `register` false: `state.tracks` there holds only the tracks the app
 // inserted, and a dynamic serve stays one request per peer subscription.
@@ -129,11 +130,12 @@ async function fetchGroup(
 	sequence: number,
 	options: track.FetchGroupOptions = {},
 ): Promise<GroupConsumer> {
+	options.signal?.throwIfAborted();
 	const subscriber = subscribe(state, name, { priority: options.priority });
 	hooks.exemptFetch(subscriber);
 	try {
 		for (;;) {
-			const group = await subscriber.recvGroup();
+			const group = await untilAborted(subscriber.recvGroup(), options.signal);
 			if (!group) throw new NotFound(`group ${sequence}`);
 			if (group.sequence === sequence) {
 				// Close the subscription when the returned group finishes, not now: an

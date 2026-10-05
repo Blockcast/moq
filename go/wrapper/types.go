@@ -6,14 +6,14 @@ import ffi "moq.dev/moq-ffi/moq"
 // These are plain data, so type aliases are exact: a moq.AudioFrame is an
 // ffi.MoqAudioFrame, constructible and comparable across the boundary.
 type (
-	// AudioCodec selects the audio encoder codec. Build one with OpusAudioCodec;
+	// AudioCodec selects the audio encoder codec. Build one with OpusAudioCodec or AacAudioCodec;
 	// adding a codec later adds a constructor, not a breaking enum change.
 	AudioCodec = ffi.MoqAudioCodec
 	// AudioDecoderOutput configures the PCM format, sample rate, and channels DecodeAudio delivers.
 	AudioDecoderOutput = ffi.MoqAudioDecoderOutput
 	// AudioEncoderInput declares the PCM sample format, sample rate, and channel count of frames written to an audio producer.
 	AudioEncoderInput = ffi.MoqAudioEncoderInput
-	// AudioEncoderOutput configures the Opus encoder: codec, optional sample rate, channels, bitrate, and frame duration.
+	// AudioEncoderOutput configures the encoder: codec, optional sample rate, channels, bitrate, and frame duration.
 	AudioEncoderOutput = ffi.MoqAudioEncoderOutput
 	// AudioSampleFormat is a raw PCM sample layout, mirroring WebCodecs AudioData.format.
 	AudioSampleFormat = ffi.MoqAudioSampleFormat
@@ -50,9 +50,9 @@ type (
 	AnnounceEventLive = ffi.MoqAnnounceEventLive
 	// VideoDecoderOutput configures what DecodeVideo delivers: an optional resize, a max age, and whether frames keep the decoder's surface (macOS only; refused elsewhere).
 	VideoDecoderOutput = ffi.MoqVideoDecoderOutput
-	// VideoSurface is a decoded frame's platform surface, from VideoDecodedFrame.Surface: VideoSurfacePixelBuffer on macOS.
+	// VideoSurface is a decoded frame's platform surface, from VideoDecodedFrame.Surface: VideoSurfacePixelBuffer on macOS and iOS.
 	VideoSurface = ffi.MoqVideoSurface
-	// VideoSurfacePixelBuffer is a macOS CVPixelBufferRef (IOSurface-backed NV12), as the address in Pointer.
+	// VideoSurfacePixelBuffer is an Apple CVPixelBufferRef (IOSurface-backed NV12), as the address in Pointer.
 	VideoSurfacePixelBuffer = ffi.MoqVideoSurfacePixelBuffer
 	// VideoCodec identifies a published video track's codec: H.264 or H.265.
 	VideoCodec = ffi.MoqVideoCodec
@@ -80,6 +80,12 @@ type (
 // OpusAudioCodec selects Opus (RFC 6716) for EncodeAudio.
 func OpusAudioCodec() *AudioCodec {
 	return ffi.MoqAudioCodecOpus()
+}
+
+// AacAudioCodec selects AAC-LC through the platform's encoder for EncodeAudio.
+// A host without one refuses it. Leave FrameDurationUs at 0 for AAC's own frame.
+func AacAudioCodec() *AudioCodec {
+	return ffi.MoqAudioCodecAac()
 }
 
 // VideoPixelFormat values: the raw pixel layout fed to the in-process encoder,
@@ -116,7 +122,7 @@ func SoftwareEncoder() VideoEncoderKind {
 }
 
 // NamedEncoder selects a specific backend these bindings compile:
-// "videotoolbox" (macOS), "mediafoundation" (Windows), or "openh264"
+// "videotoolbox" (macOS, iOS), "mediafoundation" (Windows), or "openh264"
 // (software, everywhere). Naming one this build lacks fails with a no-encoder
 // error.
 func NamedEncoder(name string) VideoEncoderKind {
