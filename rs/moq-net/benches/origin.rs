@@ -421,6 +421,43 @@ fn bench_request(c: &mut Criterion) {
 	group.finish();
 }
 
+/// Resolving a bare name to its newest epoch, with `names` names in the table
+/// each published under `epochs` live epochs: the walk reads only the epochs
+/// one segment below the requested name, so `names` must not show.
+fn bench_follow(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/follow");
+	for names in [100, 1_000] {
+		for epochs in [1, 8, 64] {
+			let (producer, mut driver) = origin::Producer::new(origin::Config::default());
+			let consumer = producer.consume();
+			let _publishers: Vec<broadcast::Producer> = (0..names)
+				.flat_map(|i| {
+					let name = format!("room/{i}");
+					(0..epochs)
+						.map(|_| {
+							let path = moq_net::Path::new(&name).mint_epoch();
+							producer.publish(path, origin::Route::default()).unwrap()
+						})
+						.collect::<Vec<_>>()
+				})
+				.collect();
+			let waiter = kio::Waiter::noop();
+			group.bench_function(BenchmarkId::from_parameter(format!("{names}n_{epochs}e")), |b| {
+				b.iter(|| {
+					let pending = consumer.request_broadcast("room/0");
+					// The front's driver resolves the first request; later ones join it.
+					driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+					pending
+						.now_or_never()
+						.expect("resolves once driven")
+						.expect("newest epoch");
+				});
+			});
+		}
+	}
+	group.finish();
+}
+
 /// Publisher handoff at one path: a subscriber is reading from one local
 /// source when a second announces at the same path and takes over (newest
 /// wins). Measured from the standby's attach to the subscriber receiving its
@@ -601,6 +638,7 @@ criterion_group!(
 	bench_serve_idle,
 	bench_subscribe,
 	bench_request,
+	bench_follow,
 	bench_handoff,
 	bench_relay,
 	bench_parked

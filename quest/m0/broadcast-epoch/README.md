@@ -10,7 +10,7 @@ restarts its group numbering at 0 under an un-epoched name, while its old
 route lingers, is resumed into the old broadcast and stalls viewers until its
 sequence catches up.
 
-By default, each publish of `demo/BBB.hang` goes out as
+Each first-party publish of `demo/BBB.hang` goes out as
 `demo/BBB.hang/@<uuidv7>`, so a restart is a new broadcast. A viewer of the
 bare name follows the newest live epoch as soon as it is announced. Moving to
 a new epoch is a clean boundary (a fresh catalog and tracks, never resumed
@@ -36,22 +36,26 @@ Decided:
 - The marker is a child segment `@<uuidv7>`, parsed into
   `Option<Epoch>` by [the shared primitive](/doc/concept/moq-lite.md#publisher-epochs). Not a lite-07 flag:
   the path is the only carrier.
-- The broadcast-publish path mints an epoch unless the path already carries
-  one. A caller who passes an explicit epoch, such as a redundant publisher,
-  keeps it. The prefix-route `announce(prefix, route)` stays raw, and that is
-  the opt-out. So prefix vs broadcast is an API distinction, not a wire flag.
+- Publishing does not mint an epoch by default; the path is published as
+  given (decided 2026-10-04 by the maintainer, replacing "mint unless the path
+  already carries one"). Minting is one call: `Path::mint_epoch` in Rust and
+  `Path.mintEpoch` in TypeScript append a fresh `@<uuidv7>`. Each first-party
+  publisher calls it once per run; a redundant pair passes a shared epoch.
 - Viewers follow the greatest epoch with a live route. When it goes away and an
   older one is still live, they fall back to it.
-- A bare request with no route of its own resolves to that same epoch on every
-  version, so lite-06 and IETF clients keep working through an epoch-aware
-  relay. When a newer epoch appears, the bare subscription ends with a typed
-  reset, and the client's normal resubscribe lands on the new one.
+- A bare request with no route covering the name resolves to that same epoch
+  on every version, so lite-06 and IETF clients keep working through an
+  epoch-aware relay. When the name resolves elsewhere, the bare subscription
+  ends with an `Unroutable` reset, and the client's normal resubscribe lands on
+  the new one. A route covering the name wins over its epochs.
+- A grant that admits a name admits its epochs (a `name/@*` sibling); a grant
+  on one epoch reaches only that epoch.
 - An unmodified third-party relay routes `foo/@<epoch>` but never resolves a
   bare `foo`, since a route covers its descendants, not its parent. A
-  bare-name viewer behind one needs a publisher that opts out with the raw
-  prefix route. Document this rather than promise it works.
-- Publishers on the default publish path, such as moq-boy and moq-room,
-  inherit the epoch from Origin. moq-stats mints its own through
+  bare-name viewer behind one needs a publisher that publishes the bare name.
+  Document this rather than promise it works.
+- Publishers such as moq-boy and moq-room mint their epoch at publish.
+  moq-stats mints its own through
   [Stats epochs](/quest/m0/broadcast-epoch/stats-epoch.md), which also gates the release
   (decided 2026-10-04): a restarted stats node under a reused name stalls its
   viewers the same way.
@@ -76,16 +80,23 @@ This README owns:
   Killing the newest epoch falls back to a still-live older one.
 - A `doc/concept` page on broadcast naming: what an epoch is, publish and
   consume behavior, takeover and fallback, bare-path resolution, and the
-  prefix-route opt-out.
+  bare-name opt-out.
+
+Open:
+
+- Does a catalog `broadcast` reference by bare name pin the epoch its catalog
+  came from, or follow the newest? Settle it with
+  [Catalog track alias](/quest/m1/catalog-track-alias.md). Today a bare
+  request's broadcast is named by the bare name, so relative references
+  resolve against it and follow; a pinned request's are named under its epoch.
 
 ## Required
 
 - [Retracted demand release](/quest/m0/broadcast-epoch/unannounce-demand-release.md) - a retracted broadcast's track demand is released when its last subscriber leaves, as before #4741
-- [Origin](/quest/m0/broadcast-epoch/origin.md) - moq-net publish mints an epoch, consumers follow the newest live one, and bare requests resolve to it on every version
 - [Apps](/quest/m0/broadcast-epoch/apps.md) - moq-cli, the browser publish and watch components, and demo/web publish under epochs and play bare names
 - [Gateways](/quest/m0/broadcast-epoch/gateways.md) - RTMP, SRT, and WHIP ingest mint an epoch per incoming connection, so an encoder reconnect is a clean takeover
 - [TS restart](/quest/m0/broadcast-epoch/ts-restart.md) - a signalled backward TS discontinuity finishes the broadcast and continues the same input under a fresh epoch
-- [Bindings](/quest/m0/broadcast-epoch/bindings.md) - moq-ffi and every wrapper expose the epoch and inherit the default
+- [Bindings](/quest/m0/broadcast-epoch/bindings.md) - moq-ffi and every wrapper expose the epoch and a one-call mint
 - [GStreamer](/quest/m0/broadcast-epoch/gst.md) - moqsink publishes each run under a fresh epoch
 - [Remove `--hop`](/quest/m0/broadcast-epoch/hop-removal.md) - `moq` takes an optional `--epoch` instead of `--hop`, a plain publisher declares a random Hop ID, and the per-session hop stamp is gone
 - [Bounded stats aggregate](/quest/m0/broadcast-epoch/stats-aggregate-bound.md) - the stats aggregator folds departed nodes into a retired total, so epoch churn stops growing its memory

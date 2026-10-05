@@ -372,6 +372,11 @@ impl<'a> Path<'a> {
 		}
 	}
 
+	/// Append a freshly minted epoch, naming a new instance of this broadcast.
+	pub fn mint_epoch(&self) -> PathOwned {
+		self.join_epoch(Some(&crate::Epoch::mint()))
+	}
+
 	/// Resolve a [`Relative`] against this path.
 	///
 	/// A non-empty reference replaces the last segment of the base, matching relative URL

@@ -1796,3 +1796,107 @@ test("broadcast handles carry the path they were created or requested at", async
 	broadcast.close();
 	origin.close();
 });
+
+/** Two epochs of `room/alice` in mint order, older first. */
+const OLD = Path.from("room/alice/@0199b7f4-3c2a-7d1e-9f0b-2b6c1a9d8e7f");
+const NEW = Path.from("room/alice/@0199b7f4-3c2b-7d1e-9f0b-2b6c1a9d8e7f");
+
+test("a bare name follows its newest epoch and falls back to an older one", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const bare = Path.from("room/alice");
+	expect(wireOf(consumer).routes(bare)).toBe(false);
+
+	const old = publish(origin, OLD);
+	expect(wireOf(consumer).routes(bare)).toBe(true);
+	const request = consumer.request(bare, { announced: true });
+	const pinned = consumer.request(OLD);
+	const first = request.active.peek();
+	expect(first).toBeDefined();
+	// Named as asked, so a catalog's relative references resolve against the name.
+	expect(first?.path).toBe(bare);
+
+	// A newer epoch is a new broadcast to the follower; the pinned request stays.
+	const next = publish(origin, NEW);
+	const second = request.active.peek();
+	expect(second).toBeDefined();
+	expect(second).not.toBe(first);
+	expect(second?.path).toBe(bare);
+	expect(pinned.active.peek()?.closed.peek()).toBeUndefined();
+
+	// Retracting the newest falls back to the older epoch still live.
+	next.close();
+	await settle();
+	const third = request.active.peek();
+	expect(third).toBeDefined();
+	expect(third).not.toBe(second);
+
+	old.close();
+	await settle();
+	expect(request.active.peek()).toBeUndefined();
+
+	request.close();
+	pinned.close();
+	origin.close();
+});
+
+test("a received epoch serves a bare request through its session", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const upstream = new BroadcastProducer();
+	const asked: Path.Valid[] = [];
+	const handle = wireOf(origin).receive(NEW, Route.default);
+	void (async () => {
+		for await (const request of handle.requested()) {
+			asked.push(request.path);
+			request.accept(upstream.consume());
+		}
+	})();
+
+	const request = consumer.request(Path.from("room/alice"));
+	await settle();
+	expect(request.active.peek()).toBeDefined();
+	// The session is asked for the epoch, never the bare name.
+	expect(asked).toEqual([NEW]);
+
+	request.close();
+	handle.close();
+	upstream.close();
+	origin.close();
+});
+
+test("a route covering the name beats its epochs", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const epoch = publish(origin, NEW);
+	const raw = publish(origin, Path.from("room/alice"));
+
+	const request = consumer.request(Path.from("room/alice"));
+	const active = request.active.peek();
+	const own = consumer.request(Path.from("room/alice"));
+	expect(active?.path).toBe(Path.from("room/alice"));
+	raw.close();
+	await settle();
+	expect(request.active.peek()).not.toBe(active);
+	expect(request.active.peek()).toBeDefined();
+
+	own.close();
+	request.close();
+	epoch.close();
+	origin.close();
+});
+
+test("a grant on a name admits its epochs and a grant on an epoch only that one", () => {
+	const origin = new Producer();
+	const exact = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.literal("room/alice")]));
+	const broadcast = publish(exact, OLD);
+	expect(() => exact.createBroadcast(Path.from("room/alice/cam"))).toThrow();
+
+	const one = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.literal(OLD)]));
+	expect(() => one.consume().request(OLD).close()).not.toThrow();
+	expect(() => one.consume().request(Path.from("room/alice"))).toThrow();
+	expect(() => one.consume().request(NEW)).toThrow();
+
+	broadcast.close();
+	origin.close();
+});

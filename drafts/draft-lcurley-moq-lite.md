@@ -453,6 +453,16 @@ A receiver that has spent its re-resolution, or has nothing to spend it on, MUST
 Every other code, and any unrecognized one, is terminal and propagates without re-resolution, so probing unserved paths costs one round trip per path.
 A receiver SHOULD NOT cache refusals; rate limiting is the advertiser's concern.
 
+#### Epochs {#epochs}
+A path whose final segment is `@` followed by a lowercase hyphenated UUIDv7 names one epoch of the path before it, its name.
+A publisher that may restart SHOULD publish each run under a fresh epoch, so a restart is a new Broadcast rather than a reused path.
+The segment is ordinary path text on the wire.
+
+A request for a path naming no epoch that no route covers resolves to the greatest epoch one segment below it that a route covers; UUIDv7 text orders by creation time.
+When the path later resolves elsewhere (a newer epoch, an older one once the newest is retracted, or a route covering the path), the receiver MUST reset the request with UNROUTABLE rather than move it to a different Broadcast, and a repeated request resolves afresh.
+A request naming an epoch never moves.
+This is receiver behavior on every version: a receiver without it finds no route covering the path, and the request is unroutable.
+
 ### Subscribe
 A subscriber opens Subscribe Streams to request a Track.
 
@@ -1372,6 +1382,7 @@ The `Message Length` describes the payload size on the wire.
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live advertisement's suffix, and ANNOUNCE_START and ANNOUNCE_UPDATE gain `Hop Base` and `Hop Keep` to copy the tail of a live advertisement's Hop ID list.
 - Capped the SETUP Message Length at 65,536 bytes.
 - A relay puts a random Hop ID, picked per session, in front of an announcement whose reconstructed path starts with 0, and writes that stamp followed by 0 for an empty path.
+- Specified epochs: a final `@<uuidv7>` segment names one run of a path, a request for an uncovered name resolves to its newest covered epoch, and a request that would move to another epoch is reset with UNROUTABLE.
 
 ## moq-lite-06
 

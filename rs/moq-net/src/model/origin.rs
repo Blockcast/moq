@@ -997,6 +997,9 @@ struct RemoteFront {
 	/// The front's broadcast, weak: dead once the front ends, so a
 	/// later request re-creates the front instead of joining a corpse.
 	broadcast: broadcast::WeakConsumer,
+	/// The absolute path it is served from: its own, or the epoch a bare name
+	/// resolved to when the front was made.
+	target: PathOwned,
 }
 
 /// The last route a cursor observed: entry id, metadata, servability, and captures.
@@ -1282,6 +1285,28 @@ impl Default for OriginScope {
 	}
 }
 
+/// `patterns` with each name they admit also admitting its epochs: a member not
+/// ending in `**` gains a `/@*` sibling. A grant on one epoch names that epoch, so
+/// it never widens to the bare name or its siblings.
+fn with_epochs(patterns: Patterns) -> Patterns {
+	let epoch = Segment::Partial {
+		prefix: "@".to_string(),
+		suffix: String::new(),
+	};
+	let mut widened = patterns.clone();
+	for member in patterns.iter() {
+		// `**` already reaches every epoch, and a member that is one is already widened.
+		if matches!(member.segments().last(), Some(last) if *last == Segment::Globstar || *last == epoch) {
+			continue;
+		}
+		// A member at the depth limit names nothing with room for an epoch.
+		if let Ok(member) = Pattern::new(member.segments().iter().cloned().chain([epoch.clone()])) {
+			widened.insert(member);
+		}
+	}
+	widened
+}
+
 /// The announce-interest prefixes that cover a pattern scope on a prefix-only
 /// wire: each member's literal head, minus heads another already covers.
 pub(crate) fn interest_prefixes(allowed: &Patterns) -> Vec<PathOwned> {
@@ -1537,11 +1562,17 @@ impl Producer {
 	/// End the broadcast with [`broadcast::Producer::close`] or by dropping it;
 	/// either way the path closes once it was the last source.
 	///
+	/// The path is published as given. A publisher that may restart publishes
+	/// each run under a fresh epoch ([`Path::mint_epoch`]), so a restart is a new
+	/// broadcast that bare-name consumers follow (see
+	/// [`Consumer::request_broadcast`]) rather than a reused name resumed into
+	/// the old run.
+	///
 	/// Fails with [`Error::Unauthorized`] if `path` is outside the prefixes this
 	/// producer may publish under (after [`scope`](Self::scope)) or beneath a
 	/// [`mount`](Self::mount),
-	/// [`Error::BoundsExceeded`] if the full rooted path exceeds
-	/// [`Path::MAX_PARTS`], [`Error::InvalidPath`] if it holds a segment no
+	/// [`Error::BoundsExceeded`] if the full rooted path (an epoch segment
+	/// included) exceeds [`Path::MAX_PARTS`], [`Error::InvalidPath`] if it holds a segment no
 	/// pattern can spell (`*` or `**`), or [`Error::Closed`] once the origin's
 	/// [`Driver`] has been dropped.
 	pub fn create_broadcast(&self, path: impl AsPath) -> Result<broadcast::Producer, Error> {
@@ -1716,12 +1747,13 @@ impl Producer {
 	/// Returns a producer rooted at `root` and restricted to matching `patterns`.
 	///
 	/// `root` is relative to this producer's root, and `patterns` are relative to
-	/// the new root. Returns [`Error::Unauthorized`] when the requested scope has
+	/// the new root. A pattern that admits a name also admits its epochs
+	/// (`name/@<uuidv7>`). Returns [`Error::Unauthorized`] when the requested scope has
 	/// no overlap with this producer's scope, or [`Error::BoundsExceeded`] when
 	/// rooting the patterns would exceed the path limit.
 	pub fn scope(&self, root: impl AsPath, patterns: &Patterns) -> Result<Producer, Error> {
 		let root = self.root.join(root).to_owned();
-		let rooted = patterns.rooted(root.as_str()).map_err(|_| BoundsExceeded)?;
+		let rooted = with_epochs(patterns.rooted(root.as_str()).map_err(|_| BoundsExceeded)?);
 		let scope = self.scope.narrow(&rooted).ok_or(Error::Unauthorized)?;
 		Ok(Producer {
 			hop: self.hop,
@@ -2217,11 +2249,15 @@ struct FrontTask {
 	shared: kio::Shared<OriginState>,
 	/// The broadcast the front serves.
 	broadcast: broadcast::Producer,
-	/// Absolute path of the front.
+	/// Absolute path the front selects routes for and requests through.
 	path: PathOwned,
+	/// The bare name the front was requested at, when `path` is the epoch it
+	/// resolved to. The front ends once the name resolves elsewhere.
+	follows: Option<PathOwned>,
 	/// The requesters' horizon, applied to every (re)selection.
 	horizon: Horizon,
-	/// Wakes the front when a route covering its path changes.
+	/// Wakes the front when a route covering its path, or an epoch below the
+	/// name it follows, changes.
 	watch: Watch,
 	/// Resolves the requesters parked on the front's channel.
 	request: kio::Producer<PendingBroadcast>,
@@ -2308,6 +2344,7 @@ async fn run_front(task: FrontTask) {
 		shared,
 		broadcast,
 		path,
+		follows,
 		horizon,
 		watch,
 		request,
@@ -2339,31 +2376,48 @@ async fn run_front(task: FrontTask) {
 	// The watch generation the last selection saw.
 	let mut seen = 0;
 	let mut events: VecDeque<Event> = VecDeque::new();
+	// The followed name resolved to another epoch (or its own route): the front
+	// ends, and its tracks with it, so readers ask again and land there.
+	let mut moved = false;
 
 	// Read the table for the machine: the best route and whether
 	// the serving source is on its way out. Also what the watch wakes for.
-	let select = |front: &mut Front, sources: &HashMap<u64, broadcast::Consumer>, seen: &mut u64| -> Event {
-		let table = shared.read();
-		if table.closed {
-			return Event::Closed;
-		}
-		// Read alongside the decision, under the lock a poke takes first.
-		*seen = watch.seen();
-		front.retain_routes(|route| table.routes.covers(&path.as_path(), route));
-		let best = table
-			.best_route(&path.as_path(), horizon, front.refused_routes())
-			.map(|entry| Candidate {
-				route: entry.id,
-				local: entry.local,
-			});
-		let serving_closing = front
-			.serving()
-			.and_then(|id| sources.get(&id))
-			.is_some_and(|source| source.is_closing());
-		Event::Selected { best, serving_closing }
-	};
+	let select =
+		|front: &mut Front, sources: &HashMap<u64, broadcast::Consumer>, seen: &mut u64, moved: &mut bool| -> Event {
+			let table = shared.read();
+			if table.closed {
+				return Event::Closed;
+			}
+			// Read alongside the decision, under the lock a poke takes first.
+			*seen = watch.seen();
+			// Moving to another epoch is a new broadcast, never a splice. A name with
+			// nothing left to resolve to ends like any retraction instead.
+			if let Some(name) = &follows
+				&& table
+					.resolve(&name.as_path(), horizon)
+					.is_some_and(|resolved| resolved != path)
+			{
+				*moved = true;
+				return Event::Selected {
+					best: None,
+					serving_closing: false,
+				};
+			}
+			front.retain_routes(|route| table.routes.covers(&path.as_path(), route));
+			let best = table
+				.best_route(&path.as_path(), horizon, front.refused_routes())
+				.map(|entry| Candidate {
+					route: entry.id,
+					local: entry.local,
+				});
+			let serving_closing = front
+				.serving()
+				.and_then(|id| sources.get(&id))
+				.is_some_and(|source| source.is_closing());
+			Event::Selected { best, serving_closing }
+		};
 
-	events.push_back(select(&mut front, &sources, &mut seen));
+	events.push_back(select(&mut front, &sources, &mut seen, &mut moved));
 
 	loop {
 		while let Some(event) = events.pop_front() {
@@ -2373,7 +2427,7 @@ async fn run_front(task: FrontTask) {
 			};
 			for action in front.step(event) {
 				match action {
-					Action::Reselect => events.push_back(select(&mut front, &sources, &mut seen)),
+					Action::Reselect => events.push_back(select(&mut front, &sources, &mut seen, &mut moved)),
 					Action::Request { route } => {
 						// The entry and what it serves.
 						let found = {
@@ -2567,6 +2621,14 @@ async fn run_front(task: FrontTask) {
 						// subscriptions already in flight): their readers follow the copy
 						// they read to its end, since no front is left to replace it.
 						broadcast.close();
+						// A followed name moved: nothing carries on, so each reader is
+						// reset and its next request lands on what the name resolves to now.
+						if moved {
+							for (_, mut io) in tracks.drain() {
+								io.end(Err(Error::Unroutable));
+							}
+							return;
+						}
 						for (_, mut io) in tracks.drain() {
 							let used = io.weak.is_used();
 							// A reader still waiting on its source's answer is in flight
@@ -2782,7 +2844,7 @@ async fn run_front(task: FrontTask) {
 				deadline.set(None);
 				Event::Deadline { now: timers.now() }
 			}
-			Step::Table => select(&mut front, &sources, &mut seen),
+			Step::Table => select(&mut front, &sources, &mut seen, &mut moved),
 		};
 		events.push_back(event);
 	}
@@ -3077,6 +3139,13 @@ impl RouteTable {
 		}
 	}
 
+	/// Wake the watches at exactly `path`.
+	fn poke_at(&self, path: &Path) {
+		if let (_, Some(node)) = self.split(path) {
+			node.poke();
+		}
+	}
+
 	/// Wake every watch: the origin is tearing down.
 	fn poke_all(&self) {
 		self.root.walk(&mut |node| node.poke());
@@ -3270,6 +3339,10 @@ impl OriginState {
 		}
 		// The fronts and requesters under the prefix re-select from the table.
 		routes.poke_below(prefix);
+		// So do those following the bare name an epoch route sits under.
+		if let (name, Some(_)) = prefix.split_epoch() {
+			routes.poke_at(&name);
+		}
 	}
 
 	/// Register a [`Watch`] on the routes covering `path`.
@@ -3387,6 +3460,36 @@ impl OriginState {
 			}
 		}
 		best
+	}
+
+	/// The path a request for the absolute `path` is served from, for a requester
+	/// seeing `horizon`: `path` itself when a route covers it, otherwise the newest
+	/// epoch below it that a route serves. `None` when nothing serves it.
+	fn resolve(&self, path: &Path, horizon: Horizon) -> Option<PathOwned> {
+		let none: HashSet<u64> = HashSet::new();
+		if self.best_route(path, horizon, &none).is_some() {
+			return Some(path.to_owned());
+		}
+		// A path naming an epoch pins it: there is nothing newer to follow.
+		if path.split_epoch().1.is_some() {
+			return None;
+		}
+		let (_, Some(node)) = self.routes.split(path) else {
+			return None;
+		};
+		// Canonical UUIDv7 text orders by mint time, so the greatest is the newest.
+		// Sorted as text and parsed lazily: the newest is usually the one served.
+		let mut segments: Vec<&str> = node
+			.children
+			.keys()
+			.filter_map(|segment| segment.strip_prefix('@'))
+			.collect();
+		segments.sort_unstable_by(|a, b| b.cmp(a));
+		segments
+			.into_iter()
+			.filter_map(|text| text.parse::<crate::Epoch>().ok())
+			.map(|epoch| path.join_epoch(Some(&epoch)))
+			.find(|epoch| self.best_route(epoch, horizon, &none).is_some())
 	}
 }
 
@@ -4094,8 +4197,9 @@ impl Consumer {
 	/// Block until an announced route covers `path`, and return it.
 	///
 	/// Covering means the route's prefix is a (segment-wise) prefix of `path`,
-	/// including the exact path itself. Returns `None` if the path is outside this
-	/// consumer's scope or the consumer is closed first.
+	/// including the exact path itself. A bare `path` is also routed by an epoch
+	/// one segment below it (`path/@<uuidv7>`). Returns `None` if the path is
+	/// outside this consumer's scope or the consumer is closed first.
 	///
 	/// To resolve a broadcast rather than inspect the route, use
 	/// [`Self::routed_broadcast`]: pairing this with [`Self::request_broadcast`]
@@ -4124,9 +4228,12 @@ impl Consumer {
 		// forwarding, so it must not drive the announce guards. Hiding narrows
 		// discovery, not lookup, so a hidden path resolves like any other.
 		let mut announced = consumer.untagged().with_hidden(true).announced();
+		// A bare name is also routed by an epoch one segment below it.
+		let bare = path.split_epoch().1.is_none();
 		loop {
 			if let AnnounceEvent::Start(announce) | AnnounceEvent::Update(announce) = announced.next().await?
-				&& path.has_prefix(&announce.prefix)
+				&& (path.has_prefix(&announce.prefix)
+					|| bare && matches!(announce.prefix.split_epoch(), (name, Some(_)) if name == path))
 			{
 				return Some(announce.route);
 			}
@@ -4134,7 +4241,9 @@ impl Consumer {
 	}
 
 	/// Block until `path` resolves to a broadcast: [`Self::request_broadcast`],
-	/// retried whenever the routes covering the path change.
+	/// retried whenever the routes covering the path, or the epochs below a bare
+	/// name, change. To follow a bare name across epochs, call it again once the
+	/// broadcast it returned ends.
 	///
 	/// A request answers for the routes as they stand, so it can miss an
 	/// announcement that has not arrived yet, lose its covering route to
@@ -4190,12 +4299,13 @@ impl Consumer {
 	/// Returns a consumer rooted at `root` and restricted to matching `patterns`.
 	///
 	/// `root` is relative to this consumer's root, and `patterns` are relative to
-	/// the new root. Returns [`Error::Unauthorized`] when the requested scope has
+	/// the new root. A pattern that admits a name also admits its epochs
+	/// (`name/@<uuidv7>`). Returns [`Error::Unauthorized`] when the requested scope has
 	/// no overlap with this consumer's scope, or [`Error::BoundsExceeded`] when
 	/// rooting the patterns would exceed the path limit.
 	pub fn scope(&self, root: impl AsPath, patterns: &Patterns) -> Result<Consumer, Error> {
 		let root = self.root.join(root).to_owned();
-		let rooted = patterns.rooted(root.as_str()).map_err(|_| BoundsExceeded)?;
+		let rooted = with_epochs(patterns.rooted(root.as_str()).map_err(|_| BoundsExceeded)?);
 		let scope = self.scope.narrow(&rooted).ok_or(Error::Unauthorized)?;
 		Ok(Consumer {
 			scope,
@@ -4218,6 +4328,13 @@ impl Consumer {
 	/// subscribers: a path names one broadcast, whoever serves it. Its route
 	/// retracting with no replacement ends the broadcast, and the next request
 	/// re-serves the path. Tracks already in flight carry on to their own end.
+	///
+	/// A bare name no route covers resolves to its newest epoch: the greatest
+	/// `path/@<uuidv7>` a route serves. The broadcast is still named `path`, and
+	/// follows that one epoch: once the name resolves elsewhere (a newer epoch, an
+	/// older one after the newest is retracted, or a route covering the name), it
+	/// ends and so do its tracks, with [`Error::Unroutable`], so the next request
+	/// lands on the new resolution. A path naming an epoch pins it.
 	///
 	/// The returned future fails with [`Error::Unroutable`] at once when no
 	/// announced route covers the path, including a broadcast created on this
@@ -4256,15 +4373,12 @@ impl Consumer {
 			return kio::Pending::new(Requesting::failed(Error::Closed));
 		}
 
-		// Nothing serves the path: no announced broadcast and no served route.
-		// Checked before joining a front, so a front still draining after its
-		// route retracted takes no newcomers.
-		if state
-			.best_route(&absolute.as_path(), self.horizon, &HashSet::new())
-			.is_none()
-		{
+		// Nothing serves the path: no announced broadcast, no served route, and
+		// no epoch below a bare name. Checked before joining a front, so a front
+		// still draining after its route retracted takes no newcomers.
+		let Some(target) = state.resolve(&absolute.as_path(), self.horizon) else {
 			return kio::Pending::new(Requesting::failed(Error::Unroutable));
-		}
+		};
 
 		// Join the live front for this path and exclusion, if any: its watcher
 		// resolves (or already resolved) the request channel with the front's
@@ -4272,10 +4386,15 @@ impl Consumer {
 		// route serves the path, it is the same broadcast.
 		let key = (absolute.clone(), self.horizon);
 		if let Some(front) = state.fronts.get(&key) {
-			let pending = Requesting::queued(front.request.consume())
-				.with_path(requested)
-				.with_stats(scope);
-			return kio::Pending::new(pending);
+			if front.target == target {
+				let pending = Requesting::queued(front.request.consume())
+					.with_path(requested)
+					.with_stats(scope);
+				return kio::Pending::new(pending);
+			}
+			// The front follows an epoch the name has since moved off, and ends
+			// on its next selection: serve the newcomer from a fresh one.
+			state.fronts.remove(&key);
 		}
 
 		// A route covers the path: mint the front and hand its watcher the
@@ -4295,6 +4414,7 @@ impl Consumer {
 			RemoteFront {
 				request: request.clone(),
 				broadcast: broadcast.consume().weak(),
+				target: target.clone(),
 			},
 		);
 		// Released before the push: a set whose handles are gone drops the task,
@@ -4303,7 +4423,8 @@ impl Consumer {
 		self.tasks.push(run_front(FrontTask {
 			shared: self.shared.clone(),
 			broadcast,
-			path: absolute,
+			follows: (target != absolute).then_some(absolute),
+			path: target,
 			horizon: self.horizon,
 			watch,
 			request,
@@ -8213,19 +8334,25 @@ mod tests {
 		let consumer = producer.consume().scope("", &scopes(&["room"])).unwrap();
 		assert_eq!(consumer.allowed(), scopes(&["room"]));
 
+		// A member naming a broadcast also reaches its epochs.
 		for text in ["room", "", "*room", "room/*", "*", "**/room", "room/**/chat", "*.hang"] {
 			let union = Patterns::from(text.parse::<Pattern>().unwrap());
-			assert_eq!(producer.scope("", &union).expect(text).allowed(), union, "{text}");
+			let reached = with_epochs(union.clone());
+			assert_eq!(producer.scope("", &union).expect(text).allowed(), reached, "{text}");
 			assert_eq!(
 				producer.consume().scope("", &union).expect(text).allowed(),
-				union,
+				reached,
 				"{text}"
 			);
 		}
 
-		let mixed: Patterns = ["room/**".parse().unwrap(), "other".parse().unwrap()]
-			.into_iter()
-			.collect();
+		let mixed: Patterns = [
+			"room/**".parse().unwrap(),
+			"other".parse().unwrap(),
+			"other/@*".parse().unwrap(),
+		]
+		.into_iter()
+		.collect();
 		assert_eq!(producer.scope("", &mixed).unwrap().allowed(), mixed);
 	}
 
@@ -8415,13 +8542,19 @@ mod tests {
 		let chats = rooms
 			.scope("", &Patterns::from("*/chat".parse::<Pattern>().unwrap()))
 			.unwrap();
-		assert_eq!(chats.allowed(), Patterns::from("room/chat".parse::<Pattern>().unwrap()));
+		assert_eq!(
+			chats.allowed(),
+			with_epochs(Patterns::from("room/chat".parse::<Pattern>().unwrap()))
+		);
 
 		let exact = producer
 			.scope("", &Patterns::from("room/alice".parse::<Pattern>().unwrap()))
 			.unwrap();
 		let rooted = exact.scope("room", &Patterns::from(Pattern::all())).unwrap();
-		assert_eq!(rooted.allowed(), Patterns::from("alice".parse::<Pattern>().unwrap()));
+		assert_eq!(
+			rooted.allowed(),
+			with_epochs(Patterns::from("alice".parse::<Pattern>().unwrap()))
+		);
 		assert!(matches!(
 			exact.scope("room/bob", &Patterns::from(Pattern::all())),
 			Err(Error::Unauthorized)
@@ -8582,5 +8715,227 @@ mod tests {
 		Cost::DRAIN
 			.encode(&mut buf, crate::lite::Version::Lite06)
 			.expect("a draining route is still forwarded, so its cost must encode");
+	}
+
+	/// Two epochs in mint order, older first.
+	const OLD: &str = "0199b7f4-3c2a-7d1e-9f0b-2b6c1a9d8e7f";
+	const NEW: &str = "0199b7f4-3c2b-7d1e-9f0b-2b6c1a9d8e7f";
+
+	fn epoch(name: &str, epoch: &str) -> PathOwned {
+		Path::new(name).join_epoch(Some(&epoch.parse().unwrap()))
+	}
+
+	/// Publish one epoch of `room/alice` with a `video` track holding one group.
+	fn publish_epoch(producer: &Producer, at: &str, payload: &'static [u8]) -> (broadcast::Producer, track::Producer) {
+		let broadcast = producer.publish(epoch("room/alice", at), Route::default()).unwrap();
+		let track = broadcast.create_track("video", None).unwrap();
+		let mut group = track.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, payload).unwrap();
+		group.finish().unwrap();
+		(broadcast, track)
+	}
+
+	async fn read_video(broadcast: &broadcast::Consumer) -> (crate::track::Subscriber, Vec<u8>) {
+		let mut subscription = broadcast.track("video").unwrap().subscribe(None).await.unwrap();
+		let mut group = next_group(&mut subscription).await.unwrap().unwrap();
+		let payload = group.read_frame().await.unwrap().unwrap().payload.to_vec();
+		(subscription, payload)
+	}
+
+	#[test]
+	fn mint_epoch_appends_a_fresh_epoch() {
+		let minted = Path::new("room/alice").mint_epoch();
+		let (name, epoch) = minted.split_epoch();
+		assert_eq!(name, Path::new("room/alice"));
+		assert!(epoch.is_some());
+		assert_ne!(Path::new("room/alice").mint_epoch(), minted);
+	}
+
+	#[tokio::test]
+	async fn a_bare_name_resolves_to_its_newest_epoch() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let _old = publish_epoch(&producer, OLD, b"old");
+		let _new = publish_epoch(&producer, NEW, b"new");
+
+		let resolved = consumer.request_broadcast("room/alice").await.unwrap();
+		// Named as asked, so a catalog's relative references resolve against the name.
+		assert_eq!(resolved.info().path, Path::new("room/alice"));
+		assert_eq!(read_video(&resolved).await.1, b"new");
+
+		// A path naming an epoch pins it.
+		let pinned = consumer.request_broadcast(epoch("room/alice", OLD)).await.unwrap();
+		assert_eq!(read_video(&pinned).await.1, b"old");
+	}
+
+	#[tokio::test]
+	async fn a_newer_epoch_resets_bare_readers() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let _old = publish_epoch(&producer, OLD, b"old");
+
+		let bare = consumer.request_broadcast("room/alice").await.unwrap();
+		let pinned = consumer.request_broadcast(epoch("room/alice", OLD)).await.unwrap();
+		let (mut following, payload) = read_video(&bare).await;
+		assert_eq!(payload, b"old");
+		let (mut staying, _) = read_video(&pinned).await;
+
+		let _new = publish_epoch(&producer, NEW, b"new");
+		// The takeover is a typed reset, never a splice into the new epoch.
+		assert!(matches!(next_group(&mut following).await, Err(Error::Unroutable)));
+		settle(|| bare.is_closed()).await;
+		assert!(!pinned.is_closed(), "a pinned epoch never moves");
+		assert!(staying.poll_recv_group(&kio::Waiter::noop()).is_pending());
+
+		// Asking again lands on the new epoch.
+		let bare = consumer.request_broadcast("room/alice").await.unwrap();
+		assert_eq!(read_video(&bare).await.1, b"new");
+	}
+
+	#[tokio::test]
+	async fn retracting_the_newest_epoch_falls_back_to_an_older_one() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let _old = publish_epoch(&producer, OLD, b"old");
+		let (new, _track) = publish_epoch(&producer, NEW, b"new");
+
+		let bare = consumer.request_broadcast("room/alice").await.unwrap();
+		let (mut following, payload) = read_video(&bare).await;
+		assert_eq!(payload, b"new");
+
+		new.close();
+		assert!(matches!(next_group(&mut following).await, Err(Error::Unroutable)));
+		let bare = consumer.request_broadcast("room/alice").await.unwrap();
+		assert_eq!(read_video(&bare).await.1, b"old");
+	}
+
+	#[tokio::test]
+	async fn the_last_epoch_retracting_ends_like_any_route() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let (old, _track) = publish_epoch(&producer, OLD, b"old");
+
+		let bare = consumer.request_broadcast("room/alice").await.unwrap();
+		read_video(&bare).await;
+		old.unannounce();
+		settle(|| bare.is_closed()).await;
+		assert!(matches!(
+			consumer.request_broadcast("room/alice").await,
+			Err(Error::Unroutable)
+		));
+	}
+
+	#[tokio::test]
+	async fn a_route_covering_the_name_beats_its_epochs() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let _new = publish_epoch(&producer, NEW, b"new");
+		let raw = producer.publish("room/alice", Route::default()).unwrap();
+		let track = raw.create_track("video", None).unwrap();
+		let mut group = track.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, b"raw".as_ref()).unwrap();
+		group.finish().unwrap();
+
+		let bare = consumer.request_broadcast("room/alice").await.unwrap();
+		assert_eq!(read_video(&bare).await.1, b"raw");
+	}
+
+	#[tokio::test]
+	async fn a_bare_follower_moves_to_a_route_covering_the_name() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let _new = publish_epoch(&producer, NEW, b"new");
+
+		let bare = consumer.request_broadcast("room/alice").await.unwrap();
+		let (mut following, _) = read_video(&bare).await;
+		let _raw = producer.publish("room/alice", Route::default()).unwrap();
+		assert!(matches!(next_group(&mut following).await, Err(Error::Unroutable)));
+	}
+
+	#[tokio::test]
+	async fn routed_broadcast_follows_an_epoch_announced_later() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+
+		let routed = tokio::spawn({
+			let consumer = consumer.clone();
+			async move { consumer.routed_broadcast("room/alice").await }
+		});
+		tokio::task::yield_now().await;
+		let _old = publish_epoch(&producer, OLD, b"old");
+		let resolved = routed.await.unwrap().unwrap();
+		assert_eq!(read_video(&resolved).await.1, b"old");
+
+		let route = consumer.routed("room/alice").await.unwrap();
+		assert!(route.hops.is_empty());
+	}
+
+	#[tokio::test]
+	async fn an_epoch_through_the_requester_is_not_followed() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let _route = producer
+			.dynamic(epoch("room/alice", NEW), Route::default().with_hops(hops(&[10])))
+			.unwrap();
+
+		assert!(matches!(
+			consumer
+				.clone()
+				.excluding(origin(10))
+				.request_broadcast("room/alice")
+				.await,
+			Err(Error::Unroutable)
+		));
+		let pending = consumer.request_broadcast("room/alice");
+		assert!(pending.is_queued());
+	}
+
+	#[tokio::test]
+	async fn a_derived_name_follows_its_own_epochs() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let derived = epoch("room/alice", OLD).join("transcode");
+		let _broadcast = producer
+			.publish(derived.join_epoch(Some(&NEW.parse().unwrap())), Route::default())
+			.unwrap();
+
+		consumer.request_broadcast(&derived).await.unwrap();
+		assert!(matches!(
+			consumer.request_broadcast("room/alice").await,
+			Err(Error::Unroutable)
+		));
+	}
+
+	#[tokio::test]
+	async fn a_grant_on_a_name_admits_its_epochs() {
+		let producer = origin(1).produce();
+		let exact = Patterns::from(Pattern::literal("room/alice").unwrap());
+
+		// Publish: an exact grant admits the name's epochs, not its other children.
+		let publisher = producer.scope("", &exact).unwrap();
+		let _broadcast = publisher.publish(epoch("room/alice", OLD), Route::default()).unwrap();
+		assert!(matches!(
+			publisher.publish("room/alice/other", Route::default()),
+			Err(Error::Unauthorized)
+		));
+
+		// Subscribe: the same grant reaches the bare name, a pinned epoch, and sees it announced.
+		let viewer = producer.consume().scope("", &exact).unwrap();
+		viewer.request_broadcast("room/alice").await.unwrap();
+		viewer.request_broadcast(epoch("room/alice", OLD)).await.unwrap();
+		viewer.announced().assert_next_active(epoch("room/alice", OLD));
+
+		// A grant on one epoch never widens to the bare name or a sibling epoch.
+		let one = Patterns::from(Pattern::literal(epoch("room/alice", OLD).as_str()).unwrap());
+		let viewer = producer.consume().scope("", &one).unwrap();
+		viewer.request_broadcast(epoch("room/alice", OLD)).await.unwrap();
+		assert!(matches!(
+			viewer.request_broadcast("room/alice").await,
+			Err(Error::Unauthorized)
+		));
+		assert!(matches!(
+			viewer.request_broadcast(epoch("room/alice", NEW)).await,
+			Err(Error::Unauthorized)
+		));
 	}
 }

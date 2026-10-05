@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import * as Epoch from "./epoch.ts";
 import * as Path from "./path.ts";
 
@@ -364,4 +364,19 @@ test("epoch segments are literal pattern components", () => {
 	expect(Path.Pattern.parse("demo/video/@*").matches(path)).toBe(true);
 	expect(Path.Pattern.parse("demo/video").matches(path)).toBe(false);
 	expect(Path.Pattern.parse(path).matches(path)).toBe(true);
+});
+
+test("mintEpoch appends a fresh epoch", () => {
+	// UUIDv7 minting stays monotonic across a process, so a real clock here would push
+	// every later fixed-clock mint (epoch.test.ts) forward. Pin one earlier than theirs.
+	const now = spyOn(Date, "now").mockReturnValue(1_600_000_000_000);
+	try {
+		const minted = Path.mintEpoch(Path.from("room/alice"));
+		const { name, epoch } = Path.splitEpoch(minted);
+		expect(name).toBe(Path.from("room/alice"));
+		expect(epoch).toBeDefined();
+		expect(Path.mintEpoch(Path.from("room/alice"))).not.toBe(minted);
+	} finally {
+		now.mockRestore();
+	}
 });

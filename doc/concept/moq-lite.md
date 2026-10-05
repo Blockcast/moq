@@ -138,7 +138,10 @@ An application can identify each publisher instance with a shared `Epoch` from
 `moq-net` or `@moq/net`. It is a lowercase hyphenated UUIDv7, ordered newest
 last, with its wall-clock creation time available as `Epoch::time()` in Rust
 or `Epoch.time(epoch)` in TypeScript. Minting is explicit; publishing does not
-add an epoch automatically.
+add an epoch automatically. A publisher that may restart publishes each run
+under a fresh one, so a restart is a new broadcast rather than a reused name:
+`path.mint_epoch()` in Rust and `Path.mintEpoch(path)` in TypeScript append a
+freshly minted epoch. The epoch segment counts toward the 32-part path limit.
 
 `Path::join_epoch(Some(&epoch))` and `Path.joinEpoch(name, epoch)` append an
 `@<uuidv7>` segment. `Path::split_epoch()` and `Path.splitEpoch(path)` return
@@ -147,9 +150,29 @@ count: `@alice`, bare UUIDs, uppercase UUIDs, and other UUID versions remain
 ordinary path segments. Existing path normalization still applies.
 
 The segment travels as part of the ordinary broadcast path on every supported
-wire version. Pattern grants still match the full path: `room/**` covers an
-epoch-qualified instance, while `room/camera` is an exact name. Epochs do not
-hide a broadcast; a leading `.` in a name segment still does.
+wire version. Epochs do not hide a broadcast; a leading `.` in a name segment
+still does.
+
+A request for a bare name that no route covers resolves to its newest epoch:
+the greatest `name/@<uuidv7>` with a live route. The broadcast is still named
+`name`, so a catalog's relative references resolve against the name. When the
+name resolves elsewhere (a newer epoch, an older one once the newest is
+retracted, or a route covering the name itself), a Rust origin ends the
+broadcast and resets its tracks with `Unroutable`, and the next request lands
+on the new resolution; it never splices one epoch into another. In TypeScript
+the request's `active` broadcast swaps to the new one. A path naming an epoch
+pins it and never moves. A relay resolves bare requests this way for every
+client and protocol version, so an older client subscribing by name keeps
+working, provided it resubscribes after an `Unroutable` reset. A relay without this support routes
+`name/@<uuidv7>` but never resolves bare `name`, since a route covers its
+descendants, not its parent: a bare-name viewer behind one needs a publisher
+that publishes the bare name itself.
+
+A grant that admits a name also admits its epochs: an exact `room/camera`
+grant reaches `room/camera/@<uuidv7>` for publishing and subscribing, and
+`room/**` covers both. A grant on one epoch reaches only that epoch, never the
+bare name or a sibling. The widening is a `room/camera/@*` pattern, so any
+single `@`-prefixed segment below the name is admitted, not only UUIDv7 text.
 
 ### Hidden broadcasts
 

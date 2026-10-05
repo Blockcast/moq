@@ -360,3 +360,8 @@ export function splitEpoch(path: Valid): { name: Valid; epoch?: Epoch.Valid } {
 export function joinEpoch(name: Valid, epoch?: Epoch.Valid): Valid {
 	return epoch === undefined ? name : join(name, from(`@${epoch}`));
 }
+
+/** Append a freshly minted epoch, naming a new instance of this broadcast. */
+export function mintEpoch(name: Valid): Valid {
+	return joinEpoch(name, Epoch.mint());
+}

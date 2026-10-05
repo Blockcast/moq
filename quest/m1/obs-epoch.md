@@ -15,10 +15,8 @@ release gate waits only on `moqsink`.
 - OBS gets the epoch through the generated C++ bindings from moq-ffi, which
   the C++ line moves the plugin onto (decided in the 2026-09-30 audit: libmoq,
   now moq-c, gets no new API).
-- First check whether the plugin already inherits it: today it announces
-  through moq-c's `moq_publish_announce`, which calls
-  `broadcast::Producer::announce`. If Origin mints the epoch on that path,
-  the plugin needs no code, only a test.
+- Origin publishes the path as given, so the plugin mints its own epoch per
+  Start Streaming.
 - Show the full epoch path in the dock, and update `doc/bin/obs.md` if it
   shows paths.
 

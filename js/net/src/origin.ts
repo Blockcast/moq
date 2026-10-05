@@ -34,9 +34,10 @@ class Scope {
 		this.allowed = allowed;
 	}
 
+	/** A pattern that admits a name also admits its epochs (`name/@<uuidv7>`). */
 	narrow(root: Path.Valid, patterns: Path.Patterns): Scope {
 		const joined = Path.encode(Path.join(this.root, root));
-		const rooted = patterns.rooted(joined);
+		const rooted = withEpochs(patterns.rooted(joined));
 		const allowed = this.allowed?.intersect(rooted) ?? rooted;
 		if (allowed.size === 0) throw new Error("origin scopes do not overlap");
 		return new Scope(joined, allowed);
@@ -120,6 +121,27 @@ class Scope {
 		}
 		return out;
 	}
+}
+
+const EPOCH_SEGMENT: Path.Segment = { kind: "partial", prefix: "@", suffix: "" };
+
+/**
+ * `patterns` with each name they admit also admitting its epochs: a member not ending in
+ * `**` gains a `/@*` sibling. A grant on one epoch names that epoch, so it never widens to
+ * the bare name or its siblings. Mirrors Rust's `with_epochs`.
+ */
+function withEpochs(patterns: Path.Patterns): Path.Patterns {
+	const widened = new Path.Patterns(patterns);
+	for (const member of patterns) {
+		const last = member.segments.at(-1);
+		if (last?.kind === "globstar" || (last?.kind === "partial" && last.prefix === "@" && last.suffix === "")) {
+			continue;
+		}
+		// A member at the depth limit names nothing with room for an epoch.
+		if (member.segments.length >= Path.Pattern.MAX_SEGMENTS) continue;
+		widened.insert(Path.Pattern.from([...member.segments, EPOCH_SEGMENT]));
+	}
+	return widened;
 }
 
 /** Whether the route advertised at `prefix` may serve any path `pattern` admits. */
@@ -473,6 +495,13 @@ class OriginState {
 	 * the answer for a single path.
 	 */
 	refresh(path: Path.Valid): void {
+		this.#refreshSlot(path);
+		// A bare name follows the epochs below it.
+		const { name, epoch } = Path.splitEpoch(path);
+		if (epoch !== undefined) this.#refreshSlot(name);
+	}
+
+	#refreshSlot(path: Path.Valid): void {
 		const slot = this.requests.peek()?.get(path);
 		if (!slot) return;
 		slot.route.set(this.route(path, slot));
@@ -483,10 +512,17 @@ class OriginState {
 	 * refuser; one with nothing serving ends with `err`.
 	 */
 	refuse(path: Path.Valid, entry: RouteEntry, err: Error): void {
+		this.#refuseSlot(path, path, entry, err);
+		// A bare name following this epoch was asking through the same route.
+		const { name, epoch } = Path.splitEpoch(path);
+		if (epoch !== undefined && this.target(name) === path) this.#refuseSlot(name, path, entry, err);
+	}
+
+	#refuseSlot(path: Path.Valid, target: Path.Valid, entry: RouteEntry, err: Error): void {
 		const slot = this.requests.peek()?.get(path);
 		if (!slot) return;
 		// Only the route the request is waiting on speaks for it; a superseded one's answer is moot.
-		if (this.bestEntry(path, (candidate) => slot.refused.has(candidate)) !== entry) return;
+		if (this.bestEntry(target, (candidate) => slot.refused.has(candidate)) !== entry) return;
 
 		const serving = slot.route.peek();
 		if (serving && serving.closed.peek() === undefined) {
@@ -513,8 +549,12 @@ class OriginState {
 	 * releases a retracted route's session subscription even when nothing reads it again.
 	 */
 	refreshPrefix(prefix: Path.Valid): void {
+		// A route at an epoch also moves the bare name above it.
+		const { name, epoch } = Path.splitEpoch(prefix);
 		for (const [path, slot] of this.requests.peek() ?? []) {
-			if (Path.hasPrefix(prefix, path)) slot.route.set(this.route(path, slot));
+			if (Path.hasPrefix(prefix, path) || (epoch !== undefined && path === name)) {
+				slot.route.set(this.route(path, slot));
+			}
 		}
 	}
 
@@ -575,7 +615,8 @@ class OriginState {
 
 	/**
 	 * What `path` resolves to: an announced local publish, a broadcast materialized from
-	 * the best covering route, or the blind answer.
+	 * the best covering route, or the blind answer. A bare name resolves through its
+	 * {@link target} epoch, so a newer epoch swaps in a different broadcast.
 	 *
 	 * Materialization is lazy and cached per path: the first request under a route opens
 	 * the providing session's subscription and repeats share it. A better route is made
@@ -583,9 +624,11 @@ class OriginState {
 	 * answers (then swaps) or refuses (then is skipped). A retracted route swaps at once.
 	 */
 	route(path: Path.Valid, slot: Pick<RequestSlot, "answer" | "refused">): broadcast.Consumer | undefined {
-		const entry = this.bestEntry(path, (candidate) => slot.refused.has(candidate));
-		const local = this.local.peek()?.get(path);
-		if (local && this.localWins(path, entry)) {
+		// Everything below is served from the target; the slot and its cache stay keyed by `path`.
+		const target = this.target(path);
+		const entry = this.bestEntry(target, (candidate) => slot.refused.has(candidate));
+		const local = this.local.peek()?.get(target);
+		if (local && this.localWins(target, entry)) {
 			// Nothing reads a remote front the local broadcast replaced, so close its session subscription.
 			this.releaseMaterialized(path);
 			return local;
@@ -602,15 +645,41 @@ class OriginState {
 			return slot.answer;
 		}
 
-		const served = entry.server.served.get(path);
+		const served = entry.server.served.get(target);
 		if (served && served.closed.peek() === undefined) {
 			cached?.front.close();
-			this.materialized.set(path, { entry, front: served });
-			return served;
+			// A bare name shares its epoch's broadcast with the epoch's own requests, so it
+			// caches a handle of its own: releasing one must not close the other.
+			const front = target === path ? served : served.clone();
+			this.materialized.set(path, { entry, front });
+			return front;
 		}
 
-		entry.server.enqueue(path);
+		entry.server.enqueue(target);
 		return cached?.front;
+	}
+
+	/**
+	 * The path a request for `path` is served from: `path` itself when anything routes it,
+	 * otherwise the newest epoch below it that something routes. A path naming an epoch
+	 * pins it. Mirrors Rust's resolution, so a bare name follows its newest live epoch and
+	 * falls back to an older one when the newest goes away.
+	 */
+	target(path: Path.Valid): Path.Valid {
+		if (this.local.peek()?.has(path) || this.bestEntry(path)) return path;
+		if (Path.splitEpoch(path).epoch !== undefined) return path;
+		let newest: Path.Valid | undefined;
+		const consider = (candidate: Path.Valid) => {
+			const { name, epoch } = Path.splitEpoch(candidate);
+			// Same name, so the text orders by epoch, which orders by mint time.
+			if (epoch !== undefined && name === path && (newest === undefined || candidate > newest))
+				newest = candidate;
+		};
+		for (const candidate of this.local.peek()?.keys() ?? []) consider(candidate);
+		for (const [prefix, entries] of this.routes.peek() ?? []) {
+			if (entries.some((entry) => entry.scope.matches(prefix))) consider(prefix);
+		}
+		return newest ?? path;
 	}
 }
 
@@ -1082,7 +1151,9 @@ export class Requesting {
 	 * The resolved broadcast, or undefined while nothing provides the path.
 	 *
 	 * The table's route when it has one: a local publish (no round trip) or an announced
-	 * broadcast, swapping when a republish takes the path. Otherwise a session's blind
+	 * broadcast, swapping when a republish takes the path. A bare name nothing routes
+	 * follows its newest epoch (`name/@<uuidv7>`), swapping to a new broadcast when a newer
+	 * epoch appears or falling back when the newest goes away. Otherwise a session's blind
 	 * answer, which is assumed present rather than known live: a missing broadcast
 	 * surfaces as a reset on the first track subscription, not here. Drops back to
 	 * undefined when the providing route dies and resolves again when another appears.
@@ -1214,8 +1285,9 @@ export class Consumer {
 	 * @internal
 	 */
 	#routes(path: Path.Valid): boolean {
-		if (this.#state.local.peek()?.has(path)) return true;
-		return this.#state.bestEntry(path) !== undefined;
+		const target = this.#state.target(path);
+		if (this.#state.local.peek()?.has(target)) return true;
+		return this.#state.bestEntry(target) !== undefined;
 	}
 
 	/**
