@@ -2009,10 +2009,10 @@ mod tests {
 		assert_eq!((msg.start_frame, msg.end_frame), (0, None));
 	}
 
-	/// The same demand on a lite-06 peer keeps its frame offsets, so the widening is
-	/// version-gated rather than unconditional.
+	/// A lite-06 peer keeps a mid-group end, but the start widens to the head of its
+	/// group, so this copy can still serve frame 0 to a later reader.
 	#[tokio::test]
-	async fn frame_bounds_survive_on_a_lite06_peer() {
+	async fn frame_bounds_start_at_the_group_head_on_a_lite06_peer() {
 		let mut h = Harness::new(Version::Lite06);
 		let mut sub = Sub::None;
 
@@ -2034,7 +2034,7 @@ mod tests {
 			lite::ControlType::Subscribe
 		);
 		let msg = lite::Subscribe::decode(&mut wire, Version::Lite06).unwrap();
-		assert_eq!((msg.start_frame, msg.end_frame), (3, Some(7)));
+		assert_eq!((msg.start_frame, msg.end_frame), (0, Some(7)));
 	}
 
 	/// The model's exclusive end maps back to the wire's inclusive pair.
@@ -3232,6 +3232,12 @@ struct TrackServe<S: crate::transport::poll::Session> {
 impl<S: crate::transport::poll::Session> TrackServe<S> {
 	fn widen_frame_bounds(&self, subscription: &mut Subscription) {
 		if self.subscriber.version.has_frame_bounds() {
+			// No SUBSCRIBE_OK here reports the largest position, so a mid-group start
+			// would leave this copy without the group's head: a later reader that needs
+			// frame 0 parks until the group ends, which a catalog or a compressed stats
+			// track never does. Ask from the head of the group instead; a downstream
+			// session's own start still skips the frames below it.
+			subscription.start = subscription.start.map(|start| Position::group(start.group));
 			return;
 		}
 
