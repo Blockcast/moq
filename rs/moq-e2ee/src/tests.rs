@@ -344,7 +344,7 @@ fn path_joins_epoch() {
 	let epoch = Epoch::mint();
 	let path = cred.path("meeting.hang").unwrap();
 	assert_eq!(path.as_str().len(), 22);
-	let full = path.join_epoch(Some(&epoch));
+	let full = path.with_epoch(&epoch);
 	let (opaque, parsed) = full.split_epoch();
 	assert_eq!(opaque, path);
 	assert_eq!(parsed.unwrap(), epoch);

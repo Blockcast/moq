@@ -23,7 +23,7 @@ authenticated channel. Every publisher instance mints a shared `moq_net::Epoch` 
 ```rust
 let credential = Credential::new(credential::Config { context, kid, secret })?;
 let generation = credential.generation(moq_net::Epoch::mint());
-let path = credential.path("meeting.hang")?.join_epoch(Some(generation.epoch()));
+let path = credential.path("meeting.hang")?.with_epoch(generation.epoch());
 let name = generation.name("video")?;
 let producer = generation.produce(broadcast.create_track(name.as_str(), None)?)?;
 ```

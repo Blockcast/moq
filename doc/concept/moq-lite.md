@@ -143,11 +143,15 @@ under a fresh one, so a restart is a new broadcast rather than a reused name:
 `path.mint_epoch()` in Rust and `Path.mintEpoch(path)` in TypeScript append a
 freshly minted epoch. The epoch segment counts toward the 32-part path limit.
 
-`Path::join_epoch(Some(&epoch))` and `Path.joinEpoch(name, epoch)` append an
-`@<uuidv7>` segment. `Path::split_epoch()` and `Path.splitEpoch(path)` return
-the name and optional epoch. Only the final segment and canonical UUIDv7 text
-count: `@alice`, bare UUIDs, uppercase UUIDs, and other UUID versions remain
-ordinary path segments. Existing path normalization still applies.
+`Path::with_epoch(&epoch)` and `Path.withEpoch(path, epoch)` set the final
+`@<uuidv7>` segment, replacing any epoch already there, and
+`with_epoch(None)` / `Path.withEpoch(path)` remove it. `Path::split_epoch()` and
+`Path.splitEpoch(path)` return the name and optional epoch. Only the final
+segment and canonical UUIDv7 text count: `@alice`, bare UUIDs, uppercase UUIDs,
+and other UUID versions remain ordinary path segments. An epoch only ever ends
+a path, so publishing `name/@<uuidv7>/more` fails (`Error::MisplacedEpoch` in
+Rust); a derived broadcast carries its source's epoch at its own end instead.
+Existing path normalization still applies.
 
 The segment travels as part of the ordinary broadcast path on every supported
 wire version. Epochs do not hide a broadcast; a leading `.` in a name segment
@@ -155,7 +159,10 @@ still does.
 
 A request for a bare name that no route covers resolves to its newest epoch:
 the greatest `name/@<uuidv7>` with a live route. The broadcast is still named
-`name`, so a catalog's relative references resolve against the name. When the
+`name`. A catalog's relative references resolve against its name past any final
+epoch, so they mean the same whether the catalog was requested by name or by
+epoch, and a reference follows its target's newest epoch unless it spells one
+(`./source/@<uuidv7>`). When the
 name resolves elsewhere (a newer epoch, an older one once the newest is
 retracted, or a route covering the name itself), a Rust origin ends the
 broadcast and resets its tracks with `Unroutable`, and the next request lands

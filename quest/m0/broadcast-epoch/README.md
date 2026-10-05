@@ -49,7 +49,20 @@ Decided:
   ends with an `Unroutable` reset, and the client's normal resubscribe lands on
   the new one. A route covering the name wins over its epochs.
 - A grant that admits a name admits its epochs (a `name/@*` sibling); a grant
-  on one epoch reaches only that epoch.
+  on one epoch reaches only that epoch. The sibling admits any single `@`
+  segment, not only UUIDv7 text, since a pattern cannot spell one (decided
+  2026-10-05: accepted and documented).
+- An epoch only ever ends a path (decided 2026-10-05). Publishing
+  `name/@e/more` fails with `MisplacedEpoch`, and `with_epoch`
+  (`Path.withEpoch` in TypeScript) replaces a final epoch rather than stacking
+  one, with `None` removing it.
+- A catalog `broadcast` reference follows by default (decided 2026-10-05 in
+  #4817): it resolves against the catalog's name past its final epoch, so a
+  bare and a pinned fetch agree, and follows the target's newest epoch unless
+  it spells one. A transcoder pins its source by writing `./source/@<epoch>`.
+- Precedence and the move reset stay as built (decided 2026-10-05): any route
+  covering the name, an ancestor prefix included, wins over its epochs, and a
+  bare subscription that moves ends with `Unroutable` (0x36).
 - An unmodified third-party relay routes `foo/@<epoch>` but never resolves a
   bare `foo`, since a route covers its descendants, not its parent. A
   bare-name viewer behind one needs a publisher that publishes the bare name.
@@ -81,14 +94,6 @@ This README owns:
 - A `doc/concept` page on broadcast naming: what an epoch is, publish and
   consume behavior, takeover and fallback, bare-path resolution, and the
   bare-name opt-out.
-
-Open:
-
-- Does a catalog `broadcast` reference by bare name pin the epoch its catalog
-  came from, or follow the newest? Settle it with
-  [Catalog track alias](/quest/m1/catalog-track-alias.md). Today a bare
-  request's broadcast is named by the bare name, so relative references
-  resolve against it and follow; a pinned request's are named under its epoch.
 
 ## Required
 

@@ -333,7 +333,7 @@ const epochs = (await Bun.file(new URL("../../../rs/moq-net/src/path/epoch.json"
 	valid: Array<{ text: string; unix_ms: number }>;
 	invalid: string[];
 	ordered: string[];
-	paths: Array<{ path: string; name: string; epoch: string | null }>;
+	paths: Array<{ path: string; name: string; epoch: string | null; misplaced?: boolean }>;
 };
 
 test("shared epoch parse, reject, order and time vectors", () => {
@@ -353,13 +353,44 @@ test("shared epoch path vectors", () => {
 		const { name, epoch } = Path.splitEpoch(path);
 		expect(name).toBe(row.name as Path.Valid);
 		expect(epoch ?? null).toBe(row.epoch as Epoch.Valid | null);
-		expect(Path.joinEpoch(name, epoch)).toBe(path);
+		if (!row.misplaced) expect(Path.withEpoch(name, epoch)).toBe(path);
+	}
+});
+
+test("withEpoch sets the final epoch", () => {
+	const [old, next] = epochs.ordered.map(Epoch.parse);
+	const name = Path.from("room/alice");
+	const pinned = Path.withEpoch(name, old);
+	expect(pinned).toBe(`room/alice/@${old}` as Path.Valid);
+	// Never stacks: an existing epoch is replaced, and `undefined` removes it.
+	expect(Path.withEpoch(pinned, next)).toBe(Path.withEpoch(name, next));
+	expect(Path.withEpoch(pinned)).toBe(name);
+	expect(Path.withEpoch(name)).toBe(name);
+});
+
+test("references resolve against the name past its epoch", () => {
+	const [epoch, other] = epochs.ordered.map(Epoch.parse);
+	const name = Path.from("room/transcode");
+	const pinned = Path.withEpoch(name, epoch);
+	for (const text of ["./source", ".", "../other", "transcode/sub"]) {
+		const rel = Path.normalizeRelative(text);
+		expect(Path.resolve(pinned, rel)).toBe(Path.resolve(name, rel));
+		expect(Path.tryResolve(pinned, rel)).toBe(Path.tryResolve(name, rel));
+	}
+	// The empty reference still names the catalog broadcast itself.
+	expect(Path.resolve(pinned, "" as Path.Relative)).toBe(pinned);
+	// And `relative` stays its inverse.
+	for (const text of ["room/source", `room/source/@${other}`, "room", "other"]) {
+		const target = Path.from(text);
+		const rel = Path.relative(target, pinned);
+		expect(rel).toBeDefined();
+		expect(Path.resolve(pinned, rel as Path.Relative)).toBe(target);
 	}
 });
 
 test("epoch segments are literal pattern components", () => {
 	const epoch = Epoch.parse(epochs.valid[1].text);
-	const path = Path.joinEpoch(Path.from("demo/video"), epoch);
+	const path = Path.withEpoch(Path.from("demo/video"), epoch);
 	expect(Path.Pattern.parse("demo/**").matches(path)).toBe(true);
 	expect(Path.Pattern.parse("demo/video/@*").matches(path)).toBe(true);
 	expect(Path.Pattern.parse("demo/video").matches(path)).toBe(false);

@@ -1573,7 +1573,8 @@ impl Producer {
 	/// [`mount`](Self::mount),
 	/// [`Error::BoundsExceeded`] if the full rooted path (an epoch segment
 	/// included) exceeds [`Path::MAX_PARTS`], [`Error::InvalidPath`] if it holds a segment no
-	/// pattern can spell (`*` or `**`), or [`Error::Closed`] once the origin's
+	/// pattern can spell (`*` or `**`), [`Error::MisplacedEpoch`] if an epoch
+	/// segment comes before its last, or [`Error::Closed`] once the origin's
 	/// [`Driver`] has been dropped.
 	pub fn create_broadcast(&self, path: impl AsPath) -> Result<broadcast::Producer, Error> {
 		let path = path.as_path();
@@ -1587,6 +1588,9 @@ impl Producer {
 		// path can be re-encoded when forwarded.
 		if full.parts().count() > Path::MAX_PARTS {
 			return Err(BoundsExceeded.into());
+		}
+		if full.has_misplaced_epoch() {
+			return Err(Error::MisplacedEpoch);
 		}
 		// A path only a pattern could spell (a `*` segment) advertises nowhere, so
 		// refuse it here rather than publish a broadcast no cursor can see.
@@ -1886,6 +1890,9 @@ impl Announcing {
 		let requested = producer.root.join(prefix.as_path()).to_owned();
 		if requested.parts().count() > Path::MAX_PARTS {
 			return Err(BoundsExceeded.into());
+		}
+		if requested.has_misplaced_epoch() {
+			return Err(Error::MisplacedEpoch);
 		}
 		let claim = prefix_claim(&requested)?;
 		if !producer.scope.allowed.overlaps(&claim) || !producer.scope.publishes(&requested) {
@@ -3488,7 +3495,7 @@ impl OriginState {
 		segments
 			.into_iter()
 			.filter_map(|text| text.parse::<crate::Epoch>().ok())
-			.map(|epoch| path.join_epoch(Some(&epoch)))
+			.map(|epoch| path.with_epoch(&epoch))
 			.find(|epoch| self.best_route(epoch, horizon, &none).is_some())
 	}
 }
@@ -8722,7 +8729,7 @@ mod tests {
 	const NEW: &str = "0199b7f4-3c2b-7d1e-9f0b-2b6c1a9d8e7f";
 
 	fn epoch(name: &str, epoch: &str) -> PathOwned {
-		Path::new(name).join_epoch(Some(&epoch.parse().unwrap()))
+		Path::new(name).with_epoch(&epoch.parse::<crate::Epoch>().unwrap())
 	}
 
 	/// Publish one epoch of `room/alice` with a `video` track holding one group.
@@ -8891,19 +8898,29 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn a_derived_name_follows_its_own_epochs() {
+	async fn an_epoch_only_ends_a_path() {
 		let producer = origin(1).produce();
-		let consumer = producer.consume();
-		let derived = epoch("room/alice", OLD).join("transcode");
-		let _broadcast = producer
-			.publish(derived.join_epoch(Some(&NEW.parse().unwrap())), Route::default())
+		let source = epoch("room/alice", OLD);
+		for path in [
+			source.join("transcode"),
+			source.with_epoch(&NEW.parse::<crate::Epoch>().unwrap()).join("x"),
+		] {
+			assert!(matches!(
+				producer.publish(&path, Route::default()),
+				Err(Error::MisplacedEpoch)
+			));
+			assert!(matches!(
+				producer.dynamic(&path, Route::default()),
+				Err(Error::MisplacedEpoch)
+			));
+		}
+		// A derived broadcast carries the source's epoch at its own end instead.
+		producer
+			.publish(
+				Path::new("room/alice/transcode").with_epoch(&OLD.parse::<crate::Epoch>().unwrap()),
+				Route::default(),
+			)
 			.unwrap();
-
-		consumer.request_broadcast(&derived).await.unwrap();
-		assert!(matches!(
-			consumer.request_broadcast("room/alice").await,
-			Err(Error::Unroutable)
-		));
 	}
 
 	#[tokio::test]

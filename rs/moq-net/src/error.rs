@@ -291,6 +291,10 @@ pub enum Error {
 	#[error("invalid path: {0}")]
 	InvalidPath(#[from] crate::InvalidPattern),
 
+	/// A path holds an epoch (`@<uuidv7>`) before its last segment; an epoch only ever ends a path.
+	#[error("misplaced epoch: an epoch must be the last path segment")]
+	MisplacedEpoch,
+
 	/// A duplicate ID was used
 	// The broadcast/track is a duplicate
 	#[error("duplicate")]
@@ -538,7 +542,8 @@ impl From<&Error> for SessionError {
 			| Error::Encode(_)
 			| Error::WrongSize
 			| Error::BoundsExceeded(_)
-			| Error::InvalidPath(_) => Self::ProtocolViolation,
+			| Error::InvalidPath(_)
+			| Error::MisplacedEpoch => Self::ProtocolViolation,
 			Error::App(app) => Self::App(*app),
 			// A code we did not recognize, so we cannot say which space it came from.
 			// Forwarding it into this one risks landing on a value that IS registered here
@@ -576,9 +581,11 @@ impl From<&Error> for StreamError {
 			Error::Timeout => Self::DeliveryTimeout,
 			Error::GoingAway => Self::GoingAway,
 			// Our own parse failure is, from the peer's side, a malformed track.
-			Error::Decode(_) | Error::BoundsExceeded(_) | Error::InvalidPath(_) | Error::MalformedTrack => {
-				Self::MalformedTrack
-			}
+			Error::Decode(_)
+			| Error::BoundsExceeded(_)
+			| Error::InvalidPath(_)
+			| Error::MisplacedEpoch
+			| Error::MalformedTrack => Self::MalformedTrack,
 			Error::App(app) => Self::App(*app),
 			// See the SessionError impl: an unregistered code carries no registry, so
 			// re-sending the number could mistranslate it.

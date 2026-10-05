@@ -33,7 +33,7 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 	})
 	.unwrap();
 	let generation = cred.generation(Epoch::mint());
-	let path = cred.path("meeting.hang").unwrap().join_epoch(Some(generation.epoch()));
+	let path = cred.path("meeting.hang").unwrap().with_epoch(generation.epoch());
 	let name = generation.name(track).unwrap();
 
 	let publisher = produce_origin(1);

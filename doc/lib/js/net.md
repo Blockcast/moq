@@ -10,7 +10,7 @@ description: The pub/sub layer in TypeScript
 The TypeScript twin of [`moq-net`](/lib/rs/moq-net): connections, origins,
 broadcasts, tracks, groups, and frames, negotiating moq-lite or moq-transport
 at setup. `Epoch` provides the shared publisher identity, and `Path.mintEpoch`,
-`Path.splitEpoch`, and `Path.joinEpoch` carry it in the broadcast path; a
+`Path.splitEpoch`, and `Path.withEpoch` carry it in the broadcast path; a
 request for the bare name follows the newest epoch. See
 [publisher epochs](/concept/moq-lite#publisher-epochs).
 

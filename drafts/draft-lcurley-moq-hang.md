@@ -499,7 +499,10 @@ The `broadcast` field overrides that, naming a different broadcast that publishe
 The value is a relative path, resolved against the path of the broadcast that served the catalog.
 It uses relative reference resolution ({{!RFC3986, Section 5.2}}): a non-empty reference replaces the catalog broadcast's last path segment before applying `.` and `..` segments.
 For example, `./source` in a catalog served by `room/transcode` resolves to `room/source`, while `.` resolves to `room`.
+A final epoch segment (see Epochs in {{moql}}) is not part of the base: a catalog served by `room/transcode/@<uuidv7>` resolves `./source` to `room/source` too, so a reference means the same whether the catalog was requested by name or by epoch.
 An empty reference resolves to the catalog broadcast itself.
+A reference names an epoch only when it spells one: `./source` follows the newest epoch of `room/source`, while `./source/@<uuidv7>` pins that epoch.
+A publisher whose renditions must come from one run, such as a transcoder referencing its source, SHOULD spell the epoch.
 A publisher MUST NOT use an absolute path, nor a reference that escapes above the root.
 The root is the consumer's authorized subtree, so such a reference names content the consumer cannot reach.
 A consumer MUST reject a catalog containing one, rather than resolving the reference against a different broadcast or ignoring the rendition.
@@ -1091,6 +1094,7 @@ This document has no IANA actions.
 ## moq-hang-03
 {:numbered="false"}
 
+- A `broadcast` reference resolves against the catalog broadcast's name, past a final epoch segment, and follows the newest epoch of its target unless it spells one.
 - Defined encoder `jitter` as flush lateness above the rendition's own recent minimum, replacing fixed frame-duration hints; container batches retain media-span estimates.
 - Clarified that CMAF audio samples are sync samples independently of publisher group boundaries.
 - Clarified that container importers can estimate jitter from batch media spans without measuring input wait time.

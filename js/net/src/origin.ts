@@ -125,6 +125,14 @@ class Scope {
 
 const EPOCH_SEGMENT: Path.Segment = { kind: "partial", prefix: "@", suffix: "" };
 
+/** Throw when an epoch (`@<uuidv7>`) sits anywhere but the end of `path`; an epoch only ever ends a path. */
+function refuseMisplacedEpoch(path: Path.Valid) {
+	const parts = path === "" ? [] : path.split("/");
+	if (parts.slice(0, -1).some((part) => Path.splitEpoch(part as Path.Valid).epoch !== undefined)) {
+		throw new Error(`misplaced epoch: an epoch must be the last path segment: ${path}`);
+	}
+}
+
 /**
  * `patterns` with each name they admit also admitting its epochs: a member not ending in
  * `**` gains a `/@*` sibling. A grant on one epoch names that epoch, so it never widens to
@@ -803,6 +811,7 @@ export class Producer implements Table {
 	 */
 	createBroadcast(path: Path.Valid): broadcast.Producer {
 		path = this.#scope.path(path);
+		refuseMisplacedEpoch(path);
 		const created = this.#state.created;
 		if (!created) throw new Error("origin is closed");
 
@@ -891,6 +900,8 @@ export class Producer implements Table {
 
 	#insertRoute(prefix: Path.Valid, route: Route, originated: boolean): Dynamic {
 		prefix = this.#scope.prefix(prefix);
+		// A peer's announcements are its own; only refuse what this origin originates.
+		if (originated) refuseMisplacedEpoch(prefix);
 		const server = new ServeState(this.#scope.root);
 		server.onChange = (path) => this.#state.refresh(path);
 		const entry: RouteEntry = {

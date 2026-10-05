@@ -1900,3 +1900,14 @@ test("a grant on a name admits its epochs and a grant on an epoch only that one"
 	broadcast.close();
 	origin.close();
 });
+
+test("an epoch only ends a path", () => {
+	const origin = new Producer();
+	for (const path of [Path.join(OLD, Path.from("transcode")), Path.join(OLD, NEW.split("/").at(-1) as Path.Valid)]) {
+		expect(() => origin.createBroadcast(path)).toThrow("misplaced epoch");
+		expect(() => origin.dynamic(path)).toThrow("misplaced epoch");
+	}
+	// A derived broadcast carries the source's epoch at its own end instead.
+	origin.createBroadcast(Path.withEpoch(Path.from("room/alice/transcode"), Path.splitEpoch(OLD).epoch)).close();
+	origin.close();
+});

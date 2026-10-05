@@ -364,23 +364,41 @@ impl<'a> Path<'a> {
 		}
 	}
 
-	/// Append an optional epoch as a final `@<uuidv7>` segment.
-	pub fn join_epoch(&self, epoch: Option<&crate::Epoch>) -> PathOwned {
-		match epoch {
-			Some(epoch) => self.join(format!("@{epoch}")),
-			None => self.to_owned(),
+	/// This path with its final epoch set to `epoch`, replacing any it has, or removed for `None`.
+	pub fn with_epoch<'e>(&self, epoch: impl Into<Option<&'e crate::Epoch>>) -> PathOwned {
+		let (name, _) = self.split_epoch();
+		match epoch.into() {
+			Some(epoch) => name.join(format!("@{epoch}")),
+			None => name.to_owned(),
 		}
 	}
 
-	/// Append a freshly minted epoch, naming a new instance of this broadcast.
+	/// This path under a freshly minted epoch, naming a new instance of the broadcast.
 	pub fn mint_epoch(&self) -> PathOwned {
-		self.join_epoch(Some(&crate::Epoch::mint()))
+		self.with_epoch(&crate::Epoch::mint())
+	}
+
+	/// Whether an epoch segment sits anywhere but the end, which no broadcast may publish.
+	pub(crate) fn has_misplaced_epoch(&self) -> bool {
+		let mut parts = self.parts().peekable();
+		while let Some(part) = parts.next() {
+			if parts.peek().is_some()
+				&& part
+					.strip_prefix('@')
+					.is_some_and(|text| text.parse::<crate::Epoch>().is_ok())
+			{
+				return true;
+			}
+		}
+		false
 	}
 
 	/// Resolve a [`Relative`] against this path.
 	///
 	/// A non-empty reference replaces the last segment of the base, matching relative URL
 	/// resolution. `..` segments then pop another segment; other segments are appended.
+	/// A base's final epoch is not a segment here: `a/b/@<uuidv7>` resolves like `a/b`, so a
+	/// catalog's references mean the same whether it was requested by name or by epoch.
 	/// Excess `..` is a no-op once the base is empty (subsequent named segments still append).
 	/// An empty `rel` returns this path as an owned copy.
 	///
@@ -401,7 +419,8 @@ impl<'a> Path<'a> {
 			return self.to_owned();
 		}
 
-		let mut segments: Vec<&str> = self.parts().collect();
+		let (name, _) = self.split_epoch();
+		let mut segments: Vec<&str> = name.parts().collect();
 		segments.pop();
 
 		for seg in rel.as_str().split('/') {
@@ -435,7 +454,8 @@ impl<'a> Path<'a> {
 			return Some(self.to_owned());
 		}
 
-		let mut segments: Vec<&str> = self.parts().collect();
+		let (name, _) = self.split_epoch();
+		let mut segments: Vec<&str> = name.parts().collect();
 		segments.pop();
 
 		for seg in rel.as_str().split('/') {
@@ -501,8 +521,9 @@ impl<'a> Path<'a> {
 			return Some(Relative::empty());
 		}
 
-		// Resolution replaces the base's last segment, so walk from its parent.
-		let mut dir: Vec<&str> = base.parts().collect();
+		// Resolution replaces the base's last segment, past any epoch, so walk from its parent.
+		let (name, _) = base.split_epoch();
+		let mut dir: Vec<&str> = name.parts().collect();
 		dir.pop();
 
 		let target: Vec<&str> = self.parts().collect();
@@ -819,15 +840,58 @@ mod tests {
 			let (name, epoch) = path.split_epoch();
 			assert_eq!(name.as_str(), row["name"].as_str().unwrap());
 			assert_eq!(epoch.as_ref().map(|epoch| epoch.as_str()), row["epoch"].as_str());
-			assert_eq!(name.join_epoch(epoch.as_ref()), path);
+			let misplaced = row["misplaced"].as_bool().unwrap_or(false);
+			assert_eq!(path.has_misplaced_epoch(), misplaced, "{path}");
+			if !misplaced {
+				assert_eq!(name.with_epoch(epoch.as_ref()), path);
+			}
 			assert_eq!(path.is_hidden(), name.is_hidden());
+		}
+	}
+
+	#[test]
+	fn with_epoch_sets_the_final_epoch() {
+		let old: crate::Epoch = "0199b7f4-3c2a-7d1e-9f0b-2b6c1a9d8e7f".parse().unwrap();
+		let new: crate::Epoch = "0199b7f4-3c2b-7d1e-9f0b-2b6c1a9d8e7f".parse().unwrap();
+		let name = Path::new("room/alice");
+		let pinned = name.with_epoch(&old);
+		assert_eq!(pinned.as_str(), format!("room/alice/@{old}"));
+		// Never stacks: an existing epoch is replaced, and `None` removes it.
+		assert_eq!(pinned.with_epoch(&new), name.with_epoch(&new));
+		assert_eq!(pinned.with_epoch(None), name);
+		assert_eq!(name.with_epoch(None), name);
+		assert_eq!(pinned.mint_epoch().split_epoch().0, name);
+	}
+
+	#[test]
+	fn references_resolve_against_the_name_past_its_epoch() {
+		let epoch: crate::Epoch = "0199b7f4-3c2a-7d1e-9f0b-2b6c1a9d8e7f".parse().unwrap();
+		let name = Path::new("room/transcode");
+		let pinned = name.with_epoch(&epoch);
+		for rel in ["./source", ".", "../other", "transcode/sub"] {
+			let rel = Relative::new(rel);
+			assert_eq!(pinned.resolve(&rel), name.resolve(&rel), "{rel}");
+			assert_eq!(pinned.try_resolve(&rel), name.try_resolve(&rel), "{rel}");
+		}
+		// The empty reference still names the catalog broadcast itself.
+		assert_eq!(pinned.resolve(&Relative::empty()), pinned);
+		// And `relative` stays its inverse.
+		for target in [
+			"room/source",
+			"room/source/@0199b7f4-3c2b-7d1e-9f0b-2b6c1a9d8e7f",
+			"room",
+			"other",
+		] {
+			let target = Path::new(target);
+			let rel = target.relative(&pinned).unwrap();
+			assert_eq!(pinned.resolve(&rel), target, "{target}");
 		}
 	}
 
 	#[test]
 	fn epoch_segments_are_literal_pattern_components() {
 		let epoch: crate::Epoch = "0199b7f4-3c2a-7d1e-9f0b-2b6c1a9d8e7f".parse().unwrap();
-		let path = Path::new("demo/video").join_epoch(Some(&epoch));
+		let path = Path::new("demo/video").with_epoch(&epoch);
 		assert!("demo/**".parse::<Pattern>().unwrap().matches(path.as_str()));
 		assert!("demo/video/@*".parse::<Pattern>().unwrap().matches(path.as_str()));
 		assert!(!"demo/video".parse::<Pattern>().unwrap().matches(path.as_str()));
