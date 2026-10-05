@@ -91,6 +91,8 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	going_away: crate::goaway::GoingAway,
 	/// What this session may allocate up front for frames still arriving.
 	frames: frame::Budget,
+	/// Broadcasts the peer may have announced at once (`session::Limits::announces`).
+	pub(super) announces: crate::session::Slots,
 }
 
 #[derive(Clone)]
@@ -127,6 +129,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 			sources: kio::Queue::new(),
 			going_away: config.going_away,
 			frames: Default::default(),
+			announces: Default::default(),
 		}
 	}
 
@@ -282,8 +285,9 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		}
 
 		// The peer holds this prefix now. Everything below either accepts the announcement,
-		// replacing this, or declines it and leaves it exactly as reserved.
-		announced.reserve(path.clone());
+		// replacing this, or declines it and leaves it exactly as reserved. Past the
+		// session's cap this refuses the announce stream instead.
+		announced.reserve(path.clone())?;
 
 		if let Some(responder) = responder_origin {
 			// A chain already naming the sender came back through it: a reflection, and
@@ -1270,6 +1274,28 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		match ready!(self.poll_run(waiter)) {
+			// More announcements than the session allows: refuse this announce stream
+			// alone, which retracts what it carried, and keep the session.
+			Err(err @ Error::TooManyRequests) => {
+				tracing::warn!(prefix = %self.prefix, %err, "refusing announce stream");
+				if let PrefixState::Send { stream }
+				| PrefixState::ReadOk { stream }
+				| PrefixState::Cost { stream, .. }
+				| PrefixState::ReadInit { stream, .. }
+				| PrefixState::Run { stream, .. } = std::mem::replace(&mut self.state, PrefixState::Open)
+				{
+					let Stream { writer, mut reader } = stream;
+					reader.abort(&err);
+					writer.abort(&err);
+				}
+				Poll::Ready(Ok(()))
+			}
+			res => Poll::Ready(res),
+		}
+	}
+
+	fn poll_run(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let mut cx = waiter.context();
 		loop {
 			match &mut self.state {
@@ -1347,7 +1373,7 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 					let run = PrefixRun {
 						responder_origin,
 						link_cost,
-						announced: Announced::default(),
+						announced: Announced::new(self.subscriber.announces.clone()),
 						decoder: lite::AnnounceDecoder::default(),
 						landing,
 					};
@@ -3249,16 +3275,34 @@ enum Sub<S: crate::transport::poll::Session> {
 ///
 /// A declined advertisement remains present with no route because the peer still
 /// owns its path and announce id until it retracts or restarts it.
-#[derive(Default)]
 struct Announced {
 	routes: HashMap<PathOwned, Option<AnnouncedRoute>>,
+	/// The session's announce cap, and one slot taken from it per entry in `routes`.
+	slots: crate::session::Slots,
+	held: Vec<crate::session::Slot>,
 	/// Attached routes whose request queue woke since the last serve pass. The
 	/// driver wakes for every group the session carries, so a pass must cost what
 	/// was requested, not every route the peer announced.
 	ready: kio::Queue<PathOwned>,
 }
 
+#[cfg(test)]
+impl Default for Announced {
+	fn default() -> Self {
+		Self::new(Default::default())
+	}
+}
+
 impl Announced {
+	fn new(slots: crate::session::Slots) -> Self {
+		Self {
+			routes: HashMap::new(),
+			slots,
+			held: Vec::new(),
+			ready: Default::default(),
+		}
+	}
+
 	fn contains(&self, path: &PathOwned) -> bool {
 		self.routes.contains_key(path)
 	}
@@ -3289,9 +3333,13 @@ impl Announced {
 	/// the peer still holds.
 	/// Only valid on a prefix the peer does not already hold, which the caller establishes
 	/// with [`Self::contains`]. Overwriting an attached route is [`Self::declined`]'s job.
-	fn reserve(&mut self, path: PathOwned) {
+	///
+	/// Fails with [`Error::TooManyRequests`] once the session holds as many as it allows.
+	fn reserve(&mut self, path: PathOwned) -> Result<(), Error> {
 		debug_assert!(!self.routes.contains_key(&path), "reserved a prefix already advertised");
+		self.held.push(self.slots.acquire()?);
 		self.routes.insert(path, None);
+		Ok(())
 	}
 
 	fn attached(&mut self, path: &PathOwned) -> Option<&mut AnnouncedRoute> {
@@ -3301,7 +3349,11 @@ impl Announced {
 	/// Retire this session's advertisement without invalidating another live
 	/// session from the same peer. Dropping its sources closes their requests.
 	fn withdraw(&mut self, path: &PathOwned) {
-		if let Some(Some(entry)) = self.routes.remove(path) {
+		let Some(entry) = self.routes.remove(path) else {
+			return;
+		};
+		self.held.pop();
+		if let Some(entry) = entry {
 			entry.dynamic.withdrawn();
 		}
 	}

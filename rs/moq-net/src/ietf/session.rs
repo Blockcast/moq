@@ -27,6 +27,10 @@ pub struct Config<S: crate::transport::poll::Session> {
 
 	pub request_id_max: Option<RequestId>,
 
+	/// What the peer may make this session hold. On drafts 14 to 16 it also sizes the
+	/// MAX_REQUEST_ID window advertised in our SETUP (see [`ietf::initial_max_request_id`]).
+	pub limits: crate::session::Limits,
+
 	/// Whether we dialed, which sets the request-id parity.
 	pub client: bool,
 
@@ -104,6 +108,7 @@ where
 		mut session,
 		setup,
 		request_id_max,
+		limits,
 		client,
 		publish,
 		subscribe,
@@ -168,7 +173,7 @@ where
 					session.close(SessionError::from(&err).to_code(), "setup stream required");
 					return Err(err);
 				};
-				let control = Control::new(request_id_max, client);
+				let control = Control::new(request_id_max, client).with_window(limits.requests(), client);
 				let adapter = ControlStreamAdapter::new(session.clone(), control.clone(), version);
 
 				let mut publisher = Publisher::new(
@@ -183,8 +188,9 @@ where
 				let (tasks, mut task_set) = TaskSet::new();
 				publisher.withdrawal = withdrawing.clone();
 				publisher.owed = serving.clone();
+				publisher.subscriptions = crate::session::Slots::new(limits.subscriptions);
 
-				let subscriber = Subscriber::new(
+				let mut subscriber = Subscriber::new(
 					runtime.clone(),
 					adapter.clone(),
 					subscribe,
@@ -197,6 +203,7 @@ where
 					tasks.clone(),
 					goaway.going_away.clone(),
 				);
+				subscriber.announces = crate::session::Slots::new(limits.announces);
 
 				// GOAWAY send task: draft-14-16 carry GOAWAY on the shared control
 				// stream. Parked on the drain trigger; races the transport close so
@@ -351,8 +358,9 @@ where
 				let (tasks, mut task_set) = TaskSet::new();
 				publisher.withdrawal = withdrawing.clone();
 				publisher.owed = serving.clone();
+				publisher.subscriptions = crate::session::Slots::new(limits.subscriptions);
 
-				let subscriber = Subscriber::new(
+				let mut subscriber = Subscriber::new(
 					runtime.clone(),
 					session.clone(),
 					subscribe,
@@ -365,6 +373,7 @@ where
 					tasks,
 					goaway.going_away.clone(),
 				);
+				subscriber.announces = crate::session::Slots::new(limits.announces);
 
 				let sub_ns_session = session.clone();
 				let sub_ns = subscriber.clone();
@@ -1007,6 +1016,21 @@ where
 		match id {
 			// Publisher handles: Subscribe, Fetch, SubscribeNamespace (0x50 modern /
 			// 0x11 legacy), SubscribeTracks, TrackStatus
+			// Draft-16 moved SUBSCRIBE_NAMESPACE to its own stream, past the control stream
+			// that admits every other request, but it still takes a request ID from the
+			// MAX_REQUEST_ID window. Held until the request ends, like the rest.
+			ietf::SubscribeNamespaceLegacy::ID if version == Version::Draft16 => {
+				let request_id = RequestId::decode(&mut data.clone(), version)?;
+				let permit = publisher.control.accept(request_id)?;
+				let task = publisher.handle_stream(id, data, stream)?;
+				tasks.push(
+					async move {
+						let _permit = permit;
+						task.await
+					}
+					.maybe_boxed(),
+				);
+			}
 			ietf::Subscribe::ID
 			| ietf::Fetch::ID
 			| ietf::SubscribeNamespace::ID
@@ -1149,6 +1173,7 @@ mod tests {
 			session,
 			setup: None,
 			request_id_max: None,
+			limits: Default::default(),
 			client: true,
 			publish: None,
 			subscribe: Some(origin),
@@ -1209,6 +1234,7 @@ mod tests {
 			session,
 			setup: None,
 			request_id_max: None,
+			limits: Default::default(),
 			client: true,
 			publish: None,
 			subscribe: Some(scoped),
@@ -1262,6 +1288,7 @@ mod tests {
 			session,
 			setup: None,
 			request_id_max: None,
+			limits: Default::default(),
 			client: true,
 			publish: Some(origin.consume()),
 			subscribe: None,
@@ -1371,6 +1398,7 @@ mod tests {
 			session,
 			setup: None,
 			request_id_max: None,
+			limits: Default::default(),
 			client: true,
 			publish: None,
 			subscribe: Some(origin),
@@ -1412,6 +1440,7 @@ mod tests {
 				session,
 				setup: None,
 				request_id_max: None,
+				limits: Default::default(),
 				client: true,
 				publish: None,
 				subscribe: None,
@@ -1695,6 +1724,7 @@ mod tests {
 					session,
 					setup: None,
 					request_id_max: None,
+					limits: Default::default(),
 					client: false,
 					publish: None,
 					subscribe: None,
@@ -1798,6 +1828,7 @@ mod tests {
 			session,
 			setup: Some(setup),
 			request_id_max: None,
+			limits: Default::default(),
 			client: true,
 			publish: None,
 			subscribe: Some(origin),

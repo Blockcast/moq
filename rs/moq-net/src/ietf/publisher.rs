@@ -315,7 +315,7 @@ pub(super) struct Publisher<S: crate::transport::poll::Session> {
 	session: S,
 	// Traffic stats are attributed through this tagged origin handle.
 	origin: origin::Consumer,
-	control: Control,
+	pub(super) control: Control,
 	// Our own Hop ID, stamped onto every advertisement we forward. Taken from the
 	// origin we consume so it matches the local relay identity across every session,
 	// which is what makes cross-session loop detection work.
@@ -332,6 +332,8 @@ pub(super) struct Publisher<S: crate::transport::poll::Session> {
 	version: Version,
 	// Dispatched finite serves, including those not yet polled.
 	pub(super) owed: Arc<AtomicUsize>,
+	// Subscriptions the peer may hold at once (`session::Limits::subscriptions`).
+	pub(super) subscriptions: crate::session::Slots,
 }
 
 struct Serve(Arc<AtomicUsize>);
@@ -397,6 +399,7 @@ where
 			joins: Default::default(),
 			version,
 			owed: Default::default(),
+			subscriptions: Default::default(),
 		}
 	}
 
@@ -607,6 +610,11 @@ where
 					.reject_subscribe(stream, request_id, &Error::Unsupported, "range filters not supported")
 					.await;
 			}
+			// Held for the life of the subscription.
+			let _slot = match self.subscriptions.acquire() {
+				Ok(slot) => slot,
+				Err(err) => return self.reject_subscribe(stream, request_id, &err, "too many subscriptions").await,
+			};
 
 			// Stats (subscriptions, viewer refcount, groups/frames/bytes) are counted in
 			// the model, through the tagged `origin::Consumer` the broadcast resolves from.

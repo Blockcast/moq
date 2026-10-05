@@ -169,6 +169,9 @@ pub struct Config<S: crate::transport::poll::Session> {
 	/// gated on the client's path via [`accept_setup`]). Seeds the peer-setup slot so
 	/// the Setup Stream isn't expected again. `None` reads it from the wire as usual.
 	pub peer_setup: Option<AcceptedSetup<S>>,
+
+	/// What the peer may make this session hold.
+	pub limits: crate::session::Limits,
 }
 
 /// Start a lite session.
@@ -188,6 +191,7 @@ where
 		version,
 		mut our_setup,
 		peer_setup,
+		limits,
 	} = config;
 
 	let recv_bw = bandwidth::Producer::new();
@@ -258,8 +262,9 @@ where
 		peer_setup: peer_setup.clone(),
 		goaway: goaway.clone(),
 		peer_hop,
+		subscriptions: crate::session::Slots::new(limits.subscriptions),
 	});
-	let subscriber = Subscriber::new(SubscriberConfig {
+	let mut subscriber = Subscriber::new(SubscriberConfig {
 		runtime: runtime.clone(),
 		session: session.clone(),
 		origin: subscribe,
@@ -273,6 +278,7 @@ where
 		cost: our_cost,
 		going_away: goaway.going_away.clone(),
 	});
+	subscriber.announces = crate::session::Slots::new(limits.announces);
 
 	let driver = Driver {
 		local_close: Default::default(),
@@ -666,6 +672,7 @@ mod tests {
 					version,
 					our_setup: Setup::default(),
 					peer_setup: None,
+					limits: Default::default(),
 				})
 				.unwrap();
 				let _ = started.driver.poll(&kio::Waiter::noop());
@@ -699,6 +706,7 @@ mod tests {
 				version,
 				our_setup: Setup::default(),
 				peer_setup: None,
+				limits: Default::default(),
 			})
 			.unwrap();
 			let _ = started.driver.poll(&kio::Waiter::noop());

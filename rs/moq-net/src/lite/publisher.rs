@@ -40,6 +40,8 @@ pub(super) struct PublisherConfig<S: crate::transport::poll::Session> {
 	/// The origin (hop) id assigned to the peer, used whenever the peer doesn't
 	/// declare one itself. See `Client::with_peer_hop`.
 	pub peer_hop: Option<Hop>,
+	/// Subscriptions the peer may hold at once (`session::Limits::subscriptions`).
+	pub subscriptions: crate::session::Slots,
 }
 
 /// Context shared by every control-stream child.
@@ -65,6 +67,7 @@ struct Shared<S: crate::transport::poll::Session> {
 	goaway: crate::goaway::Protocol,
 	// Control streams still serving the peer data, which a draining close waits for.
 	owed: AtomicUsize,
+	subscriptions: crate::session::Slots,
 }
 
 /// Largest millisecond duration every implementation can carry losslessly.
@@ -168,6 +171,7 @@ impl<S: crate::transport::poll::Session> Publisher<S> {
 				version: config.version,
 				goaway: config.goaway,
 				owed: AtomicUsize::new(0),
+				subscriptions: config.subscriptions,
 			}),
 			runtime: config.runtime,
 			accept,
@@ -191,6 +195,7 @@ where
 						shared: self.shared.clone(),
 						runtime: self.runtime.clone(),
 						state: ControlState::Start { stream },
+						_slot: None,
 					});
 				}
 				Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
@@ -235,6 +240,8 @@ struct Control<S: crate::transport::poll::Session> {
 	// Handed to the children that arm timers (PROBE, announce linger).
 	runtime: crate::time::Clock,
 	state: ControlState<S>,
+	// A subscription's place under the session's cap, held until the stream ends.
+	_slot: Option<crate::session::Slot>,
 }
 
 // A state machine's enum is its storage: one transient instance per stream, so the
@@ -298,9 +305,19 @@ impl<S: crate::transport::poll::Session> Control<S> {
 						lite::ControlType::Announce => {
 							ControlState::Announce(AnnounceServe::new(self.shared.clone(), stream))
 						}
-						lite::ControlType::Subscribe => {
-							ControlState::Subscribe(RequestServe::new(self.shared.clone(), stream))
-						}
+						lite::ControlType::Subscribe => match self.shared.subscriptions.acquire() {
+							Ok(slot) => {
+								self._slot = Some(slot);
+								ControlState::Subscribe(RequestServe::new(self.shared.clone(), stream))
+							}
+							// Refused on its own stream: the session and its other requests carry on.
+							Err(err) => {
+								let Stream { writer, mut reader } = stream;
+								reader.abort(&err);
+								writer.abort(&err);
+								return Poll::Ready(Err(err));
+							}
+						},
 						// The Track Stream and FETCH are lite-05+ only.
 						lite::ControlType::Fetch | lite::ControlType::Track
 							if !self.shared.version.has_track_stream() =>
@@ -3633,6 +3650,7 @@ mod tests {
 			peer_setup,
 			goaway,
 			peer_hop: Some(assigned),
+			subscriptions: Default::default(),
 		});
 
 		let serving = kio::wait(|waiter| publisher.shared.poll_serving_origin(waiter)).await;
@@ -3794,6 +3812,7 @@ mod tests {
 			peer_setup: crate::lite::PeerSetup::default(),
 			goaway,
 			peer_hop: None,
+			subscriptions: Default::default(),
 		});
 		ProbeServe::new(publisher.shared.clone(), publisher.runtime.clone(), stream)
 	}
@@ -3966,6 +3985,7 @@ mod tests {
 			peer_setup,
 			goaway,
 			peer_hop: None,
+			subscriptions: Default::default(),
 		});
 
 		let mut script = Vec::new();
@@ -4081,6 +4101,7 @@ mod tests {
 			peer_setup,
 			goaway,
 			peer_hop: None,
+			subscriptions: Default::default(),
 		});
 
 		let mut script = Vec::new();

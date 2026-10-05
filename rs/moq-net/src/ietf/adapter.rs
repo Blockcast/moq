@@ -12,7 +12,7 @@ use crate::{
 	ietf::{self, RequestId},
 };
 
-use super::{Control, Message, Version};
+use super::{Control, Message, Version, control::RequestPermit};
 
 // === Message Queues ===
 
@@ -120,6 +120,9 @@ pub struct VirtualRecvStream {
 	/// The request this stream serves, known up front when the peer opened it and
 	/// filled in by the first write when we did.
 	request_id: Arc<Mutex<Option<RequestId>>>,
+	/// Holds the peer's request open against our MAX_REQUEST_ID window until the
+	/// handler drops this stream. Only on a stream the peer opened.
+	_permit: Option<RequestPermit>,
 }
 
 impl VirtualRecvStream {
@@ -131,6 +134,7 @@ impl VirtualRecvStream {
 			park: kio::Park::default(),
 			shared: Arc::downgrade(&shared),
 			request_id,
+			_permit: None,
 		}
 	}
 
@@ -666,14 +670,20 @@ impl Shared {
 	}
 
 	/// Register the peer's new request and queue its stream for accept_bi.
-	fn open_incoming(self: &Arc<Self>, request_id: RequestId, raw: Bytes) -> Result<(), Error> {
+	fn open_incoming(
+		self: &Arc<Self>,
+		request_id: RequestId,
+		raw: Bytes,
+		permit: Option<RequestPermit>,
+	) -> Result<(), Error> {
 		let follow = Queue::new();
-		let recv = VirtualRecvStream::new(
+		let mut recv = VirtualRecvStream::new(
 			raw,
 			follow.clone(),
 			Arc::clone(self),
 			Arc::new(Mutex::new(Some(request_id))),
 		);
+		recv._permit = permit;
 		let send = VirtualSendStream::new(self.control.clone());
 		self.streams.lock().unwrap().insert(request_id, follow.writer());
 		if !self.incoming.push((send, recv)) {
@@ -751,6 +761,10 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 				if let Poll::Ready(res) = waiter.poll_future(read.as_mut()) {
 					return Poll::Ready(res);
 				}
+				// Queued before the write drains, so a grant goes out in the same turn.
+				while let Poll::Ready(max) = self.control.poll_grant(waiter) {
+					self.send_max_request_id(max);
+				}
 				if let Poll::Ready(res) = waiter.poll_future(write.as_mut()) {
 					return Poll::Ready(res);
 				}
@@ -805,6 +819,21 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 		}
 	}
 
+	/// Queue a MAX_REQUEST_ID granting the peer room up to `max`.
+	fn send_max_request_id(&self, max: RequestId) {
+		let mut raw = BytesMut::new();
+		let msg = ietf::MaxRequestId { request_id: max };
+		if let Err(err) = ietf::MaxRequestId::ID
+			.encode(&mut raw, self.version)
+			.and_then(|()| msg.encode(&mut raw, self.version))
+		{
+			tracing::warn!(%err, "failed to encode MAX_REQUEST_ID");
+			return;
+		}
+		// A closed control stream means the session is ending; there is no one to grant.
+		let _ = self.shared.control.push(raw.freeze());
+	}
+
 	/// Writer task: drains the queue and writes to the control stream.
 	async fn run_write(&self, mut writer: Writer<S::SendStream, Version>) -> Result<(), Error> {
 		while let Some(msg) = self.shared.control.pop().await {
@@ -835,8 +864,17 @@ impl<S: crate::transport::poll::Session> ControlStreamAdapter<S> {
 
 			// Classify and route
 			match classify(type_id, &body, self.version, &self.shared.namespaces)? {
-				Route::NewRequest(request_id) => self.shared.open_incoming(request_id, raw)?,
-				Route::Response(request_id) | Route::FollowUp(request_id) => self.shared.push(request_id, raw),
+				Route::NewRequest(request_id) => {
+					let permit = self.control.accept(request_id)?;
+					self.shared.open_incoming(request_id, raw, permit)?
+				}
+				Route::Response(request_id) => self.shared.push(request_id, raw),
+				Route::FollowUp(request_id) => {
+					// SUBSCRIBE_UPDATE takes a request ID of its own (draft-14 section 9.1),
+					// done as soon as it is delivered, so it is granted straight back.
+					drop(self.control.accept(request_id)?);
+					self.shared.push(request_id, raw)
+				}
 				Route::CloseStream(request_id) => self.shared.close(request_id, raw),
 				Route::MaxRequestId(max) => self.control.max_request_id(max),
 				Route::Ignore => {}
@@ -1044,7 +1082,9 @@ fn classify(type_id: u64, body: &Bytes, version: Version, namespaces: &Namespace
 			let id = decode_request_id(body, version)?;
 			Ok(Route::MaxRequestId(id))
 		}
-		ietf::RequestsBlocked::ID => Err(Error::UnexpectedMessage),
+		// The peer reached the MAX_REQUEST_ID we advertised and waits for a grant, which
+		// follows on its own as its requests close.
+		ietf::RequestsBlocked::ID => Ok(Route::Ignore),
 
 		// Terminal
 		ietf::GoAway::ID => Ok(Route::GoAway),
@@ -1453,7 +1493,7 @@ mod tests {
 		)
 		.unwrap();
 		assert!(matches!(route, Route::NewRequest(id) if id == request_id));
-		shared.open_incoming(request_id, encode_msg(&msg, version)).unwrap();
+		shared.open_incoming(request_id, encode_msg(&msg, version), None).unwrap();
 
 		let (_, mut recv) = shared.incoming.pop().await.unwrap();
 
@@ -1729,7 +1769,7 @@ mod tests {
 	fn queued_incoming_stream_does_not_keep_shared_alive() {
 		let shared = Arc::new(Shared::default());
 		let weak = Arc::downgrade(&shared);
-		shared.open_incoming(RequestId(7), Bytes::new()).unwrap();
+		shared.open_incoming(RequestId(7), Bytes::new(), None).unwrap();
 		drop(shared);
 		assert!(weak.upgrade().is_none());
 	}

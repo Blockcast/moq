@@ -508,6 +508,9 @@ struct BroadcastState {
 	// One minted source per requested path under the namespace, each closed
 	// when its guard drops.
 	sources: HashMap<PathOwned, crate::model::broadcast::SourceGuard>,
+
+	// Counts this namespace against the session's announce cap until it is retracted.
+	_slot: crate::session::Slot,
 }
 
 /// What one advertisement said, once its parameters are resolved against the session.
@@ -555,6 +558,8 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	going_away: crate::goaway::GoingAway,
 	// What this session may allocate up front for objects still arriving.
 	frames: frame::Budget,
+	// Namespaces the peer may have announced at once (`session::Limits::announces`).
+	pub(super) announces: crate::session::Slots,
 }
 
 /// The prefixes to issue SUBSCRIBE_NAMESPACE for: `origin`'s permitted scope,
@@ -662,6 +667,7 @@ where
 			version,
 			going_away,
 			frames: Default::default(),
+			announces: Default::default(),
 		}
 	}
 
@@ -1552,6 +1558,8 @@ where
 				Ok(())
 			}
 			Entry::Vacant(entry) => {
+				// Refused past the session's cap, as the request that asked for it.
+				let slot = self.announces.acquire()?;
 				// Propagates Error::Unauthorized if the namespace is out of scope.
 				let dynamic = self.origin.dynamic(&path, route.clone())?;
 
@@ -1560,6 +1568,7 @@ where
 					dynamic,
 					count: 1,
 					sources: HashMap::new(),
+					_slot: slot,
 				});
 
 				tracing::debug!(route = %self.origin.absolute(&path), "announce");
