@@ -20,6 +20,7 @@ use super::{Datagram, Requests};
 
 use super::Cap;
 pub use super::subscription::{Position, Subscription};
+pub use super::timing::track::{Timed, Timing, Untimed};
 
 use std::{
 	collections::{BTreeMap, VecDeque},
@@ -87,13 +88,14 @@ pub(crate) const IDLE_LINGER: Duration = Duration::from_secs(30);
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Info {
-	/// Units per second for per-frame timestamps on this track.
+	/// Units per second for per-frame timestamps, or `None` for an untimed track.
 	///
-	/// Every track is timed; this defaults to [`Timescale::MILLI`]. On Lite05+ it is
-	/// reported in TRACK_INFO and the publisher zigzag-delta encodes per-frame
-	/// timestamps at this scale on the wire. Protocols whose wire can't carry it
-	/// (pre-Lite05 moq-lite, IETF moq-transport) fall back to local monotonic milliseconds.
-	pub timescale: Timescale,
+	/// Timedness is a property of the whole track: a timed track stamps every frame and
+	/// datagram, an untimed one stamps none. Defaults to `None`, so a publisher opts into
+	/// timing. A receiver learns it when the track is accepted: TRACK_INFO on Lite05+, the
+	/// TIMESCALE property on moq-transport. Wires that can't declare it (pre-Lite05,
+	/// IETF drafts 14-16) arrive untimed.
+	pub timescale: Option<Timescale>,
 	/// How far behind the live edge a group may fall, in media timestamps, before it
 	/// is stale. The newest group is always retained.
 	///
@@ -125,7 +127,7 @@ pub struct Info {
 impl Default for Info {
 	fn default() -> Self {
 		Self {
-			timescale: Timescale::default(),
+			timescale: None,
 			max_age: None,
 			priority: DEFAULT_PRIORITY,
 		}
@@ -133,13 +135,21 @@ impl Default for Info {
 }
 
 impl Info {
-	/// Set the per-frame timestamp scale, returning `self` for chaining.
-	///
-	/// Defaults to [`Timescale::MILLI`]. On Lite05+ this scale is reported in TRACK_INFO
-	/// and used to encode per-frame timestamps on the wire.
-	pub fn with_timescale(mut self, timescale: Timescale) -> Self {
-		self.timescale = timescale;
+	/// Make the track timed at `timescale`, returning `self` for chaining.
+	pub fn with_timescale(mut self, timescale: impl Into<Option<Timescale>>) -> Self {
+		self.timescale = timescale.into();
 		self
+	}
+
+	/// The scale frames are stored and encoded at: the track's own, or milliseconds
+	/// for an untimed track.
+	//
+	// Mock-up stand-in: the untyped handles still store a timestamp on every frame, so
+	// an untimed track keeps a send-time stamp internally (what Lite05/06 put on the
+	// wire anyway). Typed readers never see it. #4822's internal `Option<Timestamp>`
+	// replaces this.
+	pub(crate) fn scale(&self) -> Timescale {
+		self.timescale.unwrap_or(Timescale::MILLI)
 	}
 
 	/// Set how old a non-latest group may get before eviction, returning `self` for chaining.
@@ -1380,6 +1390,11 @@ impl Producer {
 		&self.name
 	}
 
+	/// The properties this track was created with.
+	pub(crate) fn info(&self) -> &Info {
+		&self.info
+	}
+
 	/// The parent broadcast this track belongs to.
 	pub fn broadcast(&self) -> &broadcast::Info {
 		&self.broadcast
@@ -1445,7 +1460,7 @@ impl Producer {
 		let meter = self.stats.meter();
 		let mut state = self.modify()?;
 		// Normalize into the track's timescale, like frames (see `group::Producer::create_frame`).
-		let timescale = state.info.as_ref().unwrap().timescale;
+		let timescale = state.info.as_ref().unwrap().scale();
 		let timestamp = timestamp.convert(timescale).map_err(|_| Error::TimestampMismatch)?;
 		let sequence = match state.max_sequence {
 			Some(s) => s.checked_add(1).ok_or(coding::BoundsExceeded)?,
@@ -1488,7 +1503,7 @@ impl Producer {
 		let meter = self.stats.meter();
 		let mut state = self.modify()?;
 		// Normalize into the track's timescale, like frames (see `group::Producer::create_frame`).
-		let timescale = state.info.as_ref().unwrap().timescale;
+		let timescale = state.info.as_ref().unwrap().scale();
 		let timestamp = timestamp.convert(timescale).map_err(|_| Error::TimestampMismatch)?;
 		if let Some(fin) = state.final_sequence
 			&& sequence >= fin

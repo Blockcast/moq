@@ -1996,8 +1996,9 @@ where
 			priority,
 			largest,
 		} = accepted;
+		// Untimed unless SUBSCRIBE_OK declared a TIMESCALE.
 		let info = track::Info::default()
-			.with_timescale(Timescale::MICRO)
+			.with_timescale(timescale)
 			.with_max_age(max_age)
 			.with_priority(super::priority::from_wire(priority.unwrap_or(128)));
 		let (mut track, dynamic) = match resumed {
@@ -3504,7 +3505,7 @@ where
 		// have set it. FETCH_OK carries the same Track Properties, so the retention window
 		// comes from it.
 		let info = track::Info::default()
-			.with_timescale(Timescale::MICRO)
+			.with_timescale(ok.properties.timescale)
 			.with_max_age(ok.properties.max_cache_duration);
 		// Joined fetches still count until they pick the accepted group up from the cache.
 		let joined = request.result.clone();

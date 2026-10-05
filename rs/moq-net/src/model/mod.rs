@@ -22,6 +22,7 @@ mod resume;
 mod subscription;
 mod time;
 mod timed;
+mod timing;
 mod weak_cache;
 
 #[cfg(test)]

@@ -26,6 +26,8 @@ use std::task::{Poll, ready};
 
 use crate::{Error, IntoBytes, Result, Timestamp};
 
+pub use super::timing::group::{Timed, Untimed};
+
 /// Maximum total size of frames in a group.
 ///
 /// A write that would exceed this aborts the group with [`Error::GroupTooLarge`].
@@ -461,9 +463,9 @@ impl Producer {
 		self.info
 	}
 
-	/// The parent track's timescale.
+	/// The scale this group's frame timestamps are stored at; milliseconds on an untimed track.
 	pub fn timescale(&self) -> Timescale {
-		self.track.timescale
+		self.track.scale()
 	}
 
 	/// Start the group at frame `index` rather than 0, so the first frame written lands
@@ -506,7 +508,7 @@ impl Producer {
 	/// a presentation time, pass [`Timestamp::now`] explicitly.
 	pub fn write_frame<B: IntoBytes>(&mut self, timestamp: Timestamp, data: B) -> Result<()> {
 		let timestamp = timestamp
-			.convert(self.track.timescale)
+			.convert(self.track.scale())
 			.map_err(|_| Error::TimestampMismatch)?;
 		let payload = data.into_bytes();
 		if payload.len() as u64 > MAX_CACHE_BYTES {
@@ -561,7 +563,7 @@ impl Producer {
 		for frame in frames.filled() {
 			frame
 				.timestamp
-				.convert(self.track.timescale)
+				.convert(self.track.scale())
 				.map_err(|_| Error::TimestampMismatch)?;
 			if frame.payload.len() as u64 > MAX_CACHE_BYTES {
 				return Err(Error::FrameTooLarge);
@@ -590,7 +592,7 @@ impl Producer {
 		for mut frame in frames.drain() {
 			frame.timestamp = frame
 				.timestamp
-				.convert(self.track.timescale)
+				.convert(self.track.scale())
 				.expect("timestamp scale checked above");
 			let size = frame.payload.len() as u64;
 			state.cache += size;
@@ -654,7 +656,7 @@ impl Producer {
 	fn open_frame(&mut self, frame: frame::Info, buf: &FrameBuf) -> Result<frame::Info> {
 		let timestamp = frame
 			.timestamp
-			.convert(self.track.timescale)
+			.convert(self.track.scale())
 			.map_err(|_| Error::TimestampMismatch)?;
 		if frame.size > MAX_CACHE_BYTES {
 			return Err(Error::FrameTooLarge);
@@ -1435,9 +1437,9 @@ impl Consumer {
 		self.cursor.state.poll_closed(waiter)
 	}
 
-	/// The parent track's timescale.
+	/// The scale this group's frame timestamps are stored at; milliseconds on an untimed track.
 	pub fn timescale(&self) -> Timescale {
-		self.track.timescale
+		self.track.scale()
 	}
 
 	/// The index of the next frame this consumer will return.

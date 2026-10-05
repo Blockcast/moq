@@ -3876,7 +3876,7 @@ impl<S: crate::transport::poll::Session> kio::Task for TrackServeRun<S> {
 							// Lite05 carries per-frame timestamps on the wire at this scale;
 							// `Some` tells the ingest to decode them instead of stamping
 							// local receive time.
-							let timescale = Some(info.timescale);
+							let timescale = info.timescale;
 							self.state = TrackRunState::Serve(ServeLoop::new(&self.serve, request, info, timescale));
 						}
 						Err(err) => {

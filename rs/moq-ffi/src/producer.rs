@@ -65,7 +65,7 @@ impl TryFrom<&moq_net::track::Info> for MoqTrackInfo {
 		Ok(Self {
 			priority: info.priority,
 			max_age_us,
-			timescale: Some(info.timescale.as_u64()),
+			timescale: info.timescale.map(|scale| scale.as_u64()),
 		})
 	}
 }

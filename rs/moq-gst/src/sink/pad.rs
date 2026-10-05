@@ -1248,7 +1248,7 @@ mod tests {
 			.subscribe(None)
 			.await
 			.expect("subscribe to the opaque track");
-		assert_eq!(subscriber.info().timescale, moq_net::Timescale::MICRO);
+		assert_eq!(subscriber.info().timescale, Some(moq_net::Timescale::MICRO));
 		assert_eq!(
 			subscriber.info().max_age,
 			Some(std::time::Duration::from_secs(5)),

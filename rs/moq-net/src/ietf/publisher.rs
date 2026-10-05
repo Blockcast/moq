@@ -671,7 +671,7 @@ where
 				None => track::Position::after_group(end.group),
 			});
 			let _ = track.update(subscription);
-			let timescale = msg.properties_wanted.then(|| track.info().timescale);
+			let timescale = track.info().timescale.filter(|_| msg.properties_wanted);
 
 			// Draft-20 replaced joining FETCH with subscription fills. Older drafts save
 			// the same boundary used by the subscription so the two streams never overlap.
@@ -716,7 +716,7 @@ where
 						// We serve the newest group first, matching moq-lite.
 						true => ietf::Properties {
 							max_cache_duration: track.info().max_age,
-							timescale: Some(track.info().timescale),
+							timescale: track.info().timescale,
 							priority: Some(super::priority::to_wire(track.info().priority)),
 							group_order: Some(GroupOrder::Descending),
 						},
@@ -3279,7 +3279,9 @@ mod serve_tests {
 	fn serve(version: Version) -> Serve {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
-		let track = broadcast.create_track("video", None).unwrap();
+		// Timed, so served objects carry a Timestamp.
+		let info = track::Info::default().with_timescale(crate::Timescale::MILLI);
+		let track = broadcast.create_track("video", info).unwrap();
 
 		let session = ScriptedSession::per_stream(vec![Vec::new()]);
 		let log = session.log.clone();

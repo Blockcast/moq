@@ -190,7 +190,7 @@ mod test {
 	/// allocating 32 MB to provoke it. Borrowed from moq-json's stream tests.
 	fn rejecting_track() -> moq_net::track::Producer {
 		let mut info = moq_net::track::Info::default();
-		info.timescale = moq_net::Timescale::new((1u64 << 62) - 1).unwrap();
+		info.timescale = Some(moq_net::Timescale::new((1u64 << 62) - 1).unwrap());
 
 		moq_net::broadcast::Info::new()
 			.produce()

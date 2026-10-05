@@ -1202,7 +1202,7 @@ impl<S: crate::transport::poll::Session> Request<S> for TrackInfoServe {
 		writer.buffer(&lite::TrackInfo {
 			priority: info.priority,
 			max_age: info.max_age,
-			timescale: info.timescale,
+			timescale: info.scale(),
 		})?;
 		Poll::Ready(Ok(ControlFlow::Break(())))
 	}
@@ -1295,7 +1295,7 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 					// "don't emit the prefix" (the frames still carry timestamps in the
 					// model, just not on this wire).
 					let timescale = if shared.version.has_track_stream() {
-						Some(track.info().timescale)
+						Some(track.info().scale())
 					} else {
 						None
 					};
