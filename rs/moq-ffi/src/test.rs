@@ -5015,7 +5015,16 @@ async fn shutdown_pair() -> (Arc<MoqServer>, Arc<MoqSession>, Arc<MoqSession>) {
 	.unwrap();
 	let addr = server.listen().await.unwrap();
 	let accepting = server.clone();
-	let accepted = tokio::spawn(async move { accepting.accept().await.unwrap().unwrap().accept().await.unwrap() });
+	let accepted = tokio::spawn(async move {
+		accepting
+			.accept()
+			.await
+			.unwrap()
+			.unwrap()
+			.accept(None, None)
+			.await
+			.unwrap()
+	});
 	let client = MoqClient::new(MoqClientConfig {
 		tls: insecure_tls(),
 		bind: Some("127.0.0.1:0".into()),
