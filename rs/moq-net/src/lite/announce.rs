@@ -3,7 +3,10 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use crate::{Hop, Hops, Path, coding::*, origin::Cost};
 
-use super::{Message, Version, message::decode_size};
+use super::{
+	Message, Version,
+	message::{MAX_MESSAGE_SIZE, decode_size},
+};
 
 // lite-06 announce message types: an outer discriminator carried before the length
 // prefix, so each announcement is an independently-typed, length-delimited message
@@ -240,6 +243,10 @@ impl Encode<Version> for AnnounceBroadcast<'_> {
 				// Decode-only: an unknown type is never sent.
 				Self::Skipped => return Err(EncodeError::Unsupported),
 			};
+			// Never emit a body our own receiver would refuse.
+			if body.len() > MAX_MESSAGE_SIZE {
+				return Err(EncodeError::TooLarge);
+			}
 			typ.encode(w, version)?;
 			(body.len() as u64).encode(w, version)?;
 			w.put_slice(&body);
@@ -270,6 +277,9 @@ impl Encode<Version> for AnnounceBroadcast<'_> {
 				return Err(EncodeError::Version);
 			}
 		}
+		if body.len() > MAX_MESSAGE_SIZE {
+			return Err(EncodeError::TooLarge);
+		}
 		(body.len() as u64).encode(w, version)?;
 		w.put_slice(&body);
 		Ok(())
@@ -281,7 +291,7 @@ impl Decode<Version> for AnnounceBroadcast<'_> {
 		if version.has_announce_id() {
 			// Lite06+: outer type, then a size-prefixed body decoded within its bounds.
 			let typ = u64::decode(buf, version)?;
-			let size = decode_size(buf, version)?;
+			let size = decode_size(buf, version, MAX_MESSAGE_SIZE)?;
 			if buf.remaining() < size {
 				return Err(DecodeError::Short);
 			}
@@ -315,7 +325,7 @@ impl Decode<Version> for AnnounceBroadcast<'_> {
 		}
 
 		// Older versions: a single size-prefixed ANNOUNCE_BROADCAST with an inner status.
-		let size = decode_size(buf, version)?;
+		let size = decode_size(buf, version, MAX_MESSAGE_SIZE)?;
 		if buf.remaining() < size {
 			return Err(DecodeError::Short);
 		}
@@ -461,6 +471,10 @@ pub struct AnnounceInit<'a> {
 }
 
 impl Message for AnnounceInit<'_> {
+	// The whole initial set in one message, so it scales with the peer's broadcasts.
+	// Lite01/02 only; every later version streams the set as separate announces.
+	const MAX_SIZE: usize = 64 * 1024 * 1024;
+
 	fn decode_msg<R: bytes::Buf>(r: &mut R, version: Version) -> Result<Self, DecodeError> {
 		match version {
 			Version::Lite01 | Version::Lite02 => {}

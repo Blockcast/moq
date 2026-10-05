@@ -637,7 +637,13 @@ impl Decode<Version> for FetchObject {
 		};
 
 		let properties = match flags & flag::PROPERTIES != 0 {
-			true => Some(Vec::<u8>::decode(buf, version)?),
+			true => {
+				let super::group::ObjectExtensionsLength(size) = super::group::ObjectExtensionsLength::decode(buf, version)?;
+				if buf.remaining() < size {
+					return Err(DecodeError::Short);
+				}
+				Some(buf.copy_to_bytes(size).to_vec())
+			}
 			false => None,
 		};
 
@@ -1019,6 +1025,20 @@ mod object_tests {
 		assert!(!bytes.has_remaining(), "the object header is fully consumed");
 
 		(buf.to_vec(), decoded)
+	}
+
+	/// A fetch stream is read until a whole object header has arrived, so a properties
+	/// length the peer declares is refused at its prefix rather than buffered.
+	#[test]
+	fn oversized_properties_are_refused_at_the_prefix() {
+		let mut wire = BytesMut::new();
+		flag::PROPERTIES.encode(&mut wire, VERSION).unwrap();
+		((super::super::group::MAX_OBJECT_EXTENSIONS + 1) as u64)
+			.encode(&mut wire, VERSION)
+			.unwrap();
+
+		let err = FetchObject::decode(&mut wire.freeze(), VERSION).unwrap_err();
+		assert!(matches!(err, DecodeError::MessageTooLarge { .. }), "{err:?}");
 	}
 
 	/// The first Object carries absolute IDs and a priority, because "same as the prior

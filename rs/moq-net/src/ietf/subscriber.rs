@@ -14,7 +14,7 @@ use crate::{
 	util::{MaybeBoxedExt, MaybeSendBox, TaskSet, Tasks},
 };
 
-use super::{Message, Version, cluster, error::request, peer};
+use super::{Message, Version, cluster, error::request, group::ObjectExtensionsLength, peer};
 use crate::tail::{Reading, Settle, Tail};
 
 use kio::Lock;
@@ -2799,25 +2799,6 @@ const END_OF_GROUP: u64 = 0x3;
 /// Object status: no object at or past this location exists (every implemented draft).
 const END_OF_TRACK: u64 = 0x4;
 
-// Implementation limit for object extension blocks, independent of the IETF draft.
-const MAX_OBJECT_EXTENSIONS: usize = 64 * 1024;
-
-#[derive(Debug)]
-struct ObjectExtensionsLength(usize);
-
-impl Decode<Version> for ObjectExtensionsLength {
-	fn decode<B: bytes::Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
-		let size = usize::decode(buf, version)?;
-		if size > MAX_OBJECT_EXTENSIONS {
-			return Err(DecodeError::MessageTooLarge {
-				size,
-				max: MAX_OBJECT_EXTENSIONS,
-			});
-		}
-		Ok(Self(size))
-	}
-}
-
 /// The start of a subgroup stream's first object, peeked before its group is created.
 #[derive(Debug, Clone, Copy)]
 struct FirstObject {
@@ -3781,7 +3762,8 @@ async fn decode_fetch_object<R: crate::transport::poll::RecvStream>(
 		let subgroup: u64 = stream.decode().await?;
 		let object: u64 = stream.decode().await?;
 		let _priority: u8 = stream.decode().await?;
-		let properties: Vec<u8> = stream.decode().await?;
+		let ObjectExtensionsLength(size) = stream.decode().await?;
+		let properties = stream.read_exact(size).await?.to_vec();
 		return Ok(Some(FetchedObject {
 			group: Some(group),
 			object: Some(object),
@@ -4040,6 +4022,38 @@ mod tests {
 		} else {
 			assert!(matches!(result, Err(Error::ProtocolViolation)));
 		}
+	}
+
+	/// Draft-14 frames a fetch object's properties with a bare length, which is refused at
+	/// the prefix rather than buffered while the peer trickles the rest in.
+	#[tokio::test]
+	async fn draft14_fetch_properties_are_capped() {
+		use crate::coding::Encode;
+		use crate::lite::test_transport::ScriptedSession;
+		use crate::transport::poll::Session as _;
+		use futures::FutureExt as _;
+
+		const VERSION: Version = Version::Draft14;
+		let mut wire = Vec::new();
+		for field in [0u64, 0, 0] {
+			field.encode(&mut wire, VERSION).unwrap();
+		}
+		0u8.encode(&mut wire, VERSION).unwrap();
+		((super::super::group::MAX_OBJECT_EXTENSIONS + 1) as u64)
+			.encode(&mut wire, VERSION)
+			.unwrap();
+
+		let mut session = ScriptedSession::new(wire);
+		let (_, recv) = session.open_bi().await.unwrap();
+		let mut reader = Reader::new(recv, VERSION);
+		let result = decode_fetch_object(&mut reader, VERSION, true)
+			.now_or_never()
+			.expect("refused at the prefix, not parked on the body");
+		assert!(
+			matches!(result, Err(Error::Decode(DecodeError::MessageTooLarge { .. }))),
+			"{:?}",
+			result.err()
+		);
 	}
 
 	fn fin_responses(clean: bool) -> Vec<u8> {

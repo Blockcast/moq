@@ -4,17 +4,16 @@ use crate::coding::{Decode, DecodeError, Encode, EncodeError, Sizer};
 
 use super::Version;
 
-// Match the JavaScript reader's ceiling. Lite control messages are buffered before
-// decoding, so the limit must be checked as soon as their length prefix arrives.
-pub(super) const MAX_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
+// Lite control messages are buffered whole before decoding, so the limit is checked as
+// soon as the length prefix arrives. The same ceiling as SETUP: paths, track names, and
+// hop chains fit with room to spare, and the JavaScript reader matches it.
+pub(super) const MAX_MESSAGE_SIZE: usize = 64 * 1024;
 
-pub(super) fn decode_size<B: Buf>(buf: &mut B, version: Version) -> Result<usize, DecodeError> {
+/// Read a message length prefix, refusing one past `max` before any of the body arrives.
+pub(super) fn decode_size<B: Buf>(buf: &mut B, version: Version, max: usize) -> Result<usize, DecodeError> {
 	let size = usize::decode(buf, version)?;
-	if size > MAX_MESSAGE_SIZE {
-		return Err(DecodeError::MessageTooLarge {
-			size,
-			max: MAX_MESSAGE_SIZE,
-		});
+	if size > max {
+		return Err(DecodeError::MessageTooLarge { size, max });
 	}
 	Ok(size)
 }
@@ -49,13 +48,7 @@ impl<T: Message> Encode<Version> for T {
 
 impl<T: Message> Decode<Version> for T {
 	fn decode<B: Buf>(buf: &mut B, version: Version) -> Result<Self, DecodeError> {
-		let size = decode_size(buf, version)?;
-		if size > Self::MAX_SIZE {
-			return Err(DecodeError::MessageTooLarge {
-				size,
-				max: Self::MAX_SIZE,
-			});
-		}
+		let size = decode_size(buf, version, Self::MAX_SIZE)?;
 
 		if tracing::enabled!(tracing::Level::TRACE) {
 			if buf.remaining() < size {
@@ -138,5 +131,35 @@ mod tests {
 
 		let err = Empty::decode(&mut wire.as_slice(), Version::Lite06).unwrap_err();
 		assert!(matches!(err, DecodeError::Short));
+	}
+
+	/// A peer can no longer make a control stream buffer megabytes: every message past
+	/// the SETUP ceiling is refused at its length prefix, announcements included.
+	#[test]
+	fn control_messages_are_refused_at_the_prefix() {
+		let oversized = |prefix: &[u8]| {
+			let mut wire = prefix.to_vec();
+			((64 * 1024 + 1) as u64).encode(&mut wire, Version::Lite06).unwrap();
+			wire
+		};
+
+		let wire = oversized(&[]);
+		let err = super::super::Subscribe::decode(&mut wire.as_slice(), Version::Lite06).unwrap_err();
+		assert!(matches!(err, DecodeError::MessageTooLarge { .. }), "{err:?}");
+
+		// ANNOUNCE_START: the type, then the length.
+		let wire = oversized(&[0]);
+		let err = super::super::AnnounceBroadcast::decode(&mut wire.as_slice(), Version::Lite06).unwrap_err();
+		assert!(matches!(err, DecodeError::MessageTooLarge { .. }), "{err:?}");
+	}
+
+	/// ANNOUNCE_INIT carries the whole initial set in one message, so it keeps the room
+	/// a large origin needs.
+	#[test]
+	fn announce_init_waits_for_a_large_body() {
+		let mut wire = Vec::new();
+		((1024 * 1024) as u64).encode(&mut wire, Version::Lite02).unwrap();
+		let err = super::super::AnnounceInit::decode(&mut wire.as_slice(), Version::Lite02).unwrap_err();
+		assert!(matches!(err, DecodeError::Short), "{err:?}");
 	}
 }
