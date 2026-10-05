@@ -35,7 +35,12 @@ generate more stats.
 
 At depth 0 the broadcast stays announced for the producer's life. At depth
 1 or more, a group's broadcast is announced while that group has entries and
-unannounced once it has none.
+unannounced once it has none. Group numbers keep increasing across recreated
+tracks, group broadcasts, and restarts; they may have gaps. A producer's first
+group is the wall clock in microseconds, so a clock stepped back across a
+restart parks subscribers until the new run passes their cached groups. A
+recreated compressed track starts a new group with a full snapshot, never a
+delta whose compression state belonged to its previous writer.
 
 ## Tracks
 
