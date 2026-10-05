@@ -1,4 +1,5 @@
 import { describe, expect, mock, spyOn, test } from "bun:test";
+import { u53 } from "@moq/hang/catalog";
 import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
 import { Signal } from "@moq/signals";
@@ -320,24 +321,34 @@ test("passes an explicit Opus DTX request to the encoder", async () => {
 // it, which the catalog advertises as `delay`.
 test("a rendition trailing the broadcast's earliest advertises delay", async () => {
 	using _webcodecs = installFakeWebCodecs();
-	const baseline = new Baseline();
-	using env = await setup(baseline);
-	const { encoder, feed } = env;
+	// A process that has just started reports performance.now() under 100ms, so a capture "100ms ago"
+	// is negative and the frame encoder rejects it. A fixed origin keeps every stamp nonnegative.
+	const clock = spyOn(performance, "now").mockReturnValue(200);
+	try {
+		const baseline = new Baseline();
+		using env = await setup(baseline);
+		const { encoder, feed } = env;
 
-	expect(encoder.out.catalog.peek()?.delay).toBeUndefined();
+		expect(encoder.out.catalog.peek()?.delay).toBeUndefined();
 
-	// A sibling that flushes each frame the instant it is captured.
-	baseline.observe(0, performance.now() * 1000);
+		// A sibling that flushes each frame the instant it is captured.
+		baseline.observe(0, performance.now() * 1000);
 
-	// Captured 100ms ago, so this rendition flushes at least that late.
-	const start = performance.now() * 1000 - 100_000;
-	for (let index = 0; index < 4; index++) {
-		await feed.push({ timestamp: Time.Micro(start + index * 20_000), channels: [new Float32Array(960)] });
+		// Captured 100ms ago, so this rendition flushes at least that late.
+		const start = performance.now() * 1000 - 100_000;
+		for (let index = 0; index < 4; index++) {
+			await feed.push({ timestamp: Time.Micro(start + index * 20_000), channels: [new Float32Array(960)] });
+		}
+		await feed.drain();
+
+		expect(env.written).toEqual([
+			[100_000, 1],
+			[120_000, 1],
+		]);
+		expect(encoder.out.catalog.peek()?.delay).toBe(u53(100));
+	} finally {
+		clock.mockRestore();
 	}
-	await feed.drain();
-
-	expect(env.written.length).toBe(2);
-	expect(encoder.out.catalog.peek()?.delay).toBeGreaterThanOrEqual(100);
 });
 
 // Regression: codec settings that can't resolve left the encoder unsettled, so `<moq-publish>` never
