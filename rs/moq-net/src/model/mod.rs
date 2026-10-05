@@ -4,6 +4,7 @@ pub mod cache;
 pub mod frame;
 pub mod group;
 pub mod track;
+pub mod typed;
 
 // The origin + announce subsystem shares one implementation (a route table).
 // It stays in a single private module and is surfaced as two curated public
