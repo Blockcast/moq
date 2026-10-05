@@ -5268,6 +5268,49 @@ mod tests {
 		assert!(!table.map.contains_key(&0), "the oldest tombstone is forgotten first");
 	}
 
+	/// Namespaces past the session's cap are refused as the request that carried them,
+	/// a repeat of a held namespace costs nothing, and a retraction frees its slot.
+	#[tokio::test]
+	async fn namespaces_past_the_cap_are_refused() {
+		let session = crate::lite::test_transport::SinkSession::new(Default::default());
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let (tasks, _task_set) = crate::util::TaskSet::new();
+		let mut subscriber = Subscriber::new(
+			crate::time::Clock::tokio(),
+			session,
+			origin,
+			Control::new(None, false),
+			None,
+			peer::PeerSetup::default(),
+			crate::Hop::new(1).unwrap(),
+			None,
+			Version::Draft14,
+			tasks,
+			Default::default(),
+		);
+		subscriber.announces = crate::session::Slots::new(1);
+
+		let advert = |subscriber: &Subscriber<_>| subscriber.route(None, &cluster::Peer::default()).expect("route");
+		let a = crate::Path::new("a").to_owned();
+		let b = crate::Path::new("b").to_owned();
+		let (first, repeat, over, last) = (
+			advert(&subscriber),
+			advert(&subscriber),
+			advert(&subscriber),
+			advert(&subscriber),
+		);
+		subscriber.start_announce(a.clone(), first).unwrap();
+		subscriber.start_announce(a.clone(), repeat).unwrap();
+		assert!(matches!(
+			subscriber.start_announce(b.clone(), over),
+			Err(Error::TooManyRequests)
+		));
+
+		subscriber.stop_announce(a.clone()).unwrap();
+		subscriber.stop_announce(a).unwrap();
+		subscriber.start_announce(b, last).unwrap();
+	}
+
 	/// moq-transport carries no hop ids, so a peer's broadcasts are named by the
 	/// connection's own random stamp. An identity assigned via `Client::with_peer_hop`
 	/// is stored as `via` for split-horizon and never written into the chain.

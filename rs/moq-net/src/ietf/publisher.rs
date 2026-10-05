@@ -3699,6 +3699,33 @@ mod serve_tests {
 		}
 	}
 
+	/// A SUBSCRIBE past the session's cap is refused with a request error, not by
+	/// closing the session.
+	#[tokio::test]
+	async fn subscriptions_past_the_cap_are_refused_per_request() {
+		for version in [Version::Draft14, Version::Draft16, Version::Draft20] {
+			let mut h = serve(version);
+			h.publisher.subscriptions = crate::session::Slots::new(0);
+			let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+			let mut body = bytes::BytesMut::new();
+			subscribe(Filter::NextObject, None).encode_msg(&mut body, version).unwrap();
+			h.publisher
+				.clone()
+				.handle_stream(ietf::Subscribe::ID, body.freeze(), stream)
+				.unwrap_or_else(|e| panic!("{version}: the request closed the session: {e}"))
+				.await;
+			assert!(h.log.resets().is_empty(), "{version}: refusal was reset");
+
+			let mut buf = bytes::Bytes::from(h.log.writes.lock().unwrap().clone());
+			let id = u64::decode(&mut buf, version).unwrap();
+			let expected = match version {
+				Version::Draft14 => ietf::SubscribeError::ID,
+				_ => ietf::RequestError::ID,
+			};
+			assert_eq!(id, expected, "{version}: SUBSCRIBE was not refused");
+		}
+	}
+
 	/// Legal requests we don't serve are refused NOT_SUPPORTED one at a time, and the
 	/// session stays open for the next one.
 	#[tokio::test]

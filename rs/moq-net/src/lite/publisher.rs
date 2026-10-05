@@ -4155,4 +4155,33 @@ mod tests {
 		};
 		assert_eq!(*run.track_priority_tx.read(), 7, "the update was lost");
 	}
+
+	/// A subscription past the session's cap is refused on its own stream, and the
+	/// publisher keeps serving the session.
+	#[tokio::test]
+	async fn subscriptions_past_the_cap_are_refused() {
+		use crate::coding::Encode as _;
+
+		const VERSION: Version = Version::Lite06;
+		let mut script = Vec::new();
+		lite::ControlType::Subscribe.encode(&mut script, VERSION).unwrap();
+		let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![script]);
+		let log = session.log.clone();
+
+		let origin = Hop::random().produce();
+		let (_, goaway) = crate::goaway::Handle::new(true);
+		let mut publisher = Publisher::new(PublisherConfig {
+			runtime: crate::time::Clock::tokio(),
+			session,
+			origin: origin.consume(),
+			version: VERSION,
+			peer_setup: crate::lite::PeerSetup::default(),
+			goaway,
+			peer_hop: None,
+			subscriptions: crate::session::Slots::new(0),
+		});
+
+		assert!(publisher.poll(&kio::Waiter::noop()).is_pending(), "the session must survive");
+		assert_eq!(log.stops(), vec![crate::StreamError::Internal.to_code()]);
+	}
 }

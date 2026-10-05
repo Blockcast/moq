@@ -1765,6 +1765,76 @@ mod tests {
 		}
 	}
 
+	/// A peer's control stream carrying a bare SUBSCRIBE for each request ID: the
+	/// adapter routes on the ID alone, so the rest of the body is never read.
+	async fn windowed(
+		window: u64,
+		ids: &[u64],
+	) -> (
+		ControlStreamAdapter<crate::lite::test_transport::ScriptedSession>,
+		Reader<crate::lite::test_transport::ScriptedRecv, Version>,
+		Writer<crate::lite::test_transport::SinkSend, Version>,
+		crate::lite::test_transport::Log,
+	) {
+		use crate::lite::test_transport::{Log, ScriptedSession, SinkSend};
+		use crate::transport::poll::Session as _;
+
+		const VERSION: Version = Version::Draft14;
+		let mut script = Vec::new();
+		for id in ids {
+			let body = make_body_with_request_id(*id, VERSION);
+			script.extend_from_slice(&encode_raw(ietf::Subscribe::ID, body.len() as u16, &body, VERSION));
+		}
+		let mut session = ScriptedSession::new(script);
+		let (_, recv) = session.open_bi().await.unwrap();
+		// We are the server, so the client's request IDs are even.
+		let control = Control::new(None, false).with_window(window, false);
+		let adapter = ControlStreamAdapter::new(session, control, VERSION);
+		let log = Log::default();
+		let writer = Writer::new(SinkSend::new(log.clone()), VERSION);
+		(adapter, Reader::new(recv, VERSION), writer, log)
+	}
+
+	/// A request ID at the MAX_REQUEST_ID we advertised closes the session with the
+	/// draft's TOO_MANY_REQUESTS, before the request is queued.
+	#[tokio::test]
+	async fn a_request_past_the_window_closes_the_session() {
+		let (adapter, reader, writer, _) = windowed(1, &[0, 2]).await;
+		let (_, goaway) = crate::goaway::Handle::new(true);
+		let err = adapter.run(reader, writer, goaway).await.unwrap_err();
+		assert!(
+			matches!(err, Error::Session(crate::SessionError::TooManyRequests)),
+			"{err:?}"
+		);
+	}
+
+	/// Requests that end are granted back with MAX_REQUEST_ID, once half the window has.
+	#[tokio::test]
+	async fn retired_requests_are_granted_back() {
+		use crate::transport::poll::Session as _;
+
+		const VERSION: Version = Version::Draft14;
+		let (mut adapter, reader, writer, log) = windowed(2, &[0, 2]).await;
+		let (_, goaway) = crate::goaway::Handle::new(true);
+		let runner = adapter.clone();
+		let mut run = std::pin::pin!(runner.run(reader, writer, goaway));
+		assert!(futures::poll!(run.as_mut()).is_pending());
+
+		let first = adapter.accept_bi().await.unwrap();
+		let _second = adapter.accept_bi().await.unwrap();
+		assert!(log.writes.lock().unwrap().is_empty(), "nothing has ended yet");
+
+		drop(first);
+		assert!(futures::poll!(run.as_mut()).is_pending());
+
+		let mut expected = BytesMut::new();
+		ietf::MaxRequestId::ID.encode(&mut expected, VERSION).unwrap();
+		ietf::MaxRequestId { request_id: RequestId(6) }
+			.encode(&mut expected, VERSION)
+			.unwrap();
+		assert_eq!(*log.writes.lock().unwrap(), expected.to_vec());
+	}
+
 	#[test]
 	fn queued_incoming_stream_does_not_keep_shared_alive() {
 		let shared = Arc::new(Shared::default());

@@ -3180,6 +3180,59 @@ mod tests {
 		cursor.assert_next_live();
 		cursor.assert_next_active("b");
 	}
+
+	/// An announce past the session's cap refuses that announce stream alone: the
+	/// prefix ends cleanly instead of failing the session, and what the stream carried
+	/// retracts and gives its slots back.
+	#[tokio::test(start_paused = true)]
+	async fn announces_past_the_cap_refuse_the_stream() {
+		const VERSION: Version = Version::Lite06;
+		let start = |suffix| lite::AnnounceBroadcast::Active {
+			suffix: lite::PathRef::literal(Path::new(suffix)),
+			hops: lite::HopsRef::literal(crate::Hops::new()),
+			cost: crate::origin::Cost::default(),
+		};
+		let mut script = Vec::new();
+		lite::AnnounceOk {
+			origin: crate::Hop::new(9).unwrap(),
+			active: 3,
+		}
+		.encode(&mut script, VERSION)
+		.unwrap();
+		for suffix in ["a", "b", "c"] {
+			start(suffix).encode(&mut script, VERSION).unwrap();
+		}
+
+		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let consumer = origin.consume();
+		let session = crate::lite::test_transport::ScriptedSession::new(script);
+		let log = session.log.clone();
+		let mut subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::Clock::tokio(),
+			session,
+			origin,
+			recv_bandwidth: None,
+			version: VERSION,
+			peer_setup: Default::default(),
+			cost: Some(1),
+			peer_hop: None,
+			going_away: Default::default(),
+		});
+		let slots = crate::session::Slots::new(2);
+		subscriber.announces = slots.clone();
+		let mut prefix = AnnouncePrefix::new(subscriber, Path::new("").to_owned());
+		let mut cursor = consumer.announced();
+
+		let res = kio::wait(|waiter| prefix.poll(waiter)).await;
+		assert!(res.is_ok(), "refusing the stream must not fail the session: {res:?}");
+		assert_eq!(log.stops(), vec![crate::StreamError::Internal.to_code()], "the stream was not refused");
+
+		// The two it took are retracted with it, so nothing ever went live.
+		cursor.assert_next_wait();
+		drop(prefix);
+		let _a = slots.acquire().expect("the refused stream kept a slot");
+		let _b = slots.acquire().expect("the refused stream kept a slot");
+	}
 }
 
 /// The four wire fields a subscription's half-open range encodes to.
