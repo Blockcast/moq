@@ -1822,7 +1822,7 @@ struct FrontierState {
 	advanced: Instant,
 	/// When a sample first found the subscription behind since `advanced`.
 	behind: Option<Instant>,
-	/// The tracks feeding the subscription: one, or one per segment of a splice.
+	/// The tracks feeding the subscription: its own, or the serving route's copy.
 	sources: Vec<Source>,
 	/// Bytes an unwatched source produced since the last sample, still owed to it.
 	unsampled: u64,
@@ -1878,8 +1878,8 @@ impl Frontier {
 		});
 	}
 
-	/// Remove a track that no longer feeds this subscription, such as a splice
-	/// segment capped by a switch, so what it produces past the cap stops counting.
+	/// Remove a track that no longer feeds this subscription, such as a route's copy
+	/// replaced by a switch, so what it produces from then on stops counting.
 	pub(crate) fn unwatch(&self, track: &Arc<cache::Track>) {
 		let Some(inner) = &self.0 else { return };
 		let mut state = inner.state.lock().expect("stats frontier poisoned");
