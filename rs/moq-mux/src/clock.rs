@@ -19,6 +19,38 @@ use std::time::{Duration, Instant, SystemTime};
 
 use hang::catalog::{MAX_SAFE_INTEGER, MOQ_EPOCH_UNIX_MILLIS};
 
+/// Host instant [`Clock`] measures from.
+///
+/// This crate's tests use Tokio's clock, so a paused runtime can advance it.
+/// Production keeps [`std::time::Instant`], which is what [`Clock::at`] and
+/// [`Clock::capture`] take. A paused test in another crate does not move this clock.
+#[cfg(not(test))]
+type Mono = Instant;
+#[cfg(test)]
+type Mono = tokio::time::Instant;
+
+fn mono_now() -> Mono {
+	#[cfg(not(test))]
+	{
+		Instant::now()
+	}
+	#[cfg(test)]
+	{
+		tokio::time::Instant::now()
+	}
+}
+
+fn mono_from(instant: Instant) -> Mono {
+	#[cfg(not(test))]
+	{
+		instant
+	}
+	#[cfg(test)]
+	{
+		tokio::time::Instant::from_std(instant)
+	}
+}
+
 /// The catalog clock for PTS zero at `wall`.
 fn wall_clock(wall: SystemTime) -> crate::Result<hang::catalog::Clock> {
 	let unix_micros = wall
@@ -51,7 +83,7 @@ fn wall_clock(wall: SystemTime) -> crate::Result<hang::catalog::Clock> {
 #[derive(Clone, Copy, Debug)]
 pub struct Clock {
 	/// A monotonic instant, and what the clock read then in micros.
-	instant: Instant,
+	instant: Mono,
 	reading: u64,
 	wall: hang::catalog::Clock,
 }
@@ -81,7 +113,7 @@ impl Clock {
 	/// sampling. Refuses an unrepresentable wall.
 	pub fn at(epoch: Instant, wall: SystemTime) -> crate::Result<Self> {
 		Ok(Self {
-			instant: epoch,
+			instant: mono_from(epoch),
 			reading: 0,
 			wall: wall_clock(wall)?,
 		})
@@ -92,7 +124,7 @@ impl Clock {
 	/// Refuses a `since` so large that PTS zero lands before the moq epoch (2020), which the wall
 	/// mapping cannot name.
 	pub(crate) fn arrival(since: Duration) -> crate::Result<Self> {
-		let (instant, now) = (Instant::now(), SystemTime::now());
+		let (instant, now) = (mono_now(), SystemTime::now());
 		let unmappable = || crate::Error::UnmappableTimestamp(format!("{since:?} puts PTS zero before 2020"));
 		let zero = now.checked_sub(since).ok_or_else(unmappable)?;
 		Ok(Self {
@@ -115,7 +147,8 @@ impl Clock {
 	/// Refuses an instant ahead of now, which would claim the payload reached the transport before
 	/// it existed, and one before PTS zero, which no timestamp can name.
 	pub fn capture(&self, at: Instant) -> crate::Result<moq_net::Timestamp> {
-		if at > Instant::now() {
+		let at = mono_from(at);
+		if at > mono_now() {
 			return Err(crate::Error::InvalidCapture);
 		}
 		let micros = match at.checked_duration_since(self.instant) {
@@ -280,5 +313,15 @@ mod tests {
 		// The largest representable broadcast timestamp still maps.
 		let max = moq_net::Timestamp::from_micros((1u64 << 62) - 1).unwrap();
 		assert!(clock.wall_clock(max).is_err(), "past the JSON-safe range is refused");
+	}
+
+	/// The SI debounce reads this clock. A paused runtime has to move it, or the
+	/// test sleeps real time for a window the runtime will not advance.
+	#[tokio::test(start_paused = true)]
+	async fn paused_time_advances_now() {
+		let clock = Clock::new();
+		let start = clock.now().as_micros();
+		tokio::time::advance(Duration::from_secs(3)).await;
+		assert_eq!(clock.now().as_micros() - start, 3_000_000);
 	}
 }

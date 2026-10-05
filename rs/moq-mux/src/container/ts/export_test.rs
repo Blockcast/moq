@@ -5016,9 +5016,8 @@ async fn contiguous_same_version_commit_replaces_stale_sections() {
 }
 
 /// The cut debounce runs on the host clock, so a revision publishes even when no
-/// media ever advances a PTS (an audio-only or SI-only input). This test spends
-/// real wall time on the debounce window; media timestamps stay pinned at zero
-/// throughout, which is exactly the case a media-clock debounce wedges on.
+/// media ever advances a PTS (an audio-only or SI-only input). Media timestamps
+/// stay pinned at zero, which is exactly the case a media-clock debounce wedges on.
 #[tokio::test(start_paused = true)]
 async fn debounce_opens_without_a_media_clock() {
 	let sdt = |version: u8, fill: u8| make_long_section(0x42, 1, version, 0, 0, &[fill; 4]);
@@ -5038,8 +5037,8 @@ async fn debounce_opens_without_a_media_clock() {
 		.unwrap();
 	assert_eq!(track.latest(), Some(0), "a revision inside the window is held");
 
-	// ...and publishes once the window passes in *real* time, no finish, no PTS.
-	std::thread::sleep(Duration::from_millis(1200));
+	// ...and publishes once the paused clock passes the one-second window.
+	tokio::time::advance(Duration::from_secs(1)).await;
 	rig.import
 		.decode(&BytesMut::from(&si_packet_cc(0x0011, &sdt(1, 0xbb), 3)[..]))
 		.unwrap();
