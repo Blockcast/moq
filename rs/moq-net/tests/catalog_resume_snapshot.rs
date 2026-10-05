@@ -79,7 +79,13 @@ async fn scenario(version: &str, resume_at: Option<u64>, peer_reads: bool) -> Re
 		// does: reading its copy here would make it fetch the head through the relay.
 		let mut group = sub.recv_group().await.unwrap().unwrap();
 		if peer_reads {
-			let _ = tokio::time::timeout(Duration::from_millis(500), group.read_frame()).await;
+			// A local group reader starts at the head, so the peer's own copy must be able
+			// to serve it too, not just the relay's.
+			let read = tokio::time::timeout(Duration::from_millis(500), group.read_frame()).await;
+			match read {
+				Ok(Ok(Some(frame))) if frame.payload.as_ref() == b"snapshot" => {}
+				other => return Err(format!("peer's first read was {other:?}, not the snapshot")),
+			}
 		}
 		Some((link, peer, sub, group))
 	} else {
@@ -137,8 +143,8 @@ async fn fresh_reader_gets_snapshot_after_head_resume() {
 	run(Some(0), false).await;
 }
 
-/// Variant: the peer also reads its own copy before the fresh reader arrives, so the
-/// relay serves the peer's read and the fresh reader from the same upstream copy.
+/// Variant: the peer also reads its own copy from the head before the fresh reader
+/// arrives, so both the peer's copy and the relay's must hold frame 0.
 #[tokio::test(start_paused = true)]
 async fn fresh_reader_gets_snapshot_after_peer_fetches_head() {
 	run(Some(1), true).await;

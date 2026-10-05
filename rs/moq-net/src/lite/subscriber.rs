@@ -3231,13 +3231,13 @@ struct TrackServe<S: crate::transport::poll::Session> {
 
 impl<S: crate::transport::poll::Session> TrackServe<S> {
 	fn widen_frame_bounds(&self, subscription: &mut Subscription) {
-		// No SUBSCRIBE_OK here reports the largest position, so a mid-group start would
-		// leave this copy without the group's head: a later reader that needs frame 0
-		// parks until the group ends, which a catalog or a compressed stats track never
-		// does. Ask from the head of the group instead; the original requester's own
-		// start still skips the frames below it.
-		subscription.start = subscription.start.map(|start| Position::group(start.group));
 		if self.subscriber.version.has_frame_bounds() {
+			// No SUBSCRIBE_OK here reports the largest position, so a mid-group start
+			// would leave this copy without the group's head: a later reader that needs
+			// frame 0 parks until the group ends, which a catalog or a compressed stats
+			// track never does. Ask from the head of the group instead; the original
+			// requester's own start still skips the frames below it.
+			subscription.start = subscription.start.map(|start| Position::group(start.group));
 			return;
 		}
 
