@@ -1014,8 +1014,6 @@ where
 		};
 
 		match id {
-			// Publisher handles: Subscribe, Fetch, SubscribeNamespace (0x50 modern /
-			// 0x11 legacy), SubscribeTracks, TrackStatus
 			// Draft-16 moved SUBSCRIBE_NAMESPACE to its own stream, past the control stream
 			// that admits every other request, but it still takes a request ID from the
 			// MAX_REQUEST_ID window. Held until the request ends, like the rest.
@@ -1031,6 +1029,8 @@ where
 					.maybe_boxed(),
 				);
 			}
+			// Publisher handles: Subscribe, Fetch, SubscribeNamespace (0x50 modern /
+			// 0x11 legacy), SubscribeTracks, TrackStatus
 			ietf::Subscribe::ID
 			| ietf::Fetch::ID
 			| ietf::SubscribeNamespace::ID

@@ -613,7 +613,11 @@ where
 			// Held for the life of the subscription.
 			let _slot = match self.subscriptions.acquire() {
 				Ok(slot) => slot,
-				Err(err) => return self.reject_subscribe(stream, request_id, &err, "too many subscriptions").await,
+				Err(err) => {
+					return self
+						.reject_subscribe(stream, request_id, &err, "too many subscriptions")
+						.await;
+				}
 			};
 
 			// Stats (subscriptions, viewer refcount, groups/frames/bytes) are counted in
@@ -3708,7 +3712,9 @@ mod serve_tests {
 			h.publisher.subscriptions = crate::session::Slots::new(0);
 			let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
 			let mut body = bytes::BytesMut::new();
-			subscribe(Filter::NextObject, None).encode_msg(&mut body, version).unwrap();
+			subscribe(Filter::NextObject, None)
+				.encode_msg(&mut body, version)
+				.unwrap();
 			h.publisher
 				.clone()
 				.handle_stream(ietf::Subscribe::ID, body.freeze(), stream)

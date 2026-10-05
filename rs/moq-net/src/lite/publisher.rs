@@ -4181,7 +4181,10 @@ mod tests {
 			subscriptions: crate::session::Slots::new(0),
 		});
 
-		assert!(publisher.poll(&kio::Waiter::noop()).is_pending(), "the session must survive");
+		assert!(
+			publisher.poll(&kio::Waiter::noop()).is_pending(),
+			"the session must survive"
+		);
 		assert_eq!(log.stops(), vec![crate::StreamError::Internal.to_code()]);
 	}
 }

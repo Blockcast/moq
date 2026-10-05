@@ -638,7 +638,8 @@ impl Decode<Version> for FetchObject {
 
 		let properties = match flags & flag::PROPERTIES != 0 {
 			true => {
-				let super::group::ObjectExtensionsLength(size) = super::group::ObjectExtensionsLength::decode(buf, version)?;
+				let super::group::ObjectExtensionsLength(size) =
+					super::group::ObjectExtensionsLength::decode(buf, version)?;
 				if buf.remaining() < size {
 					return Err(DecodeError::Short);
 				}

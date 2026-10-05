@@ -3225,7 +3225,11 @@ mod tests {
 
 		let res = kio::wait(|waiter| prefix.poll(waiter)).await;
 		assert!(res.is_ok(), "refusing the stream must not fail the session: {res:?}");
-		assert_eq!(log.stops(), vec![crate::StreamError::Internal.to_code()], "the stream was not refused");
+		assert_eq!(
+			log.stops(),
+			vec![crate::StreamError::Internal.to_code()],
+			"the stream was not refused"
+		);
 
 		// The two it took are retracted with it, so nothing ever went live.
 		cursor.assert_next_wait();

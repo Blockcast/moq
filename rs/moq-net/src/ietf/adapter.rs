@@ -1493,7 +1493,9 @@ mod tests {
 		)
 		.unwrap();
 		assert!(matches!(route, Route::NewRequest(id) if id == request_id));
-		shared.open_incoming(request_id, encode_msg(&msg, version), None).unwrap();
+		shared
+			.open_incoming(request_id, encode_msg(&msg, version), None)
+			.unwrap();
 
 		let (_, mut recv) = shared.incoming.pop().await.unwrap();
 
@@ -1829,9 +1831,11 @@ mod tests {
 
 		let mut expected = BytesMut::new();
 		ietf::MaxRequestId::ID.encode(&mut expected, VERSION).unwrap();
-		ietf::MaxRequestId { request_id: RequestId(6) }
-			.encode(&mut expected, VERSION)
-			.unwrap();
+		ietf::MaxRequestId {
+			request_id: RequestId(6),
+		}
+		.encode(&mut expected, VERSION)
+		.unwrap();
 		assert_eq!(*log.writes.lock().unwrap(), expected.to_vec());
 	}
 

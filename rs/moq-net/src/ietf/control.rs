@@ -7,7 +7,10 @@ use crate::{Error, SessionError, coding::VarInt, ietf::RequestId};
 /// A client's request IDs are even from 0 and a server's odd from 1, each stepping by 2.
 pub(crate) fn initial_max_request_id(window: u64, peer_client: bool) -> u64 {
 	let parity = if peer_client { 0 } else { 1 };
-	window.saturating_mul(2).saturating_add(parity).min(VarInt::MAX.into_inner())
+	window
+		.saturating_mul(2)
+		.saturating_add(parity)
+		.min(VarInt::MAX.into_inner())
 }
 
 struct ControlState {
@@ -177,7 +180,9 @@ mod tests {
 		let control = Control::new(None, false).with_window(4, false);
 		assert_eq!(initial_max_request_id(4, true), 8);
 
-		let mut open: Vec<_> = (0..4).map(|i| control.accept(RequestId(i * 2)).unwrap().unwrap()).collect();
+		let mut open: Vec<_> = (0..4)
+			.map(|i| control.accept(RequestId(i * 2)).unwrap().unwrap())
+			.collect();
 		assert!(matches!(
 			control.accept(RequestId(8)),
 			Err(Error::Session(SessionError::TooManyRequests))
