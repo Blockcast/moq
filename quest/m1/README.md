@@ -32,7 +32,6 @@ QUIC studies there on that rule.
 - [Track tail interop](/quest/m1/track-tail-interop.md) - a Rust publisher ending a track with a group in flight is read to its end by the JS subscriber, and the reverse, in `just test interop`
 - [Demand everywhere](/quest/m1/demand-everywhere.md) - requests and producers at every level watch subscribers through `demand()` alone, ahead of the bindings exposing it
 - [Request linger](/quest/m1/request-linger.md) - an upstream FETCH or SUBSCRIBE outlives its last reader by a short linger, so quick re-requests don't churn upstream
-- [Merge queue](/quest/m1/merge-queue.md) - the required checks run on `merge_group`, so a stale green check can no longer break main
 - [Flat questlines](/quest/m1/quest-flat-lines.md) - moq pins the current quest CLI, lands its questline branches on main, and retires them
 - [Binding audio delay](/quest/m1/binding-surface.md) - moq-ffi and every wrapper configure and observe audio playout delay
 - [FFI shape](/quest/m1/ffi-shape/README.md) - the bindings mirror Rust's layers: net at the root, then media, json, flate, audio, and video namespaces built from the handle below
