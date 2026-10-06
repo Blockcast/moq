@@ -28,10 +28,10 @@ you already have.
 MPEG-TS `Import::stats` returns a `ts::stats::Snapshot` of cumulative per-PID
 `ts::stats::Stream` rows: delivered `units`, transport-clock `quiet` time, a
 `class` of audio, video, or data, audio `resyncs`, scanned bytes `discarded`,
-frames `unconfirmed`, damaged units refused in `damaged`, and the PID's share of the TR 101 290 counters. A malformed media
-packet, PES header, or codec unit is dropped whole; only that PID loses sync, and
-video closes its group at the break and waits for its next keyframe. Publishing
-and catalog failures remain fatal. `ts::stats::Log` reports these counters for
+frames `unconfirmed`, damaged units refused in `damaged`, and the PID's share of
+the TR 101 290 counters. A malformed media packet, PES header, or codec unit is
+dropped whole; only that PID loses sync, and video closes its group at the break
+and waits for its next keyframe. Publishing and catalog failures remain fatal. `ts::stats::Log` reports these counters for
 both the CLI and SRT gateway, and grades a stopped stream for audio and video
 only; a sparse data PID such as SCTE-35 stays in the row and is not logged for a
 quiet second. `Export::stats` returns a `ts::stats::Export` of the same rows,
