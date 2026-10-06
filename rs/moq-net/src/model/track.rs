@@ -1772,7 +1772,8 @@ impl Producer {
 	}
 
 	/// The route answered with its largest position, `None` for nothing yet; see
-	/// [`Self::set_idle`]. A no-op while live.
+	/// [`Self::set_idle`]. Readers resume once the cache shows that position. A no-op
+	/// unless idle.
 	pub(crate) fn set_live(&mut self, largest: Option<Position>) {
 		if let Ok(mut state) = self.modify() {
 			state.set_live(largest);

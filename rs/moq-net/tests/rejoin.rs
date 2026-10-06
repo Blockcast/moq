@@ -387,3 +387,69 @@ async fn rejoin_during_the_cancel_skips_the_cache() {
 		.unwrap_or_else(|_| panic!("{version}: timed out"));
 	}
 }
+
+/// A rejoining reader is not handed the cached group while the route's next group has no
+/// frame yet.
+///
+/// The publisher moved on by one group while nobody subscribed, so the route answers the
+/// rejoin with that group, right after the one the relay cached. Its header lands before its
+/// first frame. Shown in between, it would leave the cached group without a stamped
+/// successor, and a reader at the live edge would be handed that older group first.
+#[tokio::test(start_paused = true)]
+async fn rejoin_waits_for_the_answers_first_frame() {
+	// Lite01/02 carry no max age, so the publisher serves the relay's cached head again and
+	// that answer is what makes the cache current.
+	let unbudgeted = ["moq-lite-01", "moq-lite-02"];
+	for version in Version::names().filter(|version| !unbudgeted.contains(version)) {
+		tokio::time::timeout(TEST_TIMEOUT, async {
+			let publisher = produce_origin(1);
+			let relay = produce_origin(2);
+
+			let broadcast = publisher.create_broadcast("bench").unwrap();
+			let track = broadcast.create_track("video", None).unwrap();
+			broadcast.announce(Default::default()).unwrap();
+
+			let mut options = MockConnectOptions::new(version.parse::<Version>().unwrap());
+			options.server_publish = Some(publisher.consume());
+			options.client_subscribe = Some(relay.clone());
+			let pair = connect_mock(options).await;
+
+			let consumer = relay.consume();
+			consumer.routed("bench").await.unwrap();
+			let remote = consumer.request_broadcast("bench").await.unwrap();
+			let ts = |ms| Timestamp::from_millis(ms).unwrap();
+
+			// Held for fetches only: it keeps the relay's copy without subscribing.
+			let _held = remote.track("video").unwrap();
+
+			let mut group = track.append_group().unwrap();
+			group.write_frame(ts(0), b"old".as_ref()).unwrap();
+			group.finish().unwrap();
+			let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
+			let mut group = sub.recv_group().await.unwrap().unwrap();
+			assert_eq!(read_all(&mut group).await.unwrap(), [b"old".to_vec()], "{version}");
+			drop((group, sub));
+			track.demand().unused().await.unwrap();
+
+			let mut group = track.append_group().unwrap();
+			group.write_frame(ts(500), b"new".as_ref()).unwrap();
+			group.finish().unwrap();
+
+			pair.server_transport.split_unis();
+			let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
+			let early = tokio::time::timeout(Duration::from_secs(1), sub.recv_group()).await;
+			assert!(
+				early.is_err(),
+				"{version}: the rejoining reader got the cached group {:?} first",
+				early.map(|group| group.unwrap().unwrap().sequence)
+			);
+
+			pair.server_transport.release_split();
+			let mut group = sub.recv_group().await.unwrap().unwrap();
+			assert_eq!(group.sequence, 1, "{version}");
+			assert_eq!(read_all(&mut group).await.unwrap(), [b"new".to_vec()], "{version}");
+		})
+		.await
+		.unwrap_or_else(|_| panic!("{version}: timed out"));
+	}
+}
