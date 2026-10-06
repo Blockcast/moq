@@ -70,6 +70,7 @@ blocks. The quests that gated m0 lines moved under them.
 - [Wire compatibility](/quest/m1/wire-compat.md) - a nightly run tests this checkout against the last published release for tokens, session wire, and catalog/container
 - [Same-epoch importers](/quest/m1/hop-aligned-import.md) - importers sharing one `--epoch` and fed one stream publish identical groups and timestamps, so failover between a redundant pair survives
 - [Auth client CA](/quest/m1/relay-auth-client-ca.md) - `auth::Config::validate` and `init` take the client-CA flag, so no caller can skip the check
+- [cpal loads libasound at runtime](/quest/m1/cpal-alsa-runtime.md) - condition: a cpal release whose Linux build carries no load-time libasound requirement
 - [Audio capture without ALSA link](/quest/m1/capture-alsa-link.md) - moq-audio capture and playback build on Linux without linking libasound
 - [Remove Opus DTX](/quest/m1/opus-usedtx-removal.md) - `@moq/publish` drops `usedtx`, since Chromium shifts the capture timeline under DTX
 - [Capture by default](/quest/m1/capture-default.md) - moq-video and moq-audio build `capture` by default, so pre-merge checks test it and the capture gate goes away
@@ -125,7 +126,6 @@ blocks. The quests that gated m0 lines moved under them.
 - [JS track handover](/quest/m1/js-group-handover.md) - a JS track subscription resumes across a route swap from the first frame it lacks, so `test/drain` passes at zero latency budget
 - [JS GOAWAY requests](/quest/m1/js-goaway-requests.md) - after GOAWAY the JS client opens no new request on the old session, like Rust
 - [Drain handshakes](/quest/m1/drain-handshakes.md) - a drain GOAWAYs and waits for sessions still in their handshake instead of exiting under them
-- [Strict Redirect::resolve](/quest/m1/redirect-resolve.md) - `Redirect::resolve` can no longer quietly turn a refused redirect into a redial
 - [Transport upgrade](/quest/m1/transport-upgrade/README.md) - a session that came up over WebSocket moves to QUIC once the QUIC dial lands, handing over without dropping a group
 - [Scope track priority](/quest/m1/track-priority-scope.md) - priority orders one owner's streams, and a shared cluster session is fair across tenants
 - [IETF on the ring](/quest/m1/uring-ietf.md) - the io_uring workers serve moq-transport sessions too, so a uring relay drops no client protocol

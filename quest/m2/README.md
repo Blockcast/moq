@@ -33,6 +33,7 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [macOS GPU input](/quest/m2/obs-macos.md) - feed the encoder from the OBS compositor without CPU readback
 - [Windows GPU input](/quest/m2/obs-windows.md) - import or blit OBS D3D11 textures with explicit synchronization
 - [Sans-IO IETF session](/quest/m2/rs2ts-sans-io-ietf.md) - the session shape it translates
+- [IETF parameters](/quest/m2/rs2ts-ietf-params.md) - the IETF codec drops its `Param` trait on primitives, so it translates like lite
 - [Generated IETF](/quest/m2/rs2ts-ietf.md) - @moq/net's moq-transport session is generated too
 - [Per-stream deadlines](/quest/m2/quic-deadline.md) - hopeless retransmits
   become resets, and a tail loss probe fires early while there is still time
@@ -114,3 +115,4 @@ waiting on an upstream release waits in [m4](/quest/m4/README.md).
 - [GPU capacity and health](/quest/m2/gpu-health.md) - moq-video reports each device's sessions, memory, utilization, and health on NVIDIA, AMD, and Intel alike
 - [Malformed moq-transport input](/quest/m2/ietf-malformed-close.md) - malformed draft-18 and draft-21 control input closes the session with the draft's code, or PROTOCOL_VIOLATION where a code is a real burden and the fallback is recorded in `doc/concept/standard.md`, in moq-net and js/net
 - [moq-transport request codes](/quest/m2/ietf-request-codes.md) - Range Filters (INVALID_FILTER), reserved namespaces, and RENDEZVOUS_TIMEOUT get the draft's answer, or a recorded fallback code, and the deliberate deviations are documented
+- [Leftover worklet types](/quest/m2/worklet-leftovers.md) - `@moq/hang` drops its unused `@types/audioworklet` dependency, and moq-boy stops including the shared worklet declaration
