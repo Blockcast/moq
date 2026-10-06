@@ -212,7 +212,10 @@ impl PathData {
 
             congestion_window: Some(controller_metrics.congestion_window),
             ssthresh: controller_metrics.ssthresh,
-            pacing_rate: controller_metrics.pacing_rate,
+            // qlog reports bits per second; the controller reports bytes.
+            pacing_rate: controller_metrics
+                .pacing_rate
+                .map(|rate| rate.saturating_mul(8)),
         };
 
         let event = metrics.to_qlog_event(&self.recovery_metrics);
