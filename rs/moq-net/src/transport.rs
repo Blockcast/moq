@@ -458,7 +458,9 @@ pub mod poll {
 			cx: &mut Context<'_>,
 			buf: &mut B,
 		) -> Poll<Result<Option<usize>, Self::Error>> {
-			let len = buf.chunk_mut().len();
+			// Cap the slice: it is zeroed on every poll, Pending included, and a
+			// read may be partial anyway.
+			let len = buf.chunk_mut().len().min(64 * 1024);
 
 			// A destination with no room is not a closed stream. Collapsing the two
 			// would turn "buffer full" into "stream ended", which reads as truncation.
