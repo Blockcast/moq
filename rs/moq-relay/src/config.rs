@@ -1349,7 +1349,7 @@ uid = [1001]
 		.expect("config load");
 
 		assert!(
-			config.auth.validate().is_ok(),
+			config.auth.validate(false).is_ok(),
 			"CLI public flags must admit anonymous sessions"
 		);
 		assert_eq!(config.auth.public_subscribe, vec!["demo/**".parse().unwrap()]);
