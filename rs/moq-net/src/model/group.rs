@@ -859,6 +859,11 @@ impl Producer {
 		(state.committed > state.offset).then_some(state.committed)
 	}
 
+	/// Whether `other` is a handle to this same group.
+	pub(crate) fn is_clone(&self, other: &Self) -> bool {
+		self.state.same_channel(&other.state)
+	}
+
 	/// Where the group starts in presentation time: its first frame's timestamp,
 	/// or `None` while no frame has been opened.
 	///
