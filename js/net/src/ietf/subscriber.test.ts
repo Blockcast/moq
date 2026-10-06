@@ -1,10 +1,12 @@
 import { expect, spyOn, test } from "bun:test";
 import type * as announce from "../announced.ts";
 import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.ts";
+import type * as netGroup from "../group.ts";
 import { type Hop, HopSchema, UNKNOWN_HOP } from "../hop.ts";
 import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
+import { Timescale } from "../time.ts";
 import type * as track from "../track.ts";
 import { ControlStreamAdapter, NativeSession } from "./adapter.ts";
 import type * as Cluster from "./cluster.ts";
@@ -882,7 +884,9 @@ function encodeObjects(deltas: number[]): Uint8Array {
  * A subscriber with one track subscribed and answered, which is what registers {@link ALIAS}
  * and lets a group stream naming it be handled.
  */
-async function subscribeTrack(): Promise<{ subscriber: Subscriber; track: track.Subscriber }> {
+async function subscribeTrack(properties?: {
+	timescale?: Timescale;
+}): Promise<{ subscriber: Subscriber; track: track.Subscriber }> {
 	const pair = createMockTransportPair(ALPN.DRAFT_19);
 	const session = new NativeSession(pair.server, VERSION, true);
 	const subscriber = new Subscriber({ session });
@@ -895,7 +899,7 @@ async function subscribeTrack(): Promise<{ subscriber: Subscriber; track: track.
 	expect(await peer.reader.u53()).toBe(Subscribe.id);
 	const request = await Subscribe.decode(peer.reader, VERSION);
 	await peer.writer.u53(SubscribeOk.id);
-	await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS }).encode(peer.writer, VERSION);
+	await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS, properties }).encode(peer.writer, VERSION);
 
 	return { subscriber, track };
 }
@@ -1184,4 +1188,186 @@ test("object extension limit accepts 64 KiB and stops one byte over before readi
 			track.close();
 		}
 	}
+});
+
+// ---------------------------------------------------------------------------
+// The moq-transport object model: subgroups, Object IDs and object properties.
+//
+// Each test states objects SENT on the wire against objects RECEIVED through the track,
+// and asserts on the received values rather than on the absence of an error.
+// ---------------------------------------------------------------------------
+
+// MOQ Object Property ids used below. 0x10 is Timestamp; the other two are arbitrary,
+// standing in for whatever a mapping (MPEG MMTP, AL-FEC repair) carries beside it. Nothing
+// in the decoder knows them, which is the point.
+const PROP_TIMESTAMP = 0x10;
+const PROP_EVEN = 0x20;
+const PROP_ODD = 0x21;
+
+/**
+ * Group flags for a stream that names a subgroup.
+ *
+ * `hasEnd` is the publisher declaring that this stream carries the group to its end, so a
+ * subgroup stream that is not the group's last leaves it clear and writes an explicit
+ * END_OF_GROUP object instead (or lets another subgroup carry the end).
+ */
+function subgroupFlags(extensions = false, hasEnd = true): GroupFlags {
+	return { ...groupFlags(true), hasSubgroup: true, hasExtensions: extensions, hasEnd };
+}
+
+/** A group stream header on `subgroup` of group 3. */
+function subgroupHeader(subgroup: number, flags: GroupFlags): GroupMessage {
+	return new GroupMessage({ trackAlias: ALIAS, groupId: 3, subGroupId: subgroup, publisherPriority: 0, flags });
+}
+
+/**
+ * One object with an explicit Object ID Delta and properties block, written by hand.
+ *
+ * Every value here is under 64, so each is a one-byte varint and the array is the bytes on
+ * the wire. Nothing on our side encodes a non-zero delta or an arbitrary property. The
+ * stream's flags must set `hasExtensions`, since the block is always written.
+ */
+function encodeObject(delta: number, properties: number[], payload: string): number[] {
+	const body = Array.from(new TextEncoder().encode(payload));
+	return [delta, properties.length, ...properties, body.length, ...body];
+}
+
+/** An END_OF_GROUP object: a zero-length payload with status 0x03. */
+function encodeEndOfGroup(delta: number): number[] {
+	return [delta, 0, 0, 0x03];
+}
+
+/** Read `count` objects from a group, failing rather than hanging if it ends early. */
+async function readObjects(group: netGroup.Consumer, count: number) {
+	const objects = [];
+	for (let i = 0; i < count; i++) {
+		const frame = await group.readFrameSequence();
+		if (!frame) break;
+		objects.push(frame);
+	}
+	return objects;
+}
+
+/**
+ * A subgroup above 0 is a stream of the same group, not an unsupported one. Its objects
+ * reach the track with the subgroup they arrived on.
+ */
+test("a subgroup above zero delivers its objects", async () => {
+	const { subscriber, track } = await subscribeTrack();
+
+	const sent = 3;
+	await subscriber.handleGroup(
+		subgroupHeader(1, subgroupFlags()),
+		new Reader(undefined, encodeObjects(Array.from({ length: sent }, () => 0)), VERSION),
+	);
+
+	const group = await track.ordered().nextGroup();
+	if (!group) throw new Error("the subgroup delivered no group");
+	const received = await readObjects(group, sent);
+
+	expect(received.length).toBe(sent);
+	expect(received.map((f) => f.object?.subgroup)).toEqual([1, 1, 1]);
+	expect(received.map((f) => f.object?.id)).toEqual([0, 1, 2]);
+	expect(received.map((f) => new TextDecoder().decode(f.payload))).toEqual(["object 0", "object 0", "object 0"]);
+	// The stream declared END_OF_GROUP, so its FIN is the group's end.
+	expect(group.isClosed).toBe(true);
+
+	track.close();
+});
+
+/**
+ * One group, two subgroup streams. They share the group, and the first one's FIN does not
+ * end it: a group ends on its terminal object, which may arrive on any of its subgroups.
+ * Ending on every subgroup EOF would truncate the group at whichever stream finished first.
+ */
+test("a group ends on its terminal object, not when one subgroup stream ends", async () => {
+	const { subscriber, track } = await subscribeTrack();
+	const ordered = track.ordered();
+
+	// Subgroup 0 ends with a FIN, declaring no end of its own.
+	await subscriber.handleGroup(
+		subgroupHeader(0, subgroupFlags(false, false)),
+		new Reader(undefined, encodeObjects([0, 0]), VERSION),
+	);
+
+	const group = await ordered.nextGroup();
+	if (!group) throw new Error("no group");
+	expect(group.isClosed).toBe(false);
+
+	// Subgroup 1 arrives afterwards, into the same group, and carries the END_OF_GROUP.
+	await subscriber.handleGroup(
+		subgroupHeader(1, subgroupFlags(true, false)),
+		new Reader(undefined, new Uint8Array([...encodeObject(0, [], "late"), ...encodeEndOfGroup(0)]), VERSION),
+	);
+
+	const received = await readObjects(group, 4);
+	expect(received.map((f) => f.object?.subgroup)).toEqual([0, 0, 1]);
+	expect(new TextDecoder().decode(received[2].payload)).toBe("late");
+	expect(group.isClosed).toBe(true);
+	expect(await group.readFrameSequence()).toBeUndefined();
+
+	track.close();
+});
+
+/**
+ * A publisher may number its objects with gaps: a repair flow is numbered against the source
+ * flow it repairs, so renumbering the objects destroys the mapping. The gap is data, and the
+ * Object IDs travel with the frames.
+ */
+test("a gap in object IDs is delivered with the ids intact", async () => {
+	const { subscriber, track } = await subscribeTrack();
+
+	// Object IDs 0, 2, 5 -> deltas 0, 1, 2 (draft-20 11.4.3: later id = prior + delta + 1).
+	await subscriber.handleGroup(
+		subgroupHeader(0, groupFlags(true)),
+		new Reader(undefined, encodeObjects([0, 1, 2]), VERSION),
+	);
+
+	const group = await track.ordered().nextGroup();
+	if (!group) throw new Error("no group");
+	const received = await readObjects(group, 3);
+
+	expect(received.length).toBe(3);
+	expect(received.map((f) => f.object?.id)).toEqual([0, 2, 5]);
+	// The frame's position in the group is NOT its Object ID once there is a gap, which is
+	// exactly why the id has to be carried rather than inferred.
+	expect(received.map((f) => f.sequence)).toEqual([0, 1, 2]);
+
+	track.close();
+});
+
+/**
+ * Every object property reaches the consumer, whatever its id: the block arrives verbatim
+ * and parsed, with both parities, and only Timestamp is additionally read to stamp the
+ * frame. No codepoint is special-cased, so a registry addition needs no change here.
+ */
+test("object properties reach the consumer, both parities and unknown ids", async () => {
+	const { subscriber, track } = await subscribeTrack({ timescale: Timescale.MILLI });
+
+	// Delta-encoded types: 0x10 (Timestamp) = 20, then +0x10 -> 0x20 = 42, then +1 -> 0x21
+	// carrying two bytes. Every value is a one-byte varint.
+	const properties = [PROP_TIMESTAMP, 20, 0x10, 42, 1, 2, 0xab, 0xcd];
+	await subscriber.handleGroup(
+		subgroupHeader(1, subgroupFlags(true)),
+		new Reader(undefined, new Uint8Array(encodeObject(0, properties, "a")), VERSION),
+	);
+
+	const group = await track.ordered().nextGroup();
+	if (!group) throw new Error("no group");
+	const frame = await group.readFrameSequence();
+	if (!frame) throw new Error("no object");
+
+	// The Timestamp is still interpreted, in the track's declared units.
+	expect(frame.timestamp.value).toBe(20);
+	expect(frame.timestamp.scale).toBe(Timescale.MILLI);
+
+	// And the block survives whole, so a consumer can forward it or read an id we do not know.
+	expect(Array.from(frame.object?.properties ?? [])).toEqual(properties);
+	expect(frame.object?.propertyList).toEqual([
+		{ type: BigInt(PROP_TIMESTAMP), value: 20n },
+		{ type: BigInt(PROP_EVEN), value: 42n },
+		{ type: BigInt(PROP_ODD), bytes: new Uint8Array([0xab, 0xcd]) },
+	]);
+
+	track.close();
 });
