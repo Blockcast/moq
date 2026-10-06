@@ -188,9 +188,8 @@ impl Pacer {
             warn!("received a timestamp early than a previous recorded time, ignoring");
             Default::default()
         });
-        let new_tokens =
-            u64::try_from(u128::from(rate) * time_elapsed.as_nanos() / 1_000_000_000)
-                .unwrap_or(u64::MAX);
+        let new_tokens = u64::try_from(u128::from(rate) * time_elapsed.as_nanos() / 1_000_000_000)
+            .unwrap_or(u64::MAX);
 
         // Advance `prev` only once whole bytes have been earned, so elapsed time too short to
         // pay for a single byte is carried over rather than discarded. Without this, a slow
@@ -430,8 +429,14 @@ mod tests {
         let resume = pacer
             .delay(rtt, u64::from(mtu), mtu, now, &metrics)
             .expect("three bytes short must wait");
-        assert!(resume > now, "the pacer re-armed its timer at the current instant");
-        assert_eq!(pacer.delay(rtt, u64::from(mtu), mtu, resume, &metrics), None);
+        assert!(
+            resume > now,
+            "the pacer re-armed its timer at the current instant"
+        );
+        assert_eq!(
+            pacer.delay(rtt, u64::from(mtu), mtu, resume, &metrics),
+            None
+        );
     }
 
     #[test]

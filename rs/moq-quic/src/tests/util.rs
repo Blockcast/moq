@@ -167,11 +167,9 @@ impl Pair {
                 let ecn = self.rewrite_ecn.unwrap_or_else(|| {
                     set_congestion_experienced(packet.ecn, self.congestion_experienced || marked)
                 });
-                self.server.inbound.push_back((
-                    sent + self.latency,
-                    ecn,
-                    buffer.as_ref().into(),
-                ));
+                self.server
+                    .inbound
+                    .push_back((sent + self.latency, ecn, buffer.as_ref().into()));
             }
         }
     }

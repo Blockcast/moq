@@ -1636,7 +1636,8 @@ impl Bbr3 {
         match self.state {
             BbrState::Startup => {
                 // As Linux BBRv3's bbr_handle_queue_too_high_in_startup.
-                self.inflight_longterm = Ord::max(self.get_inflight(self.max_bw, 1.0), self.inflight_latest);
+                self.inflight_longterm =
+                    Ord::max(self.get_inflight(self.max_bw, 1.0), self.inflight_latest);
                 self.full_bw_reached = true;
                 self.full_bw_now = true;
                 self.enter_drain();
