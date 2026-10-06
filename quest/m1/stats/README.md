@@ -26,7 +26,7 @@ catalog keyed by rendition, not a stats track per rendition and not a sum per
 kind.
 
 - **Media stats leave moq-stats.** The relay is media-agnostic and keeps
-  `Traffic`, `Presence`, and `.stats/node/<node>` unchanged. Media stats are
+  `Traffic`, `Presence`, and `.stats/node/<node>/@<epoch>` unchanged. Media stats are
   hang tracks, discovered through the catalog, so no `Producer<E>`
   extension, `Merge` wrapper, or flattened generic is needed. One layout for
   relay and clients is given up on purpose.

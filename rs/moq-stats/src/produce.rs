@@ -60,6 +60,10 @@ pub struct Config {
 	/// leaving and another arriving causes no unannounce and re-announce across
 	/// the mesh. While it lingers empty, every track reads `{}`. Zero
 	/// unannounces on the first drain the group is empty. Unused at depth `0`.
+	///
+	/// A return after the linger is a new epoch, which an aggregating reader
+	/// keeps as its own node for its grace, so a short linger on a flapping
+	/// group multiplies that reader's state.
 	pub linger: Duration,
 }
 
@@ -1369,18 +1373,39 @@ mod tests {
 		assert_eq!(name(&announced(&origin).await.0), ".stats/node");
 	}
 
-	/// A restarted producer announces under a new epoch, so a relay never serves
-	/// it groups cached under its previous run.
+	/// A producer restarted on the same origin ends its old epoch and announces
+	/// the same name under a new one, so a relay never serves it groups cached
+	/// under its previous run.
 	#[tokio::test(start_paused = true)]
 	async fn restarted_producer_announces_a_new_epoch() {
-		let (first, origin) = test_producer(Some("sjc"));
-		let before = announced(&origin).await.0;
-		drop(first);
+		let origin = produce_origin();
+		let mut events = origin.consume().with_hidden(true).announced();
+		let producer = || {
+			Producer::new(
+				Config::new()
+					.with_origin(origin.clone())
+					.with_node(PathOwned::from("sjc")),
+			)
+		};
 
-		let (_second, origin) = test_producer(Some("sjc"));
-		let after = announced(&origin).await.0;
-		assert_eq!(name(&before), name(&after));
-		assert_ne!(before, after);
+		let first = producer();
+		drive_tick().await;
+		let [(before, true)] = &take_events(&mut events)[..] else {
+			panic!("expected one announce");
+		};
+		assert_eq!(name(before), ".stats/node/sjc");
+
+		drop(first);
+		drive_tick().await;
+		assert_eq!(take_events(&mut events), [(before.clone(), false)]);
+
+		let _second = producer();
+		drive_tick().await;
+		let [(after, true)] = &take_events(&mut events)[..] else {
+			panic!("expected one announce");
+		};
+		assert_eq!(name(after), name(before));
+		assert_ne!(after, before, "a restart mints a new epoch");
 	}
 
 	#[tokio::test(start_paused = true)]
