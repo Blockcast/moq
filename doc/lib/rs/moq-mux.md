@@ -49,7 +49,10 @@ then fixed. A rendition that returns with the same sample entry reuses its track
 id; `fmp4::Error::TrackAdded`, `TrackChanged`, and `TrackRewound` end the export
 for a new rendition, a changed sample entry, or a replay of media already
 written, and `TrackUndescribed` names a track that never delivered its codec
-configuration.
+configuration. An Opus entry synthesized without a catalog `description` guesses
+its pre-skip and input sample rate, so a later OpusHead that agrees on everything
+else settles it instead of changing it. An OpusHead whose channel count
+contradicts its catalog entry fails with `fmp4::Error::OpusChannelCount`.
 
 Each catalog track constructor returns one `container::Producer` that owns the
 media stream and its catalog entry. `set` publishes or replaces its config,
