@@ -15,9 +15,8 @@ clean end without it.
 for the first served group and then calls `raise_start_to(start)`, which
 suppresses every lower group regardless of the subscription's floor and
 budget. #4387 added it to resolve a relayed subscription's start from its
-source; keep that fix (see the note in
-[Track tail interop](/quest/m1/track-tail-interop.md)) while honoring an
-explicit floor.
+source; keep that fix (the `just test interop --tail` lanes cover it through
+a relay) while honoring an explicit floor.
 
 Decided:
 

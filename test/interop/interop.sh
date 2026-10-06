@@ -174,8 +174,10 @@ require_tools() {
     # The relay, CLI, ffmpeg, and harness essentials are hard requirements. A
     # missing per-client toolchain (uv / bun / node / cc) just marks that client
     # broken in prepare, so it fails its own cells instead of the whole run.
-    local missing=() t
-    for t in cargo ffmpeg curl timeout; do
+    # Tail-only runs publish raw tracks, so they never encode with ffmpeg.
+    local missing=() t tools=(cargo curl timeout)
+    [[ "$TAIL_ONLY" -eq 1 ]] || tools+=(ffmpeg)
+    for t in "${tools[@]}"; do
         have "$t" || missing+=("$t")
     done
     if [[ ${#missing[@]} -gt 0 ]]; then
@@ -648,11 +650,13 @@ run_round() {
 # Raw-track clients have no codecs: every byte, group, and the declared end is checked.
 # shellcheck disable=SC2329  # invoked indirectly via harness_spawn
 run_tail_client() {
-    local lang="$1" role="$2" broadcast="$3"
+    local lang="$1" role="$2" broadcast="$3" limit="$TIMEOUT"
+    # The publisher outlives the subscriber's whole deadline, waiting for its acknowledgement.
+    [[ "$role" == publish ]] && limit=$(awk -v t="$TIMEOUT" 'BEGIN { print t * 2 }')
     case "$lang" in
-        rust) timeout -k 3 "$TIMEOUT" "$TARGET_BASE/$PROFILE/examples/interop-tail" "$role" "$URL" "$broadcast" ;;
-        js-native-node) (cd "$CLIENTS/js-native" && timeout -k 3 "$TIMEOUT" node --import tsx tail.ts "$role" "$URL" "$broadcast") ;;
-        js-native-bun) (cd "$CLIENTS/js-native" && timeout -k 3 "$TIMEOUT" bun tail.ts "$role" "$URL" "$broadcast") ;;
+        rust) timeout -k 3 "$limit" "$TARGET_BASE/$PROFILE/examples/interop-tail" "$role" "$URL" "$broadcast" ;;
+        js-native-node) (cd "$CLIENTS/js-native" && timeout -k 3 "$limit" node --import tsx tail.ts "$role" "$URL" "$broadcast") ;;
+        js-native-bun) (cd "$CLIENTS/js-native" && timeout -k 3 "$limit" bun tail.ts "$role" "$URL" "$broadcast") ;;
         *)
             echo "unknown tail client: $lang" >&2
             return 1

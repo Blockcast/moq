@@ -26,11 +26,10 @@ native JS adds both Rust-to-JS and JS-to-Rust under that runtime, so `--all` cov
 Node and Bun. `--tail` runs just these five lanes.
 
 The finite clients keep their session alive until the harness acknowledges the
-reader's complete clean end over stdin. This avoids using `moq import`, which
-currently closes its session at stdin EOF before its subscriptions drain. No
-sleep stands in for drain completion. A missing group, error, or stall fails the
-lane; the timeout only bounds failure. QUIC on localhost rarely reorders, so the
-ordering race remains covered by transport unit tests.
+reader's complete clean end over stdin, so a lane tests delivery rather than
+shutdown. No sleep stands in for drain completion. A missing group, error, or
+stall fails the lane; the timeout only bounds failure. QUIC on localhost rarely
+reorders, so the ordering race remains covered by transport unit tests.
 
 `just test media` is a separate, browser-only run that asks a harder
 question: is the media a viewer gets actually advancing and in sync, and does the

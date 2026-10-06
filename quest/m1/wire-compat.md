@@ -55,7 +55,3 @@ Guidance:
   is acknowledged (for example a skip list that the next release clears).
 - Wire the job into the existing nightly (`interop.yml` already has a
   schedule) and document the recipe beside `just test interop`.
-
-## Related
-
-- [Track tail interop](/quest/m1/track-tail-interop.md) - another cross-language case in the same harness
