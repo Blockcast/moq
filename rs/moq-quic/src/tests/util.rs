@@ -51,7 +51,7 @@ pub(super) struct Pair {
 impl Pair {
     pub(super) fn default_with_deterministic_pns() -> Self {
         let mut cfg = server_config();
-        let mut transport = TransportConfig::default();
+        let mut transport = cubic_transport();
         transport.deterministic_packet_numbers(true);
         cfg.transport = Arc::new(transport);
         Self::new(Default::default(), cfg)
@@ -710,6 +710,7 @@ impl Write for SharedBuffer {
 
 pub(super) fn server_config() -> ServerConfig {
     let mut config = ServerConfig::with_crypto(Arc::new(server_crypto()));
+    config.transport = Arc::new(cubic_transport());
     if !cfg!(feature = "bloom") {
         config
             .validation_token
@@ -724,6 +725,7 @@ pub(super) fn server_config_with_cert(
     key: PrivateKeyDer<'static>,
 ) -> ServerConfig {
     let mut config = ServerConfig::with_crypto(Arc::new(server_crypto_with_cert(cert, key)));
+    config.transport = Arc::new(cubic_transport());
     config
         .validation_token
         .sent(2)
@@ -766,37 +768,28 @@ fn server_crypto_inner(
 }
 
 pub(super) fn client_config() -> ClientConfig {
-    ClientConfig::new(Arc::new(client_crypto()))
+    let mut cfg = ClientConfig::new(Arc::new(client_crypto()));
+    cfg.transport = Arc::new(cubic_transport());
+    cfg
 }
 
 pub(super) fn client_config_with_deterministic_pns() -> ClientConfig {
     let mut cfg = ClientConfig::new(Arc::new(client_crypto()));
-    let mut transport = TransportConfig::default();
+    let mut transport = cubic_transport();
     transport.deterministic_packet_numbers(true);
     cfg.transport = Arc::new(transport);
     cfg
 }
 
-/// Transport running Cubic instead of the default BBR3
+/// The transport the connection tests run: Cubic, as upstream quinn's do, instead of BBR3
 ///
-/// For tests that script a lockstep packet schedule. At the harness's zero RTT the window-derived
-/// pacer stops pacing, while BBR3 paces from its own rate and releases a burst nanoseconds later.
+/// The tests script lockstep packet schedules at zero RTT. The window-derived pacer stops pacing
+/// there, while BBR3 paces from its own rate and releases a burst nanoseconds later, depending on
+/// how much of its budget the randomly sized handshake spent. Tests of BBR3 opt in.
 pub(super) fn cubic_transport() -> TransportConfig {
     let mut transport = TransportConfig::default();
     transport.congestion_controller_factory(Arc::new(congestion::CubicConfig::default()));
     transport
-}
-
-pub(super) fn client_config_cubic() -> ClientConfig {
-    let mut cfg = client_config();
-    cfg.transport = Arc::new(cubic_transport());
-    cfg
-}
-
-pub(super) fn server_config_cubic() -> ServerConfig {
-    let mut cfg = server_config();
-    cfg.transport = Arc::new(cubic_transport());
-    cfg
 }
 
 pub(super) fn client_config_with_certs(certs: Vec<CertificateDer<'static>>) -> ClientConfig {

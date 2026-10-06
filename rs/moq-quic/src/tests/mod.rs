@@ -275,7 +275,7 @@ fn stats_include_congestion_controller_bandwidth_estimate() {
         }
     }
 
-    let mut transport = TransportConfig::default();
+    let mut transport = cubic_transport();
     transport.congestion_controller_factory(Arc::new(TestControllerFactory));
     let mut config = client_config();
     config.transport_config(Arc::new(transport));
@@ -801,14 +801,13 @@ fn full_initial_window() {
     let _guard = subscribe();
 
     // Keep `current_mtu` pinned to `INITIAL_MTU`, which the default initial window of 12000 bytes
-    // is an exact multiple of, so that the window can be filled precisely. Cubic keeps the window
-    // at its initial size through the handshake.
+    // is an exact multiple of, so that the window can be filled precisely.
     let mut transport = cubic_transport();
     transport.mtu_discovery_config(None);
     let mut config = client_config();
     config.transport = Arc::new(transport);
 
-    let mut pair = Pair::new(Default::default(), server_config_cubic());
+    let mut pair = Pair::default();
     let (client_ch, _) = pair.connect_with(config);
     assert_eq!(pair.client_conn_mut(client_ch).bytes_in_flight(), 0);
     let window = pair.client_conn_mut(client_ch).congestion_window();
@@ -1022,7 +1021,7 @@ fn test_zero_rtt_incoming_limit<F: FnOnce(&mut ServerConfig)>(configure_server: 
 
     let _guard = subscribe();
 
-    let mut transport = TransportConfig::default();
+    let mut transport = cubic_transport();
     // Assume a low-latency connection so pacing doesn't interfere with the test
     transport.initial_rtt(Duration::from_millis(10));
     let transport = Arc::new(transport);
@@ -1378,7 +1377,7 @@ fn stream_id_limit() {
     let server = ServerConfig {
         transport: Arc::new(TransportConfig {
             max_concurrent_uni_streams: 1u32.into(),
-            ..TransportConfig::default()
+            ..cubic_transport()
         }),
         ..server_config()
     };
@@ -1474,7 +1473,7 @@ fn streams_blocked() {
     let server = ServerConfig {
         transport: Arc::new(TransportConfig {
             max_concurrent_uni_streams: 1u32.into(),
-            ..TransportConfig::default()
+            ..cubic_transport()
         }),
         ..server_config()
     };
@@ -1537,7 +1536,7 @@ fn data_blocked() {
     let server = ServerConfig {
         transport: Arc::new(TransportConfig {
             receive_window: 10u32.into(),
-            ..TransportConfig::default()
+            ..cubic_transport()
         }),
         ..server_config()
     };
@@ -1615,7 +1614,7 @@ fn stream_data_blocked() {
     let server = ServerConfig {
         transport: Arc::new(TransportConfig {
             stream_receive_window: 10u32.into(),
-            ..TransportConfig::default()
+            ..cubic_transport()
         }),
         ..server_config()
     };
@@ -1737,7 +1736,7 @@ fn data_blocked_dropped_when_limit_raised() {
     let server = ServerConfig {
         transport: Arc::new(TransportConfig {
             receive_window: 10u32.into(),
-            ..TransportConfig::default()
+            ..cubic_transport()
         }),
         ..server_config()
     };
@@ -1777,7 +1776,7 @@ fn stream_data_blocked_not_sent_after_reset() {
     let server = ServerConfig {
         transport: Arc::new(TransportConfig {
             stream_receive_window: 10u32.into(),
-            ..TransportConfig::default()
+            ..cubic_transport()
         }),
         ..server_config()
     };
@@ -1811,7 +1810,7 @@ fn data_blocked_retransmit() {
     let server = ServerConfig {
         transport: Arc::new(TransportConfig {
             receive_window: 10u32.into(),
-            ..TransportConfig::default()
+            ..cubic_transport()
         }),
         ..server_config()
     };
@@ -2064,7 +2063,7 @@ fn idle_timeout() {
     let server = ServerConfig {
         transport: Arc::new(TransportConfig {
             max_idle_timeout: Some(VarInt(IDLE_TIMEOUT)),
-            ..TransportConfig::default()
+            ..cubic_transport()
         }),
         ..server_config()
     };
@@ -2339,7 +2338,7 @@ fn stream_flow_control() {
     test_flow_control(
         TransportConfig {
             stream_receive_window: 2000u32.into(),
-            ..TransportConfig::default()
+            ..cubic_transport()
         },
         2000,
     );
@@ -2350,7 +2349,7 @@ fn conn_flow_control() {
     test_flow_control(
         TransportConfig {
             receive_window: 2000u32.into(),
-            ..TransportConfig::default()
+            ..cubic_transport()
         },
         2000,
     );
@@ -2456,7 +2455,7 @@ fn keep_alive() {
         transport: Arc::new(TransportConfig {
             keep_alive_interval: Some(Duration::from_millis(IDLE_TIMEOUT / 2)),
             max_idle_timeout: Some(VarInt(IDLE_TIMEOUT)),
-            ..TransportConfig::default()
+            ..cubic_transport()
         }),
         ..server_config()
     };
@@ -2800,7 +2799,7 @@ fn tail_loss_probe_keeps_ping_when_datagram_does_not_fit() {
     const PATH_MTU: u16 = 1452;
 
     let client_config = {
-        let mut config = client_config_cubic();
+        let mut config = client_config();
         Arc::get_mut(&mut config.transport)
             .unwrap()
             .initial_mtu(PATH_MTU)
@@ -2848,7 +2847,7 @@ fn tail_loss_respect_max_datagrams() {
     let _guard = subscribe();
     let client_config = {
         let mut c_config = client_config();
-        let mut t_config = TransportConfig::default();
+        let mut t_config = cubic_transport();
         //Disabling GSO, so only a single segment should be sent per iops
         t_config.enable_segmentation_offload(false);
         c_config.transport_config(t_config.into());
@@ -2918,7 +2917,7 @@ fn datagram_recv_buffer_overflow() {
         transport: Arc::new(TransportConfig {
             // Account for exactly two datagrams of metadata space
             datagram_receive_buffer_size: Some(WINDOW),
-            ..TransportConfig::default()
+            ..cubic_transport()
         }),
         ..server_config()
     };
@@ -2964,7 +2963,7 @@ fn datagram_larger_than_send_buffer_is_too_large() {
     let _guard = subscribe();
     let mut pair = Pair::default();
     let mut client_config = client_config();
-    let mut transport_config = TransportConfig::default();
+    let mut transport_config = cubic_transport();
     transport_config.datagram_send_buffer_size(1);
     client_config.transport_config(transport_config.into());
     let (client_ch, _) = pair.connect_with(client_config);
@@ -2987,7 +2986,7 @@ fn datagram_unsupported() {
     let server = ServerConfig {
         transport: Arc::new(TransportConfig {
             datagram_receive_buffer_size: None,
-            ..TransportConfig::default()
+            ..cubic_transport()
         }),
         ..server_config()
     };
@@ -3153,7 +3152,7 @@ fn repeated_request_response() {
     let server = ServerConfig {
         transport: Arc::new(TransportConfig {
             max_concurrent_bidi_streams: 1u32.into(),
-            ..TransportConfig::default()
+            ..cubic_transport()
         }),
         ..server_config()
     };
@@ -3231,7 +3230,7 @@ fn handshake_anti_deadlock_probe() {
 #[test]
 fn server_can_send_3_inital_packets() {
     let _guard = subscribe();
-    let mut transport = TransportConfig::default();
+    let mut transport = cubic_transport();
     // Assume a low-latency connection so pacing doesn't interfere with the test
     transport.initial_rtt(Duration::from_millis(10));
     let transport = Arc::new(transport);
@@ -4207,7 +4206,7 @@ fn endpoint_and_connection_impl_send_sync() {
 fn stream_gso() {
     let _guard = subscribe();
     let mut pair = Pair::default();
-    let (client_ch, _) = pair.connect_with(client_config_cubic());
+    let (client_ch, _) = pair.connect();
 
     let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
 
@@ -4298,7 +4297,7 @@ fn gso_truncation() {
 fn pad_initial_to_min_mtu() {
     let _guard = subscribe();
     for min_mtu in [INITIAL_MTU, 1280, 1333] {
-        let mut transport = TransportConfig::default();
+        let mut transport = cubic_transport();
         transport
             .initial_mtu(1452)
             .min_mtu(min_mtu)
@@ -4333,7 +4332,7 @@ fn pad_initial_to_min_mtu() {
 fn min_mtu_does_not_pad_application_data() {
     let _guard = subscribe();
     const MTU: u16 = 1333;
-    let mut transport = TransportConfig::default();
+    let mut transport = cubic_transport();
     transport.min_mtu(MTU).mtu_discovery_config(None);
     let mut config = client_config();
     config.transport_config(Arc::new(transport));
@@ -4428,7 +4427,7 @@ fn min_mtu_limits_application_loss_probes() {
         .pad_to_mtu(true);
     let mut config = client_config();
     config.transport_config(Arc::new(transport));
-    let mut pair = Pair::new(Default::default(), server_config_cubic());
+    let mut pair = Pair::default();
     let (client_ch, _) = pair.connect_with(config);
 
     pair.client_conn_mut(client_ch).ping();
@@ -4455,7 +4454,7 @@ fn min_mtu_limits_application_loss_probes() {
 fn pad_server_initial_to_min_mtu() {
     let _guard = subscribe();
     const MIN_MTU: u16 = 1333;
-    let mut transport = TransportConfig::default();
+    let mut transport = cubic_transport();
     transport
         .initial_mtu(1452)
         .min_mtu(MIN_MTU)
@@ -4479,7 +4478,7 @@ fn pad_server_initial_to_min_mtu() {
 fn min_mtu_respects_peer_max_udp_payload_size() {
     let _guard = subscribe();
     const PEER_MAX: u16 = 1280;
-    let mut transport = TransportConfig::default();
+    let mut transport = cubic_transport();
     transport.min_mtu(1452).mtu_discovery_config(None);
     let mut config = server_config();
     config.transport_config(Arc::new(transport));
@@ -4511,7 +4510,7 @@ fn pad_to_mtu() {
             initial_mtu: MTU,
             mtu_discovery_config: None,
             pad_to_mtu: true,
-            ..TransportConfig::default()
+            ..cubic_transport()
         };
         c_config.transport_config(t_config.into());
         c_config
@@ -4748,7 +4747,7 @@ fn oversized_datagrams_trigger_unblock() {
     pair.mtu = INITIAL_MTU;
 
     let mut client_config = client_config();
-    let mut transport_config = TransportConfig::default();
+    let mut transport_config = cubic_transport();
     let send_buffer_size = transport_config.datagram_send_buffer_size;
     transport_config.initial_mtu(INITIAL_MTU as u16);
     client_config.transport_config(transport_config.into());
@@ -4851,8 +4850,8 @@ fn preferred_address() {
 fn handshake_sequence() {
     let _guard = subscribe();
 
-    let mut pair = Pair::new(Default::default(), server_config_cubic());
-    let ch = pair.begin_connect(client_config_cubic());
+    let mut pair = Pair::default();
+    let ch = pair.begin_connect(client_config());
 
     pair.step();
     assert_matches!(pair.client_conn_mut(ch).poll(), None);
@@ -4890,8 +4889,8 @@ fn handshake_confirmation_no_resumption_shortcut() {
     let _guard = subscribe();
 
     // Initial connection
-    let mut pair = Pair::new(Default::default(), server_config_cubic());
-    let config = client_config_cubic();
+    let mut pair = Pair::default();
+    let config = client_config();
     let (ch, _) = pair.connect_with(config.clone());
     pair.client
         .connections
@@ -5031,7 +5030,7 @@ fn qlog_packet_lost_trigger() {
     let qlog = SharedBuffer::default();
     let mut qlog_config = QlogConfig::default();
     qlog_config.writer(Box::new(qlog.clone()));
-    let mut transport = TransportConfig::default();
+    let mut transport = cubic_transport();
     transport
         .deterministic_packet_numbers(true)
         .qlog_stream(qlog_config.into_stream());
@@ -5161,7 +5160,7 @@ fn cwnd_limited_is_not_reported_when_only_pacing_blocks() {
     let _guard = subscribe();
     let reports = Arc::new(AtomicU64::new(0));
 
-    let mut transport = TransportConfig::default();
+    let mut transport = cubic_transport();
     transport.congestion_controller_factory(Arc::new(PacingOnlyConfig {
         cwnd_limited_reports: reports.clone(),
     }));
@@ -5251,7 +5250,7 @@ fn send_quantum_bounds_the_gso_batch() {
 
     let _guard = subscribe();
 
-    let mut transport = TransportConfig::default();
+    let mut transport = cubic_transport();
     transport.congestion_controller_factory(Arc::new(FixedQuantumController {
         send_quantum: QUANTUM_DATAGRAMS as u64 * DEFAULT_MTU as u64,
     }));
@@ -5768,9 +5767,16 @@ fn bbr_marking_versus_dropping() {
 
     let _guard = subscribe();
     let run = |marks_ce| {
-        let mut pair = Pair::default();
+        let mut transport = TransportConfig::default();
+        transport.congestion_controller_factory(Arc::new(congestion::Bbr3Config::default()));
+        let transport = Arc::new(transport);
+        let mut server_cfg = server_config();
+        server_cfg.transport = transport.clone();
+        let mut pair = Pair::new(Default::default(), server_cfg);
         pair.latency = Duration::from_millis(10);
-        let (client_ch, server_ch) = pair.connect();
+        let mut client_cfg = client_config();
+        client_cfg.transport = transport;
+        let (client_ch, server_ch) = pair.connect_with(client_cfg);
         pair.bottleneck = Some(Bottleneck::new(BPS_LIMIT, 20_000, marks_ce));
         let time = upload(&mut pair, client_ch, server_ch, TOTAL_BYTES);
         let goodput = TOTAL_BYTES as f64 / time.as_secs_f64();
@@ -5850,4 +5856,11 @@ fn upload(
     }
     assert_eq!(received, total);
     pair.time.saturating_duration_since(start)
+}
+
+#[test]
+fn default_controller_is_bbr3() {
+    let factory = TransportConfig::default().congestion_controller_factory;
+    let controller = factory.build(Instant::now(), INITIAL_MTU);
+    assert!(controller.into_any().downcast::<congestion::Bbr3>().is_ok());
 }
