@@ -139,7 +139,9 @@ pub enum Error {
 	IrohDisabled,
 
 	/// A client CA was configured, but no QUIC listener is built to verify it.
-	#[error("tls.root (mTLS) needs a QUIC listener; the TCP, Unix, and WebSocket listeners carry no TLS to verify a client certificate")]
+	#[error(
+		"tls.root (mTLS) needs a QUIC listener; the TCP, Unix, and WebSocket listeners carry no TLS to verify a client certificate"
+	)]
 	MtlsUnsupported,
 
 	/// A worker group was asked for more members than the connection ID's one-byte

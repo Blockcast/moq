@@ -282,7 +282,12 @@ impl Config {
 	/// with the same `client_ca`. `tls` is the client identity an `https://` server
 	/// is dialed with; `node` names this relay in every request. Must be called
 	/// within a Tokio runtime, which drives the admission decider.
-	pub fn init(&self, node: impl Into<String>, tls: &moq_tokio::tls::Connect, client_ca: bool) -> anyhow::Result<Auth> {
+	pub fn init(
+		&self,
+		node: impl Into<String>,
+		tls: &moq_tokio::tls::Connect,
+		client_ca: bool,
+	) -> anyhow::Result<Auth> {
 		self.validate(client_ca)?;
 		let decider = match (&self.url, self.public_grant()) {
 			(Some(url), _) => {
