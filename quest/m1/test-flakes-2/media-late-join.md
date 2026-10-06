@@ -1,10 +1,10 @@
-# [S] Media late join within one GOP
+# [S] Media late join catches up to live
 
 ## Goal
 
-A viewer joining a broadcast through a relay after a demand gap presents the
-newest GOP, never an older one, and the `just test media` late-join check
-("late join starts live") passes under load without a wider budget.
+A viewer joining a broadcast through a relay after a demand gap shows video
+promptly and reaches the live edge within a bound, and the late-join check
+asserts exactly that and passes under load.
 
 ## Plan
 
@@ -39,20 +39,16 @@ from that GOP's keyframe, not from its playout position. Relay log: groups
 7, 8, 9 served in 1ms with a 145ms budget, and the player shows frames 360ms
 behind the published keyframe.
 
-Open decision (maintainer): what keeps a joiner off pre-gap media that its
-budget legitimately reaches.
+Decided 2026-10-06 by the maintainer: a joiner showing the reachable pre-gap
+GOP at once and then fast-forwarding to live is the wanted behavior, so no
+player or consumer change. The check is what's too strict: it asserts the
+first presented frame is at or after the newest published keyframe.
 
-1. Recommended: in live (unbuffered) mode, the watch player presents nothing
-   older than its playout position (newest timestamp minus delay) and decodes
-   the rest silently. This holds however the groups interleave: the relay
-   served the cached GOP and the marker within 1ms of each other, so whatever
-   decides has to run at presentation, after both have landed. Buffered
-   playback still starts at the head of what its budget can play.
-2. The hang consumer (`js/hang` `Container.Consumer`, and its Rust mirror)
-   drops every group before a discontinuity marker that lands before its
-   first frame is handed out. The marker already exists for this ("a later
-   subscriber resumes ... without the pre-gap group reading as live"). It's
-   narrower, but it loses the race whenever the cached GOP's keyframe is
-   handed out before the marker lands.
+Remaining work: the late-join check (`just test media` and the interop
+browser lane) asserts what a viewer cares about instead: video shows within a
+start bound, and the player reaches the live edge within a catch-up bound.
+Set both bounds from measurements, looped under synthetic CPU load (the
+maintainer approved a bounded load generator such as `stress-ng` for these
+runs), and keep the relay fixes' deterministic tests as the regression guard.
 
 Public API: none. Wire: none.

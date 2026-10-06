@@ -31,4 +31,4 @@ Public API: none. Wire: none.
 ## Required
 
 - [Subscription cut by disconnect](/quest/m1/test-flakes-2/subscription-cut.md) - a publisher disconnect never ends a subscription clean
-- [Media late join](/quest/m1/test-flakes-2/media-late-join.md) - `just test media` late join stays within one GOP, or the regression is fixed
+- [Media late join](/quest/m1/test-flakes-2/media-late-join.md) - a late joiner shows video promptly and catches up to live, and the check asserts that under load
