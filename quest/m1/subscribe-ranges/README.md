@@ -30,15 +30,13 @@ relay bounds a sparse FETCH only if the model can request ranges:
   `request_groups` as a separate API was rejected. A publisher's
   `track::Dynamic` receives range requests for misses, replacing per-group
   `requested_group`, and `fetch_group` becomes a one-range subscription or is
-  removed. This breaks published moq-net APIs, so the line lands on `dev`.
+  removed. This breaks published moq-net APIs.
 - **moq-transport.** Some deployments use non-contiguous group numbers, so a
   relay never probes upstream one group at a time. Upstream, each run of
   locally missing groups becomes one standalone range FETCH, capped below the
   upstream's live group (which arrives via SUBSCRIBE), so it never blocks.
   moq-transport caps a FETCH at the Largest Object, so it can return the live
-  group's existing prefix but never wait for its future objects. Open: whether
-  the current joining FETCH for that prefix (a SUBSCRIBE starting mid-group
-  whose head isn't cached) stays, which today's bridge relies on. Downstream,
+  group's existing prefix but never wait for its future objects. Downstream,
   an IETF FETCH is served from the model's ranges, capped at the Largest
   Object.
 - Ranges are frame-precise (`Position`), not whole groups. The IETF joining

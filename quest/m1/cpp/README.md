@@ -64,8 +64,14 @@ Confirmed in [#4100](https://github.com/moq-dev/moq/pull/4100):
 - MSVC is covered by the post-merge nightly, not a branch dispatch: branches
   never dispatch the nightly.
 
+Decided in the 2026-10-05 audit: the [FFI shape](/quest/m1/ffi-shape/README.md)
+line (#4519) lands first, and this line ports `cpp/moq`, `cpp/obs`, and the
+C++ interop client onto the reshaped moq-ffi, since its branch still calls
+APIs FFI shape deleted.
+
 ## Required
 
+- [FFI shape](/quest/m1/ffi-shape/README.md) - lands first; this line ports onto its moq-ffi
 - [Generator](/quest/m1/cpp/generator.md) - the uniffi 0.32 C++ generator with futures and expected-style errors, pinned and generating `cpp/ffi` in CI
 - [Package](/quest/m1/cpp/package.md) - the `cpp/moq` wrapper, CMake package, release tarball, interop client, and docs
 - [Cancel](/quest/m1/cpp/cancel.md) - a cancelled or consumed future reports `valid() == false`, like `std::future`, and a read of it aborts with a message naming the misuse
@@ -77,5 +83,4 @@ Confirmed in [#4100](https://github.com/moq-dev/moq/pull/4100):
 
 - [vcpkg registry](/quest/m2/cpp-vcpkg.md) - a registry we own serves the prebuilt package to `vcpkg` manifests
 - [Conan remote](/quest/m3/cpp-conan.md) - a remote we own serves the prebuilt package to Conan
-- [C# through moq-ffi](/quest/m3/cs/README.md) - the same recipe with NordSecurity's C# generator
 - [Unreal prototype](/quest/m3/unreal.md) - a UE5 module consumes the package with exceptions disabled

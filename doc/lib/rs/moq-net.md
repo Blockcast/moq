@@ -17,6 +17,7 @@ above ([hang](/lib/rs/hang)); relays and CDNs implement only this.
 
 - **Origins** scope what a session can see, and merge duplicate subscriptions so a broadcast is pulled upstream once no matter how many local readers.
 - **Broadcasts** are created unannounced and invisible to everyone, then announced as an exact route, or served below a prefix with `dynamic`. A consumer of the same origin sees exactly what a peer sees. Discovery accepts pattern unions; events carry the advertised prefix and captures for a complete match.
+- **Epochs** identify publisher instances with a canonical UUIDv7 and explicit path helpers; see [publisher epochs](/concept/moq-lite#publisher-epochs).
 - **Patterns** (`Pattern`, `Patterns`) are re-exported from [`moq-pattern`](https://docs.rs/moq-pattern). Literal `Path` stays a coordinate.
 - **Tracks** carry groups with a priority, an optional publisher retention window (`Info::max_age`), and a timescale. Subscribers set their own priority and max age and can change them live.
 - **Groups** are written frame by frame and delivered on independent streams. Old groups are cached for fetch-by-sequence; stale groups are skipped per the subscriber's budget.
@@ -45,8 +46,8 @@ grammar lives on the concept page.
 ## Driving sessions
 
 `Client::connect(now, transport)`, `Server::accept(now, transport)`, and
-`server::Handshake::ok()` return `(Session, Driver)`. `moq-net` never spawns
-tasks or reads the clock: the caller polls the driver and supplies the time.
+`server::Handshake::ok()` return `(Session, Driver)`. Drivers never spawn
+tasks or read the clock: the caller polls the driver and supplies the time.
 `moq_net::time::run` does that on tokio or in the browser.
 
 ```rust
@@ -68,9 +69,11 @@ second, for finished tracks to deliver their last groups and FIN, returning
 `Error::Timeout` if it gave up. Finish or abort live tracks before calling it.
 Both protocols withdraw the session's announcements and wait for delivery
 under that same deadline. IETF drafts 14 through 16 send withdrawals without
-waiting, and IETF media streams are not drained yet. Dropping the driver
-cancels the session. `moq-tokio` and `moq-wasm` drive sessions for their
-callers.
+waiting. Dropping the driver cancels the session. `moq-tokio` and `moq-wasm`
+drive sessions for their callers. A deliberate local session close ends
+received tracks cleanly after their delivered groups. A peer close ends
+received tracks and open group readers with the session error, preserving its
+close code.
 
 `origin::Producer::new` returns a driver with the same `time::Driver`
 interface. It calls `cache::Pool::gc(now)` after each poll and folds the next
@@ -179,3 +182,17 @@ subscription's upstream request.
 
 Inside a group, `set_frames(...)` applies the same range syntax to frame
 indices.
+
+## Subscriber demand
+
+Track producers, pending track requests, and dynamic track handlers return a
+`track::Demand` from `demand()`. Group producers and pending group requests
+return `group::Demand`; broadcast producers return `broadcast::Demand`.
+Watch `used()` / `unused()` (or `poll_used` / `poll_unused`) on these handles,
+or take a snapshot with `is_used()`. Demand handles cannot write or abort and
+do not keep a producer or request alive. A pending group request counts every
+caller sharing its fetch, so one caller leaving does not cancel the others.
+The last caller to leave withdraws the fetch, so a later fetch of that group
+starts a fresh request; a handler that sees the request unused just drops it.
+Use the producer's `abort_unused` to atomically end an idle track; observing
+unused demand alone does not protect against a new subscriber arriving.

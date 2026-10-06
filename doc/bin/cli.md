@@ -7,8 +7,9 @@ description: The moq media router, for publishing, playing, converting, and gate
 
 `moq` is a media router. One process connects to a relay (or hosts sessions
 itself) and moves media into MoQ from a source, out of MoQ to a sink, or plays
-it locally. Install it with `cargo install moq-cli`, brew, apt, dnf, winget,
-or Docker; see [Install](/setup/install).
+it locally. On macOS or Linux, install it with
+`curl -fsSL https://moq.sh | sh`, or use cargo, brew, apt, dnf, winget, or
+Docker; see [Install](/setup/install).
 
 ## What it does
 
@@ -83,6 +84,30 @@ downstream sees it. A sparse stream such as SCTE-35 goes quiet between cues, so
 the line reports rather than alarms; `Import::stats` carries the same counters
 for a caller that sets its own limit.
 
+`import ts` also counts the ETSI TR 101 290 errors of the feed it receives, at
+that standard's fixed limits: `TS_sync_loss`, `Sync_byte_error`, `PAT_error`,
+`Continuity_count_error`, `PMT_error`, `Transport_error`, `CRC_error` (PAT and
+PMT), `PCR_repetition_error`, `PCR_discontinuity_indicator_error` and
+`PTS_error`. They are cumulative, logged with their totals in the sample after
+any of them moves, and carried on `Import::stats` stream-wide and per PID. They
+change nothing that is published. They grade the stream as it reached the
+importer, not the wire a receiver sees downstream, and the PCR checks grade
+consecutive PCR values rather than arrival times, so they speak for the encoder
+and not for the network in front of the importer. Table, PCR and PTS intervals
+run on the program clock, which starts at the first PCR after the PMT.
+`PID_error` is covered, more strictly, by the access-unit counts above.
+`PCR_accuracy_error` is not measured.
+
+A corrupt media packet, malformed PES header, or damaged codec access unit is
+refused whole and counted in the PID's cumulative `damaged` counter, beside
+`resyncs`, `discarded`, and `unconfirmed`. Ingest continues on every other PID.
+Video closes its group at the break and resumes at its next keyframe, as it does
+after a continuity-counter gap: the pictures in between may reference the lost
+one, so they are dropped rather than decoded with artefacts. Each break freezes
+video for up to one GOP. The shared TS stats log reports each counter increase,
+including at the end of input. Publishing, catalog, and clock errors still end
+the import.
+
 MPEG-TS import takes one program. A multi-program stream is refused before
 anything is published, naming its programs, rather than merged onto one clock;
 a PAT that adds a program mid-stream ends the import the same way.
@@ -91,6 +116,11 @@ the first PAT lists as its own broadcast, with its own clock and catalog, keepin
 the catalog suffix last: `--broadcast event.hang` publishes `event/1.hang`,
 `event/2.hang`, and so on. `export ts` writes one program per broadcast.
 `import srt` takes the same `--program`.
+A selected program's SI describes that service alone: its SDT lists only the
+selected service, and other services' EIT is dropped. Network-wide tables (NIT,
+BAT, TDT/TOT, and the SDT and EIT of other transport streams) pass through.
+SI matches the selection by DVB `service_id`, which is assumed to equal the PAT
+`program_number`.
 
 ```bash
 moq --connect https://relay.example.com/anon --broadcast event.hang import ts --program all < mux.ts
@@ -124,7 +154,7 @@ MKV uses the same flag to cap clusters, which otherwise follow video GOPs.
 
 ```bash
 moq --connect https://relay.example.com/anon --broadcast my-stream.hang play
-moq ... play --delay 500ms          # trade latency for a jittery link
+moq ... play --delay 500ms          # fix the delay instead of measuring it
 ```
 
 Decodes H.264, H.265, and AV1 video using the platform hardware decoder where
@@ -133,11 +163,18 @@ log names the decoder each track opened. `--video-name` and `--audio-name`
 pick a rendition. HE-AAC signaled only in band (implicit SBR, as over MPEG-TS)
 plays as its half-rate AAC-LC core.
 
-Playback runs on a clock it owns. `--delay` (default 100 ms) is how far it
-trails the live edge, which is both the jitter a late frame may absorb and the
-point past which a stalled group is skipped. The speaker holds the delay, with a
-50 ms floor under it, and the picture is scheduled against where the speaker
-actually is. While video owns the clock, a frame arriving earlier than predicted
+Playback runs on a clock it owns. `--delay` is how far it trails the live
+edge: the jitter a late frame may absorb. The default, `auto`, measures how
+unevenly audio arrives and sizes the speaker's buffer to match, using the same
+[algorithm](/concept/audio-jitter) as the browser player, so a publisher that
+flushes 100 ms at a time gets a buffer deep enough to play through the next
+flush. It waits up to 2 s on a stalled group before skipping it, since a budget
+any shorter would hide the very lateness it measures; a broadcast with no audio
+has nothing to measure, so video trails by 100 ms and skips past that. A duration fixes the delay
+instead, and doubles as the point past which a stalled group is skipped. The
+speaker holds the delay, with a 50 ms floor under it: it pads back up to the
+delay after running dry and skips back down onto it after a burst. The picture
+is scheduled against where the speaker actually is. While video owns the clock, a frame arriving earlier than predicted
 pulls playback forward, so a late start catches up to live instead of staying
 behind it. Once the speaker owns the clock, video follows the speaker instead.
 
@@ -183,6 +220,16 @@ to fit the connection's bandwidth estimate. `moq devices` prints every source
 id. Requires the `capture` feature; on Linux that needs the ALSA headers for
 the microphone, and `--display` and `pipewire:` cameras also need the
 `pipewire` feature (links libpipewire).
+
+On Windows, display and window capture use Windows.Graphics.Capture and
+require Windows 10 2004 (build 19041) or newer. Cursor capture follows the
+capture configuration. The system capture border stays visible unless the OS
+supports borderless capture and grants access. Frames are converted to NV12
+on the GPU; software encoding reads them back. Windows application capture
+and system audio are separate capabilities, not enabled by this backend.
+Windows `display:N` selectors are enumeration indices; switching from Desktop
+Duplication to WGC can change which monitor a saved selector names. Run
+`moq devices` again and reselect the intended display after upgrading.
 
 ## Transcode
 
@@ -272,11 +319,11 @@ moq --connect https://relay.example.com/anon \
 
 ## Redundant publishers
 
-Two publishers that share a Hop ID (`--hop 42`) are treated as
-interchangeable sources: relays hold both routes and fail over at a group
-boundary. They must produce identical tracks with aligned groups. Everywhere
-else leave `--hop` unset: a fresh id per run is what makes a restarted
-encoder take over cleanly instead of splicing mid-stream.
+Two publishers of the same broadcast name are interchangeable sources:
+relays hold both routes and fail over between them mid-group. They must
+produce identical tracks with aligned groups. A restarted encoder is the same
+broadcast too, so one whose groups restart from 0 must publish under a new
+name, or viewers wait for its sequence to catch up.
 
 ## Cluster
 
