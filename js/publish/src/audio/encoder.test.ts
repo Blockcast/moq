@@ -253,6 +253,7 @@ async function setup(baseline = new Baseline(), codec?: Codec) {
 		config,
 		encoder,
 		enabled,
+		capture,
 		track,
 		rendition,
 		feed,
@@ -347,7 +348,7 @@ test("disabling with a subscriber attached marks where submitted audio ends", as
 test("disabling keeps the rendition in the catalog with enabled: false", async () => {
 	using _webcodecs = installFakeWebCodecs();
 	using env = await setup();
-	const { encoder, enabled, rendition } = env;
+	const { encoder, enabled, capture, rendition } = env;
 
 	const before = encoder.out.catalog.peek();
 	expect(before).toBeDefined();
@@ -359,7 +360,14 @@ test("disabling keeps the rendition in the catalog with enabled: false", async (
 	expect(rendition.config.peek()).toEqual({ ...before, enabled: false } as never);
 	expect(encoder.out.active.peek()).toBe(false);
 
+	// Muting released the microphone, so re-enabling waits on its format without dropping the rendition.
+	const format = capture.out.format.peek();
+	capture.out.format.set(undefined as never);
 	enabled.set(true);
+	await settle();
+	expect(encoder.out.catalog.peek()).toEqual({ ...before, enabled: false } as never);
+
+	capture.out.format.set(format);
 	await settle();
 	expect(encoder.out.catalog.peek()).toEqual(before);
 });

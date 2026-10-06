@@ -173,6 +173,9 @@ export class Encoder {
 	#estimate = new Signal<Estimator["estimate"]>({});
 	// The last config published while enabled, which a disabled rendition keeps advertising.
 	#last?: Catalog.VideoConfig;
+	// Whether the rendition was disabled since a config last resolved, so it keeps advertising `#last`
+	// as disabled until the re-enabled capture resolves a new one.
+	#paused = false;
 
 	constructor(name: string, props?: EncoderProps) {
 		this.name = name;
@@ -283,6 +286,7 @@ export class Encoder {
 
 		let lastKeyframe: Time.Micro | undefined;
 		let lastEncoded: Time.Micro | undefined;
+		let tearingDown = false;
 
 		effect.spawn(async () => {
 			const encoder = new VideoEncoder({
@@ -304,7 +308,9 @@ export class Encoder {
 					}
 				},
 				error: (err: Error) => {
-					producer.close(err);
+					// The black keyframe is cosmetic; failing it must not end the track the broadcast owns.
+					if (tearingDown) console.warn("video encoder failed while stopping:", err);
+					else producer.close(err);
 				},
 			});
 
@@ -380,6 +386,7 @@ export class Encoder {
 			// has to wait for it. A viewer that predates `enabled` keeps selecting a disabled rendition,
 			// and shows black instead of a frozen picture.
 			await new Promise((resolve) => effect.abort.addEventListener("abort", resolve, { once: true }));
+			tearingDown = true;
 			try {
 				const config = configured;
 				if (
@@ -397,7 +404,8 @@ export class Encoder {
 					} finally {
 						frame.close();
 					}
-					await encoder.flush();
+					// A rejected flush already reported through the error callback.
+					await encoder.flush().catch(() => {});
 				}
 			} finally {
 				if (encoder.state !== "closed") encoder.close();
@@ -410,20 +418,19 @@ export class Encoder {
 	}
 
 	// Publishes the catalog for the configured settings. A disabled rendition keeps its last config,
-	// since muting also releases the capture it would resolve a new one from.
+	// since muting also releases the capture it would resolve a new one from. It stays disabled after
+	// re-enabling until the reopened capture resolves, so an unmute is one field changing too.
 	#runCatalog(effect: Effect): void {
-		const enabled = effect.get(this.in.enabled);
 		const estimate = effect.get(this.#estimate);
-		if (!enabled) {
-			effect.set(this.#out.catalog, this.#last && { ...this.#last, ...estimate, enabled: false });
-			return;
-		}
-
-		const live = effect.get(this.#live);
+		const enabled = effect.get(this.in.enabled);
+		if (!enabled) this.#paused = true;
+		const live = enabled ? effect.get(this.#live) : undefined;
 		if (!live) {
-			effect.set(this.#out.catalog, undefined);
+			const last = this.#paused ? this.#last : undefined;
+			effect.set(this.#out.catalog, last && { ...last, ...estimate, enabled: false });
 			return;
 		}
+		this.#paused = false;
 
 		// Advertise the codec string the probe's encoder reported rather than the one we configured,
 		// so it names the profile and level the bitstream actually carries.

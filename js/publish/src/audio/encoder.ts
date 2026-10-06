@@ -215,6 +215,9 @@ export class Encoder {
 	#estimate = new Signal<Estimator["estimate"]>({});
 	// The last config published while enabled, which a disabled rendition keeps advertising.
 	#last?: Catalog.AudioConfig;
+	// Whether the rendition was disabled since a config last resolved, so it keeps advertising `#last`
+	// as disabled until the re-enabled capture resolves a new one.
+	#paused = false;
 
 	constructor(name: string, props?: EncoderProps) {
 		// `source` moved to Audio.Capture, which renditions share. TypeScript catches this, but a
@@ -407,19 +410,19 @@ export class Encoder {
 
 	// Publish the config immediately so a consumer can request the demand-gated track. Once encoding
 	// starts, republish Opus with the exact decoder description reported for that encoder config. A
-	// disabled rendition keeps its last config, since muting also releases the capture.
+	// disabled rendition keeps its last config, since muting also releases the capture, and stays
+	// disabled after re-enabling until the reopened capture reports its format.
 	#runCatalog(effect: Effect): void {
 		const estimate = effect.get(this.#estimate);
-		if (!effect.get(this.in.enabled)) {
-			effect.set(this.#out.catalog, this.#last && { ...this.#last, ...estimate, enabled: false });
-			return;
-		}
-
-		const config = effect.get(this.#config)?.catalog;
+		const enabled = effect.get(this.in.enabled);
+		if (!enabled) this.#paused = true;
+		const config = enabled ? effect.get(this.#config)?.catalog : undefined;
 		if (!config) {
-			effect.set(this.#out.catalog, undefined);
+			const last = this.#paused ? this.#last : undefined;
+			effect.set(this.#out.catalog, last && { ...last, ...estimate, enabled: false });
 			return;
 		}
+		this.#paused = false;
 
 		const decoder = effect.get(this.#decoderDescription);
 		const catalog = decoder?.config === config ? { ...config, description: decoder.description } : config;

@@ -620,8 +620,12 @@ test("disabling encodes one black keyframe and keeps the rendition with enabled:
 		expect(disabled?.codec).toBe(before?.codec);
 		expect(disabled?.codedWidth).toBe(before?.codedWidth);
 
-		source.set({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) });
+		// Re-enabled before the capture reopens: still the same rendition, still disabled.
 		enabled.set(true);
+		await settle();
+		expect(encoder.out.catalog.peek()).toEqual(disabled);
+
+		source.set({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) });
 		await settle();
 		expect(encoder.out.catalog.peek()?.enabled).toBeUndefined();
 		expect(encoded.filter((frame) => frame.black)).toHaveLength(1);
