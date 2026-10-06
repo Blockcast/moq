@@ -2382,7 +2382,7 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 		*seen = watch.seen();
 		front.retain_routes(|route| table.routes.covers(&path.as_path(), route));
 		let best = table
-			.best_route(&path.as_path(), horizon, front.refused_routes())
+			.best_route(&path.as_path(), horizon, front.excluded_routes())
 			.map(|entry| Candidate {
 				route: entry.id,
 				local: entry.local,
@@ -2392,6 +2392,16 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 			.and_then(|id| sources.get(&id))
 			.is_some_and(|source| source.is_closing());
 		Event::Selected { best, serving_closing }
+	};
+
+	// Whether a route's refusal is the answer: only the current winner speaks for the
+	// path. A retraction resolves like a rejection, and a route beaten while its
+	// request was pending speaks for nobody, so either one re-selects instead.
+	let standing = |front: &Front, route: u64| {
+		shared
+			.read()
+			.best_route(&path.as_path(), horizon, front.excluded_routes())
+			.is_some_and(|best| best.id == route)
 	};
 
 	events.push_back(select(&mut front, &sources, &mut seen));
@@ -2437,7 +2447,7 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 								route,
 								result: Err(Refusal {
 									err: Error::Unroutable,
-									standing: true,
+									standing: standing(&front, route),
 								}),
 							});
 							continue;
@@ -2445,13 +2455,15 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 						let mut serve = server.lock();
 						if serve.closed {
 							// Retracted under us, or its handler dropped while the
-							// announcement stands: it cannot serve.
+							// announcement stands: it cannot serve. A retraction
+							// leaves the table before it closes the server, under
+							// the same lock, so the table tells the two apart.
 							drop(serve);
 							events.push_back(Event::Resolved {
 								route,
 								result: Err(Refusal {
 									err: Error::Unroutable,
-									standing: true,
+									standing: standing(&front, route),
 								}),
 							});
 							continue;
@@ -2481,7 +2493,7 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 											route,
 											result: Err(Refusal {
 												err: Error::Unroutable,
-												standing: true,
+												standing: standing(&front, route),
 											}),
 										});
 										continue;
@@ -2740,17 +2752,13 @@ async fn serve_front(task: FrontTask) -> Vec<TrackIo> {
 						sources.insert(id, source);
 						Event::Resolved { route, result: Ok(id) }
 					}
-					Err(err) => {
-						// A retraction and a handler's rejection resolve alike, so
-						// the table tells them apart: an `Unroutable` from a route
-						// that still stands is the handler's answer.
-						let standing =
-							!matches!(err, Error::Unroutable) || shared.read().routes.covers(&path.as_path(), route);
-						Event::Resolved {
-							route,
-							result: Err(Refusal { err, standing }),
-						}
-					}
+					Err(err) => Event::Resolved {
+						route,
+						result: Err(Refusal {
+							err,
+							standing: standing(&front, route),
+						}),
+					},
 				}
 			}
 			Step::SourceClosed(source) => Event::SourceClosed { source },
@@ -3393,7 +3401,7 @@ impl OriginState {
 	}
 
 	/// The best served route covering `path` (absolute) for a requester seeing
-	/// `horizon`, skipping the `refused` entry ids.
+	/// `horizon`, skipping the `excluded` entry ids.
 	///
 	/// The most specific covering prefix wins outright, so a narrow advertise-only
 	/// announcement shadows a broad served one: requests under it resolve
@@ -3401,10 +3409,10 @@ impl OriginState {
 	/// prefix, the cheapest served one is picked by [`route_order`].
 	///
 	/// Only announced routes are candidates: an unannounced broadcast serves
-	/// nobody, and does not shadow anything either. Routes `refused` for the
+	/// nobody, and does not shadow anything either. Routes `excluded` for the
 	/// front's path are skipped. A broadcast published on this origin competes
 	/// on cost like any other route and wins a tie.
-	fn best_route(&self, path: &Path, horizon: Horizon, refused: &HashSet<u64>) -> Option<&RouteEntry> {
+	fn best_route(&self, path: &Path, horizon: Horizon, excluded: &HashSet<u64>) -> Option<&RouteEntry> {
 		// Covering prefixes of one path form a chain, so the deepest node with a
 		// candidate holds the unique longest prefix; walking down, the last such
 		// node decides.
@@ -3417,7 +3425,7 @@ impl OriginState {
 				.filter(|entry| entry.live())
 				.filter(|entry| entry.scope.matches(path.as_str()))
 				.filter(|entry| horizon.admits(entry))
-				.filter(|entry| !refused.contains(&entry.id))
+				.filter(|entry| !excluded.contains(&entry.id))
 				.peekable();
 			if candidates.peek().is_some() {
 				best = candidates
@@ -6883,6 +6891,85 @@ mod tests {
 		let served = broadcast::Info::new().produce();
 		request.accept(&served);
 		pending.await.expect("resolves");
+	}
+
+	/// A refusal from the longest prefix is the answer: neither a costlier advertiser of
+	/// that prefix nor a catch-all is asked instead.
+	#[tokio::test]
+	async fn refusal_never_falls_through() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let catch_all = producer.dynamic("", Route::default()).unwrap();
+		let winner = producer.dynamic("room", Route::default()).unwrap();
+		let sibling = producer.dynamic("room", Route::default().with_cost(2)).unwrap();
+
+		let mut pending = Box::pin(consumer.request_broadcast("room/alice"));
+		assert!((&mut pending).now_or_never().is_none());
+		queued(&winner).await.reject(Error::NotFound);
+		let mut result = None;
+		settle(|| {
+			result = (&mut pending).now_or_never();
+			result.is_some()
+		})
+		.await;
+		let err = result.unwrap().err().unwrap();
+		assert!(matches!(err, Error::NotFound), "unexpected end: {err}");
+
+		for other in [&sibling, &catch_all] {
+			assert!(other.poll_requested_broadcast(&kio::Waiter::noop()).is_pending());
+		}
+	}
+
+	/// A refusal from a route a local broadcast superseded while it was pending is moot:
+	/// the request resolves to the local broadcast instead of ending.
+	#[tokio::test]
+	async fn superseded_refusal_does_not_end_the_request() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let stale = producer.dynamic("room", Route::default()).unwrap();
+
+		let mut pending = Box::pin(consumer.request_broadcast("room/alice"));
+		assert!((&mut pending).now_or_never().is_none());
+		let request = queued(&stale).await;
+
+		// The local broadcast wins before the front sees the rejection.
+		let local = producer.create_broadcast("room/alice").unwrap();
+		local.announce(Route::default()).unwrap();
+		request.reject(Error::NotFound);
+
+		let mut result = None;
+		settle(|| {
+			result = (&mut pending).now_or_never();
+			result.is_some()
+		})
+		.await;
+		assert!(result.unwrap().is_ok(), "the superseded refusal ended the request");
+	}
+
+	/// The same holds for a more specific remote route: the beaten route's refusal is
+	/// moot, and the new winner is asked instead.
+	#[tokio::test]
+	async fn refusal_from_a_beaten_route_asks_the_new_winner() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let stale = producer.dynamic("room", Route::default()).unwrap();
+
+		let mut pending = Box::pin(consumer.request_broadcast("room/alice"));
+		assert!((&mut pending).now_or_never().is_none());
+		let request = queued(&stale).await;
+
+		let winner = producer.dynamic("room/alice", Route::default()).unwrap();
+		request.reject(Error::NotFound);
+		let source = broadcast::Info::new().produce();
+		queued(&winner).await.accept(&source);
+
+		let mut result = None;
+		settle(|| {
+			result = (&mut pending).now_or_never();
+			result.is_some()
+		})
+		.await;
+		assert!(result.unwrap().is_ok(), "the beaten route's refusal ended the request");
 	}
 
 	/// `routed_broadcast` treats a handler's rejection as the table's verdict:

@@ -1539,7 +1539,7 @@ test("a refusal is terminal, never falling through to a broader route", async ()
 	origin.close();
 });
 
-test("a better route's refusal leaves the serving route in place", async () => {
+test("a better route's refusal ends a served request", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
 	const served = new BroadcastProducer();
@@ -1550,19 +1550,25 @@ test("a better route's refusal leaves the serving route in place", async () => {
 	const before = request.active.peek();
 	expect(before).toBeDefined();
 
-	// The narrower route is asked while the broad one keeps serving, then says no.
-	const narrow = origin.dynamic(Path.from("live"));
+	// The narrower route is asked while the broad one keeps serving, then says no. A
+	// costlier sibling at the same prefix could serve, but is never asked.
+	const narrow = origin.dynamic(Path.from("live"), { cost: 1n });
+	const sibling = origin.dynamic(Path.from("live"), { cost: 2n });
+	const siblingRequests = sibling.requested();
+	const siblingAsked = siblingRequests.next();
 	const { value: req } = await narrow.requested().next();
 	expect(request.active.peek()).toBe(before);
-	req?.reject(new Error("unserved"));
+	const err = new Error("unserved");
+	req?.reject(err);
 	await settle();
 
-	expect(request.active.peek()).toBe(before);
-	expect(before?.closed.peek()).toBeUndefined();
-	expect(request.closed.peek()).toBeUndefined();
+	expect(await request.closed).toBe(err);
+	expect(request.active.peek()).toBeUndefined();
+	expect(await Promise.race([siblingAsked.then(() => "asked"), settle().then(() => "idle")])).toBe("idle");
 
 	request.close();
-	expect(request.closed.peek()).toBeNull();
+	void siblingRequests.return?.();
+	sibling.close();
 	narrow.close();
 	disposeWide();
 	served.close();
@@ -1595,6 +1601,33 @@ test("a refusal from a superseded route does not end the request", async () => {
 	narrow.close();
 	wide.close();
 	produced.close();
+	origin.close();
+});
+
+test("a refusal from a route a local broadcast superseded does not end the request", async () => {
+	const origin = new Producer();
+	const consumer = origin.consume();
+	const wide = origin.dynamic(Path.from("live"));
+	const wideRequests = wide.requested();
+
+	const request = consumer.request(Path.from("live/cam"));
+	const { value: stale } = await wideRequests.next();
+
+	// The exact local broadcast takes over before the broad route answers.
+	const local = publish(origin, Path.from("live/cam"));
+	await settle();
+	const active = request.active.peek();
+	expect(active).toBeDefined();
+
+	stale?.reject(new Error("unserved"));
+	await settle();
+	expect(request.closed.peek()).toBeUndefined();
+	expect(request.active.peek()).toBe(active);
+
+	request.close();
+	void wideRequests.return?.();
+	wide.close();
+	local.close();
 	origin.close();
 });
 
