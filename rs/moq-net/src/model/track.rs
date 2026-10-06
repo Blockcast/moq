@@ -74,6 +74,14 @@ pub(super) struct ExpiryScan {
 /// viewer.
 pub(crate) const IDLE_LINGER: Duration = Duration::from_secs(30);
 
+/// How long an upstream SUBSCRIBE or FETCH outlives the last reader wanting it.
+///
+/// A reader that re-subscribes, seeks, or blips is back within a round trip, and
+/// rides the request still in flight instead of churning a cancel and a fresh
+/// request upstream. Kept far below [`IDLE_LINGER`]: unlike a lingering copy, a
+/// lingering request still pulls media nobody reads.
+pub(crate) const REQUEST_LINGER: Duration = Duration::from_secs(1);
+
 /// Publisher-side properties of a track.
 ///
 /// These are fixed by the publisher when the track is created and don't change
@@ -2949,9 +2957,8 @@ impl kio::Task for Querying {
 impl group::Request {
 	/// Watch the callers waiting for this fetch without keeping the attempt alive.
 	///
-	/// The last caller to leave withdraws the attempt, so a later fetch of the group
-	/// queues a fresh request rather than joining this one: once unused, demand never
-	/// returns, so drop the request.
+	/// The attempt stays joinable after the last caller leaves, so demand can return
+	/// until the request is dropped, accepted, or rejected.
 	pub fn demand(&self) -> group::Demand {
 		group::Demand::fetch(self.sequence, self.result.weak())
 	}
@@ -3025,6 +3032,41 @@ impl group::Request {
 		self.remove();
 		if let Ok(mut outcome) = self.result.write() {
 			outcome.rejected = Some(err);
+		}
+	}
+
+	/// Reject only while no caller waits on this fetch. Joins take the same lock, so a
+	/// caller returning after [`group::Demand::poll_unused`] wins the race and `false`
+	/// leaves the request to serve it.
+	pub(crate) fn reject_unused(&mut self, err: Error) -> bool {
+		let mut fetch = self.fetch.lock();
+		if self.result.is_used() {
+			return false;
+		}
+		withdraw(&mut fetch, self.sequence, |pending| {
+			pending.result.same_channel(&self.result)
+		});
+		drop(fetch);
+		self.done = true;
+		if let Ok(mut outcome) = self.result.write() {
+			outcome.rejected = Some(err);
+		}
+		true
+	}
+
+	/// Poll until no caller has wanted this fetch through `linger`, then reject it with
+	/// [`Error::Cancel`]. A caller returning meanwhile joins it and restarts the linger.
+	pub(crate) fn poll_abandon(&mut self, linger: &mut crate::time::Linger, waiter: &kio::Waiter) -> Poll<()> {
+		let demand = self.demand();
+		let unused = demand.poll_unused(waiter).is_ready();
+		if unused {
+			let _ = demand.poll_used(waiter);
+		}
+		ready!(linger.poll(unused, waiter));
+		// A caller returning in the gap already woke the `used` wait above.
+		match self.reject_unused(Error::Cancel) {
+			true => Poll::Ready(()),
+			false => Poll::Pending,
 		}
 	}
 
@@ -3108,11 +3150,13 @@ impl Drop for Fetching {
 		};
 		let Joined { outcome, attempt } = *joined;
 		// Joins take the fetch lock, so leaving under it is atomic with one: the joiner
-		// either keeps the attempt wanted, or finds it withdrawn and queues a fresh one
-		// rather than joining one its handler is about to drop.
+		// either keeps the attempt wanted, or finds it withdrawn and queues a fresh one.
+		// Only a queued attempt is withdrawn here, having cost nothing yet. One a handler
+		// took stays joinable: the handler lingers on it for a caller returning soon, and
+		// gives it up with `group::Request::reject_unused`.
 		let mut fetch = self.fetch.lock();
 		drop(outcome);
-		if !attempt.is_used() {
+		if !attempt.is_used() && fetch.is_queued(&self.sequence) {
 			withdraw(&mut fetch, self.sequence, |pending| {
 				pending.result.weak().same_channel(&attempt)
 			});
@@ -7916,10 +7960,11 @@ mod test {
 		assert!(matches!(pending.await, Err(Error::Dropped)));
 	}
 
-	/// A request stays wanted while any joined fetch waits, and once the last leaves it
-	/// is withdrawn: a later fetch starts a fresh request instead of joining it.
+	/// A request stays wanted while any joined fetch waits. Once the last leaves, a
+	/// handler that took it keeps it joinable: a fetch returning before the handler gives
+	/// up rides it rather than queuing a fresh request.
 	#[moq_net_sim::test]
-	async fn fetch_request_unused_once_every_fetch_leaves() {
+	async fn fetch_request_rejoinable_after_every_fetch_leaves() {
 		let producer = track_producer("test", None);
 		let dynamic = producer.dynamic();
 		let consumer = producer.consume();
@@ -7938,14 +7983,12 @@ mod test {
 		assert!(req.demand().poll_unused(&kio::Waiter::noop()).is_ready());
 
 		let retry = consumer.fetch_group(5, None);
-		let fresh = dynamic
-			.requested_group()
-			.now_or_never()
-			.expect("the retry queues a fresh request")
-			.unwrap();
-		drop(req);
-		assert!(fresh.demand().poll_unused(&kio::Waiter::noop()).is_pending());
-		fresh.accept(None).unwrap().finish().unwrap();
+		assert!(req.demand().poll_unused(&kio::Waiter::noop()).is_pending());
+		assert!(
+			dynamic.requested_group().now_or_never().is_none(),
+			"the retry joined the request in flight"
+		);
+		req.accept(None).unwrap().finish().unwrap();
 		assert_eq!(retry.await.unwrap().sequence, 5);
 	}
 
@@ -7963,26 +8006,31 @@ mod test {
 		assert!(fetch.read().is_empty());
 	}
 
-	/// The withdrawal happens as the last caller leaves, not when the handler notices: a
-	/// fetch arriving before the handler drops the abandoned request is not failed with it.
+	/// Giving up an unused request is atomic with a caller joining it: a fetch that
+	/// joined first keeps the request, and one arriving after queues a fresh request
+	/// rather than reading the rejection.
 	#[moq_net_sim::test]
-	async fn fetch_after_the_last_caller_left_is_not_dropped() {
+	async fn fetch_reject_unused_races_a_returning_caller() {
 		let producer = track_producer("test", None);
 		let dynamic = producer.dynamic();
 		let consumer = producer.consume();
 
 		let first = consumer.fetch_group(5, None);
-		let req = dynamic
+		let mut req = dynamic
 			.requested_group()
 			.now_or_never()
 			.expect("should not block")
 			.unwrap();
 		drop(first);
 
+		let returned = consumer.fetch_group(5, None);
+		assert!(!req.reject_unused(Error::Cancel), "the returning caller wants it");
+		drop(returned);
+		assert!(req.reject_unused(Error::Cancel));
+
 		let mut retry = consumer.fetch_group(5, None);
 		drop(req);
 		assert!(kio::Task::poll(&mut *retry, &kio::Waiter::noop()).is_pending());
-
 		let fresh = dynamic
 			.requested_group()
 			.now_or_never()
@@ -7990,41 +8038,6 @@ mod test {
 			.unwrap();
 		fresh.accept(None).unwrap().finish().unwrap();
 		assert_eq!(retry.await.unwrap().sequence, 5);
-	}
-
-	/// A handler that accepts after every caller left still caches the group, so a fetch
-	/// that queued a fresh request meanwhile resolves from it and that request is moot.
-	#[moq_net_sim::test]
-	async fn fetch_accept_after_withdrawal_caches_the_group() {
-		let producer = track_producer("test", None);
-		let dynamic = producer.dynamic();
-		let consumer = producer.consume();
-
-		let first = consumer.fetch_group(5, None);
-		let req = dynamic
-			.requested_group()
-			.now_or_never()
-			.expect("should not block")
-			.unwrap();
-		drop(first);
-
-		let retry = consumer.fetch_group(5, None);
-		let fresh = dynamic
-			.requested_group()
-			.now_or_never()
-			.expect("the retry queues a fresh request")
-			.unwrap();
-
-		let mut group = req.accept(None).expect("a withdrawn request still accepts");
-		group
-			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"hi"))
-			.unwrap();
-		group.finish().unwrap();
-
-		let mut fetched = retry.await.unwrap();
-		assert_eq!(&fetched.read_frame().await.unwrap().unwrap().payload[..], b"hi");
-		assert!(!fresh.demand().is_used(), "the retry left the fresh request");
-		assert!(matches!(fresh.accept(None), Err(Error::Duplicate)));
 	}
 
 	/// Dropping an auto trait from a published type is a semver break, so the group

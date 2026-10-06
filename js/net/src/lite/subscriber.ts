@@ -13,6 +13,7 @@ import { TAIL_GRACE_MS, Tail } from "../tail.ts";
 import * as Time from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
+import { abandoned } from "../util/linger.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import {
@@ -612,13 +613,13 @@ export class Subscriber {
 			if (subscriptionUpdates !== undefined) terminal.push(subscriptionUpdates.then(() => closed));
 			const done = race(terminal);
 
-			// Serve until a terminal condition fires or the last local subscriber leaves. The unused
-			// wake is level-triggered: re-check demand so a subscriber that returns before we tear
-			// down (e.g. a quickly unmuted tile) resumes on the same subscription.
+			// Serve until a terminal condition fires or the last local subscriber stays gone through
+			// the linger. The wake is level-triggered: re-check demand so a subscriber that returns
+			// before we tear down (e.g. a quickly unmuted tile, a seek) resumes on the same subscription.
 			const idle = Symbol("idle");
 			const demand = producer.demand();
 			for (;;) {
-				const reason = await race([done, demand.unused().then(() => idle)]);
+				const reason = await race([done, abandoned(demand).then(() => idle)]);
 				if (reason === idle && demand.closed.peek() === undefined && demand.used.peek()) continue;
 				break;
 			}
@@ -860,16 +861,13 @@ export class Subscriber {
 		try {
 			const decode = frameDecoder(timescale);
 
-			// Serve until the stream FINs, the group closes, or every reader leaves. A group can
-			// stay open indefinitely (a catalog or JSON stream), so an abandoned fetch is stopped by
-			// demand, not by the stream ending. `unused` is watched across frames as one stable
-			// promise; the check is level-triggered, so a coalesced fetch that arrives before we
-			// cancel re-arms and resumes.
+			// Serve until the stream FINs, the group closes, or every reader stays gone through the
+			// linger. A group can stay open indefinitely (a catalog or JSON stream), so an abandoned
+			// fetch is stopped by demand, not by the stream ending. `unused` is watched across frames
+			// as one stable promise; the check is level-triggered, so a coalesced fetch that arrives
+			// before we cancel re-arms and resumes.
 			const idle: unique symbol = Symbol("idle");
-			let unused = group
-				.demand()
-				.unused()
-				.then((): typeof idle => idle);
+			let unused = abandoned(group.demand()).then((): typeof idle => idle);
 			// A decode consumes its frame whenever it lands, so one outstanding across a re-arm is
 			// kept and awaited again rather than abandoned with its frame.
 			let pending: Promise<netGroup.Frame | undefined> | undefined;
@@ -882,10 +880,7 @@ export class Subscriber {
 					if (next === idle) {
 						if (group.isClosed) break;
 						if (group.demand().used.peek()) {
-							unused = group
-								.demand()
-								.unused()
-								.then((): typeof idle => idle);
+							unused = abandoned(group.demand()).then((): typeof idle => idle);
 							continue;
 						}
 						// Abandoned mid-group: the truncated group must never end clean.
@@ -1272,21 +1267,12 @@ async function untilClosed<T>(group: netGroup.Producer, step: Promise<T>): Promi
 	return value as T;
 }
 
-// Like untilClosed, but also cancels once every reader has left. Demand is level-triggered, so a
-// caller that coalesces onto the group before the check re-arms it.
+// Like untilClosed, but also cancels once every reader stays gone through the linger. Demand is
+// level-triggered, so a caller that coalesces onto the group before the check re-arms it.
 async function untilAbandoned<T>(group: netGroup.Producer, step: Promise<T>): Promise<T> {
 	const idle: unique symbol = Symbol("idle");
 	for (;;) {
-		const value = await untilClosed(
-			group,
-			race([
-				step,
-				group
-					.demand()
-					.unused()
-					.then((): typeof idle => idle),
-			]),
-		);
+		const value = await untilClosed(group, race([step, abandoned(group.demand()).then((): typeof idle => idle)]));
 		if (value !== idle) return value as T;
 		if (!group.demand().used.peek()) {
 			// Close here rather than where the error lands, so no fetch coalesces onto the group

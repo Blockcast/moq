@@ -1,4 +1,4 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, jest, spyOn, test } from "bun:test";
 import type * as announce from "../announced.ts";
 import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.ts";
 import { type Hop, HopSchema, UNKNOWN_HOP } from "../hop.ts";
@@ -6,6 +6,7 @@ import { createMockTransportPair } from "../mock.ts";
 import * as Path from "../path.ts";
 import { Reader, Stream } from "../stream.ts";
 import type * as track from "../track.ts";
+import { REQUEST_LINGER_MS } from "../util/linger.ts";
 import { ControlStreamAdapter, NativeSession } from "./adapter.ts";
 import type * as Cluster from "./cluster.ts";
 import { Connection } from "./connection.ts";
@@ -769,9 +770,16 @@ test("a legacy cancel reaches the control stream", async () => {
 	const broadcast = subscriber.consume(Path.from("room"));
 	const track = broadcast.track("video").subscribe();
 
-	// Let the SUBSCRIBE reach the control stream before walking away.
+	// Let the SUBSCRIBE reach the control stream before walking away, then run the linger out.
 	await new Promise((resolve) => setTimeout(resolve, 50));
-	track.close();
+	jest.useFakeTimers();
+	try {
+		track.close();
+		for (let i = 0; i < 200; i++) await Promise.resolve();
+		jest.advanceTimersByTime(REQUEST_LINGER_MS);
+	} finally {
+		jest.useRealTimers();
+	}
 
 	// Everything the subscriber actually put on the wire.
 	const seen: bigint[] = [];

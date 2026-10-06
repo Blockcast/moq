@@ -1,4 +1,4 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, jest, spyOn, test } from "bun:test";
 import { Signal } from "@moq/signals";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { error, fromTransport, reason, StreamCode, StreamError } from "../error.ts";
@@ -6,6 +6,7 @@ import { HopSchema, isAnonymous, MAX_HOPS, Route, UNKNOWN_HOP } from "../hop.ts"
 import * as Path from "../path.ts";
 import { Writer } from "../stream.ts";
 import * as Time from "../time.ts";
+import { REQUEST_LINGER_MS } from "../util/linger.ts";
 import { type AnnounceBroadcast, AnnounceInit, AnnounceOk, encodeAnnounceBroadcast } from "./announce.ts";
 import { Probe } from "./probe.ts";
 import { Subscriber } from "./subscriber.ts";
@@ -420,6 +421,12 @@ async function probeBytes(probes: Probe[], version: Version): Promise<Uint8Array
 const MAX_DRAIN_TURNS = 1000;
 
 /** Yield until `predicate` holds, rather than guessing a fixed number of turns. */
+// Run the request linger out on fake time, once the microtasks that arm it have run.
+async function lingerOut(): Promise<void> {
+	for (let i = 0; i < MAX_DRAIN_TURNS; i++) await Promise.resolve();
+	jest.advanceTimersByTime(REQUEST_LINGER_MS);
+}
+
 async function drainUntil(predicate: () => boolean): Promise<void> {
 	for (let i = 0; i < MAX_DRAIN_TURNS; i++) {
 		if (predicate()) return;
@@ -972,6 +979,8 @@ test.each([
 	["the TRACK_INFO", "track"],
 	["the FETCH", "fetch"],
 ] as const)("the last fetch sharer aborting during %s cancels it", async (_, stage) => {
+	jest.useFakeTimers();
+	using _real = { [Symbol.dispose]: () => jest.useRealTimers() };
 	const { quic, streams } = fakeSession();
 	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
 
@@ -992,6 +1001,8 @@ test.each([
 	second.abort(new Error("second"));
 	expect(((await a.catch((err: unknown) => err)) as Error).message).toBe("first");
 	expect(((await b.catch((err: unknown) => err)) as Error).message).toBe("second");
+	// The request lingers for a sharer returning soon, then is let go.
+	await lingerOut();
 
 	if (stage === "track") {
 		// The TRACK_INFO still completes, but no FETCH is sent for the abandoned group.
@@ -1048,6 +1059,8 @@ test("a fetch after the last sharer left is never failed with the cancelled one"
 // A reader leaving partway through a fetched group cancels the FETCH: the truncated group
 // must not end clean, as a FIN would make it read whole.
 test("the last reader leaving mid-response cancels the fetch", async () => {
+	jest.useFakeTimers();
+	using _real = { [Symbol.dispose]: () => jest.useRealTimers() };
 	const { quic, streams } = fakeSession();
 	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
 
@@ -1062,6 +1075,7 @@ test("the last reader leaving mid-response cancels the fetch", async () => {
 	const group = await fetch;
 	expect(new TextDecoder().decode((await group.readFrame())?.payload)).toBe("head");
 	group.close();
+	await lingerOut();
 
 	const err = fromTransport(await streams[1].aborted) as StreamError;
 	expect(err.code).toBe(StreamCode.Cancel);

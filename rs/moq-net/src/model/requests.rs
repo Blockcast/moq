@@ -130,6 +130,15 @@ impl<K: Clone + Eq + Hash, V> Requests<K, V> {
 		self.take(key)
 	}
 
+	/// Returns `true` if the request for `key` is still queued, not yet popped.
+	pub fn is_queued<Q>(&self, key: &Q) -> bool
+	where
+		K: Borrow<Q>,
+		Q: Eq + Hash + ?Sized,
+	{
+		self.pending.get(key).is_some_and(|entry| entry.queued)
+	}
+
 	/// Returns `true` if a queued (not yet popped) request exists.
 	pub fn has_queued(&self) -> bool {
 		!self.order.is_empty()

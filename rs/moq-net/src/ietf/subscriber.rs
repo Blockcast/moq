@@ -1922,6 +1922,8 @@ where
 
 		let setup = {
 			let mut response = std::pin::pin!(self.read_subscribe_response(&mut stream));
+			// A subscriber returning within the linger rides the SUBSCRIBE in flight.
+			let mut cancel = crate::time::Linger::new(&self.runtime, track::REQUEST_LINGER);
 			loop {
 				let setup = kio::wait(|waiter| {
 					// An answer that has already arrived wins over the local terminals. Both can
@@ -1937,10 +1939,11 @@ where
 						if !state.subscribes.contains_key(&request_id) {
 							return Poll::Ready(Setup::Gone);
 						}
-						return match idle.demand.poll_unused(waiter) {
-							Poll::Ready(_) => Poll::Ready(Setup::Unused),
-							Poll::Pending => Poll::Pending,
-						};
+						let unused = idle.demand.poll_unused(waiter).is_ready();
+						if unused {
+							let _ = idle.demand.poll_used(waiter);
+						}
+						return cancel.poll(unused, waiter).map(|()| Setup::Unused);
 					}
 					let Some(pending) = state
 						.subscribes
@@ -1949,10 +1952,12 @@ where
 					else {
 						return Poll::Ready(Setup::Gone);
 					};
-					if pending.demand().poll_unused(waiter).is_ready() {
-						return Poll::Ready(Setup::Unused);
+					let demand = pending.demand();
+					let unused = demand.poll_unused(waiter).is_ready();
+					if unused {
+						let _ = demand.poll_used(waiter);
 					}
-					Poll::Pending
+					cancel.poll(unused, waiter).map(|()| Setup::Unused)
 				})
 				.await;
 
@@ -2117,6 +2122,7 @@ where
 
 		let mut fetch_done = fetching.is_none();
 		let demand = track.demand();
+		let mut cancel = crate::time::Linger::new(&self.runtime, track::REQUEST_LINGER);
 		// Nobody subscribing at all (only fetches asked) needs no subscription.
 		let mut subscribed = track.subscription().is_some();
 		let idle = {
@@ -2143,12 +2149,17 @@ where
 						track.set_live(largest);
 						resuming = None;
 					}
-					// The last subscriber left: the upstream subscription goes with it, as on
-					// lite, and the copy lingers for fetches and a returning subscriber.
+					// The last subscriber left: the upstream subscription goes with it once
+					// nobody returns within the linger, as on lite, and the copy lingers longer
+					// for fetches and a returning subscriber.
 					while let Poll::Ready(Ok(subscription)) = track.poll_subscription_changed(waiter) {
 						subscribed = subscription.is_some();
 					}
-					if !subscribed || demand.poll_unused(waiter).is_ready() {
+					let unused = !subscribed || demand.poll_unused(waiter).is_ready();
+					if unused {
+						let _ = demand.poll_used(waiter);
+					}
+					if cancel.poll(unused, waiter).is_ready() {
 						return Poll::Ready(End::Idle);
 					}
 					waiter.poll_future(done.as_mut()).map(End::Done)
@@ -2261,7 +2272,7 @@ where
 			state.lingering.insert(id, idle.track.clone());
 			id
 		};
-		let mut linger = crate::time::Deadline::new(&self.runtime);
+		let mut linger = crate::time::Linger::new(&self.runtime, track::IDLE_LINGER);
 		let mut subscribed = idle.track.subscription().is_some();
 		enum Step {
 			Fetch(group::Request),
@@ -2286,18 +2297,11 @@ where
 				}
 				// Nobody holds it: let it go after the linger. A reader waiting on a fetch holds
 				// it too. A holder returning restarts the countdown when it next leaves.
-				if idle.demand.poll_unused(waiter).is_ready() {
-					if linger.deadline().is_none() {
-						linger.set(self.runtime.now().checked_add(track::IDLE_LINGER));
-					}
-					if linger.poll(waiter).is_ready() {
-						return Poll::Ready(Step::Expired);
-					}
+				let unused = idle.demand.poll_unused(waiter).is_ready();
+				if unused {
 					let _ = idle.demand.poll_used(waiter);
-				} else {
-					linger.set(None);
 				}
-				Poll::Pending
+				linger.poll(unused, waiter).map(|()| Step::Expired)
 			})
 			.await;
 
@@ -2318,10 +2322,8 @@ where
 						self.state.lock().lingering.remove(&id);
 						return None;
 					}
-					Err(used) => {
-						idle.track = used;
-						linger.set(None);
-					}
+					// The next poll finds it held and restarts the linger.
+					Err(used) => idle.track = used,
 				},
 				Step::Closed => break false,
 			}
@@ -3435,7 +3437,7 @@ where
 		self,
 		broadcast: PathOwned,
 		name: String,
-		request: group::Request,
+		mut request: group::Request,
 		timescale: Option<Timescale>,
 	) {
 		let sequence = request.sequence();
@@ -3492,6 +3494,8 @@ where
 			Ok::<_, Error>(())
 		}
 		.await;
+		// A caller returning within the linger rides the FETCH in flight.
+		let mut linger = crate::time::Linger::new(&self.runtime, track::REQUEST_LINGER);
 		let res = match res {
 			Err(err) => Some(Err(err)),
 			Ok(()) => {
@@ -3501,7 +3505,7 @@ where
 					if let Poll::Ready(res) = waiter.poll_future(response.as_mut()) {
 						return Poll::Ready(Some(res));
 					}
-					request.demand().poll_unused(waiter).map(|_| None)
+					request.poll_abandon(&mut linger, waiter).map(|()| None)
 				})
 				.await
 			}
@@ -3509,8 +3513,9 @@ where
 
 		let ok = match res {
 			Some(Ok(ok)) => ok,
+			// `poll_abandon` already rejected it.
 			None => {
-				request.reject(Error::Cancel);
+				drop(request);
 				drop(registered);
 				self.cancel_group_fetch(stream, fetch_id).await;
 				return;
@@ -3593,16 +3598,21 @@ where
 					Poll::Pending => {}
 				}
 			}
-			slot.poll(waiter, |state| match &**state {
-				GroupFetch::Done => Poll::Ready(()),
-				_ if joined.poll_unused(waiter).is_ready()
-					&& demand.poll_unused(waiter).is_ready()
-					&& demand.abort_unused(Error::Cancel) =>
-				{
-					abandoned = true;
-					Poll::Ready(())
+			slot.poll(waiter, |state| {
+				if matches!(&**state, GroupFetch::Done) {
+					return Poll::Ready(());
 				}
-				_ => Poll::Pending,
+				let unused = joined.poll_unused(waiter).is_ready() && demand.poll_unused(waiter).is_ready();
+				if unused {
+					let _ = joined.poll_used(waiter);
+					let _ = demand.demand().poll_used(waiter);
+				}
+				// A reader returning in the gap wins the abort; the next poll restarts the linger.
+				if linger.poll(unused, waiter).is_ready() && demand.abort_unused(Error::Cancel) {
+					abandoned = true;
+					return Poll::Ready(());
+				}
+				Poll::Pending
 			})
 			.map(|_| None)
 		})
@@ -4813,7 +4823,7 @@ mod tests {
 			subscriber.run_subscribe(Path::new("broadcast"), dynamic, request).await;
 		});
 
-		moq_net_sim::timeout(std::time::Duration::from_secs(1), serving)
+		moq_net_sim::timeout(crate::track::REQUEST_LINGER * 2, serving)
 			.await
 			.expect("run_subscribe did not finish")
 			.unwrap();
@@ -4871,7 +4881,7 @@ mod tests {
 		drop(track);
 		drop(consumer);
 
-		moq_net_sim::timeout(std::time::Duration::from_secs(1), serving)
+		moq_net_sim::timeout(crate::track::REQUEST_LINGER * 2, serving)
 			.await
 			.expect("run_subscribe parked waiting for a response that never came")
 			.unwrap();
@@ -4945,7 +4955,7 @@ mod tests {
 		drop(subscription);
 		drop(track);
 		drop(consumer);
-		moq_net_sim::timeout(std::time::Duration::from_secs(1), serving)
+		moq_net_sim::timeout(crate::track::REQUEST_LINGER * 2, serving)
 			.await
 			.expect("run_subscribe parked after its reader left")
 			.unwrap();
@@ -5034,7 +5044,7 @@ mod tests {
 		drop(track);
 		drop(consumer);
 
-		moq_net_sim::timeout(std::time::Duration::from_secs(1), serving)
+		moq_net_sim::timeout(crate::track::REQUEST_LINGER * 2, serving)
 			.await
 			.expect("run_subscribe did not finish")
 			.unwrap();
@@ -8571,6 +8581,11 @@ mod joining_fetch_tests {
 		if stage == FetchStage::Unanswered {
 			drop(fetch);
 			assert!(
+				futures::poll!(run.as_mut()).is_pending(),
+				"{version:?}: the FETCH lingers for a returning reader"
+			);
+			moq_net_sim::advance(crate::track::REQUEST_LINGER).await;
+			assert!(
 				futures::poll!(run.as_mut()).is_ready(),
 				"{version:?}: unanswered FETCH stays alive"
 			);
@@ -8602,6 +8617,11 @@ mod joining_fetch_tests {
 			};
 			if stage == FetchStage::Accepted {
 				drop(group);
+				assert!(
+					futures::poll!(run.as_mut()).is_pending(),
+					"{version:?}: the FETCH lingers for a returning reader"
+				);
+				moq_net_sim::advance(crate::track::REQUEST_LINGER).await;
 				assert!(
 					futures::poll!(run.as_mut()).is_ready(),
 					"{version:?}: accepted FETCH stays alive"
@@ -8663,6 +8683,11 @@ mod joining_fetch_tests {
 					assert_eq!(cached.read_frame().await.unwrap().unwrap().payload.as_ref(), b"x");
 					assert!(cached.read_frame().await.unwrap().is_none());
 				} else {
+					assert!(
+						futures::poll!(run.as_mut()).is_pending(),
+						"{version:?}: the FETCH lingers for a returning reader"
+					);
+					moq_net_sim::advance(crate::track::REQUEST_LINGER).await;
 					assert!(
 						futures::poll!(run.as_mut()).is_ready(),
 						"{version:?}: partial FETCH stays alive"

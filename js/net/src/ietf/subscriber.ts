@@ -20,6 +20,7 @@ import type { Cursor, Reader, Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
 import { Milli, type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
+import { abandoned } from "../util/linger.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import { overrideBroadcastWire, wireOf } from "../wire.ts";
 import type { Session } from "./adapter.ts";
@@ -569,7 +570,7 @@ export class Subscriber {
 				await Signal.race(demand.used, demand.closed);
 			}
 			for (;;) {
-				await demand.unused();
+				await abandoned(demand);
 				if (demand.closed.peek() !== undefined || !demand.used.peek()) return null;
 			}
 		};
@@ -653,13 +654,13 @@ export class Subscriber {
 				producer.closed.then(() => localEnded),
 			]);
 
-			// Serve until a terminal condition fires or the last local subscriber leaves. The unused
-			// wake is level-triggered: re-check demand so a subscriber that returns before we tear
-			// down resumes on the same stream.
+			// Serve until a terminal condition fires or the last local subscriber stays gone through
+			// the linger. The wake is level-triggered: re-check demand so a subscriber that returns
+			// before we tear down resumes on the same stream.
 			let terminal = localEnded;
 			const demand = producer.demand();
 			for (;;) {
-				const reason = await race([done, demand.unused().then(() => idle)]);
+				const reason = await race([done, abandoned(demand).then(() => idle)]);
 				if (reason === idle && demand.closed.peek() === undefined && demand.used.peek()) continue;
 				terminal = reason;
 				break;

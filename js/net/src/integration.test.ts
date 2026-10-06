@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, jest, test } from "bun:test";
 import type { Getter } from "@moq/signals";
 import type * as Announce from "./announce.ts";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
@@ -20,6 +20,7 @@ import { Producer as OriginProducer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { Milli, Timescale, Timestamp } from "./time.ts";
 import type { Producer as TrackProducer } from "./track.ts";
+import { REQUEST_LINGER_MS } from "./util/linger.ts";
 import { withTimeout } from "./util/timeout.ts";
 import { wireOf } from "./wire.ts";
 
@@ -1276,6 +1277,21 @@ async function waitUntil(predicate: () => boolean): Promise<void> {
 	throw new Error("condition not met within timeout");
 }
 
+// Drop the last reader with `leave`, then run the request linger out on fake time: upstream still
+// serves inside it, and lets go once it runs out.
+async function leaveForGood(leave: () => void, served: () => boolean): Promise<void> {
+	jest.useFakeTimers();
+	try {
+		leave();
+		for (let i = 0; i < 200; i++) await Promise.resolve();
+		expect(served()).toBe(true);
+		jest.advanceTimersByTime(REQUEST_LINGER_MS);
+	} finally {
+		jest.useRealTimers();
+	}
+	await waitUntil(() => !served());
+}
+
 // Closing the last subscriber to a track tears the wire subscription down, so the publisher stops
 // serving it (the muted-watch-tile case in #2355) instead of sending groups to a reader that left.
 async function runSubscriberTeardown(protocol: string, version?: number) {
@@ -1299,8 +1315,10 @@ async function runSubscriberTeardown(protocol: string, version?: number) {
 
 	// Closing the only subscriber must tear the wire subscription down, so demand drops on the
 	// publisher rather than the relay serving groups to nobody.
-	sub.close();
-	await waitUntil(() => !video.demand().used.peek());
+	await leaveForGood(
+		() => sub.close(),
+		() => video.demand().used.peek(),
+	);
 
 	broadcast.close();
 	remote.close();
@@ -1349,8 +1367,10 @@ test("integration: ietf draft-14 subscriber teardown on last unsubscribe", async
 	await waitUntil(() => served?.demand().used.peek() === true);
 
 	// Closing the subscriber sends Unsubscribe and tears the subscription down, so demand drops.
-	sub.close();
-	await waitUntil(() => served?.demand().used.peek() === false);
+	await leaveForGood(
+		() => sub.close(),
+		() => served?.demand().used.peek() === true,
+	);
 
 	broadcast.close();
 	await serving;
@@ -1384,8 +1404,10 @@ test("integration: lite fetch teardown when the reader abandons an open group", 
 
 	// Abandoning the fetch cancels the FETCH stream, so the publisher stops serving instead of
 	// pumping an open group to a reader that left.
-	fetched.close();
-	await waitUntil(() => !group.demand().used.peek());
+	await leaveForGood(
+		() => fetched.close(),
+		() => group.demand().used.peek(),
+	);
 
 	group.close();
 	broadcast.close();
@@ -1428,8 +1450,10 @@ test("integration: lite fan-out keeps the upstream until the last subscriber lea
 	expect(video.demand().used.peek()).toBe(true);
 
 	// The last close tears it down.
-	b.close();
-	await waitUntil(() => !video.demand().used.peek());
+	await leaveForGood(
+		() => b.close(),
+		() => video.demand().used.peek(),
+	);
 
 	broadcast.close();
 	remote.close();
@@ -1458,8 +1482,10 @@ test("integration: lite re-subscribe re-opens the upstream after each teardown",
 		expect(await sub.readString()).toBe(`hello-${i}`);
 		await waitUntil(() => video.demand().used.peek());
 
-		sub.close();
-		await waitUntil(() => !video.demand().used.peek());
+		await leaveForGood(
+			() => sub.close(),
+			() => video.demand().used.peek(),
+		);
 	}
 
 	broadcast.close();
@@ -1497,8 +1523,10 @@ test("integration: lite coalesced fetch stays until every reader abandons the op
 	expect(group.demand().used.peek()).toBe(true);
 
 	// The last abandon cancels the FETCH.
-	f2.close();
-	await waitUntil(() => !group.demand().used.peek());
+	await leaveForGood(
+		() => f2.close(),
+		() => group.demand().used.peek(),
+	);
 
 	group.close();
 	broadcast.close();

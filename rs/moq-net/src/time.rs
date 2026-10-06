@@ -261,6 +261,37 @@ impl std::fmt::Debug for Deadline {
 	}
 }
 
+/// Keeps something nobody wants for a fixed window, for a holder returning soon.
+pub(crate) struct Linger {
+	window: std::time::Duration,
+	deadline: Deadline,
+}
+
+impl Linger {
+	/// A linger that lets go once nothing wants it for `window`.
+	pub(crate) fn new(clock: &Clock, window: std::time::Duration) -> Self {
+		Self {
+			window,
+			deadline: Deadline::new(clock),
+		}
+	}
+
+	/// `Ready` once every poll for the whole window found it `unused`.
+	///
+	/// A poll finding it wanted restarts the window for the next time it is not. The caller
+	/// registers its own wake for demand returning, so that poll happens.
+	pub(crate) fn poll(&mut self, unused: bool, waiter: &kio::Waiter) -> Poll<()> {
+		if !unused {
+			self.deadline.set(None);
+			return Poll::Pending;
+		}
+		if self.deadline.deadline().is_none() {
+			self.deadline.set(self.deadline.clock.now().checked_add(self.window));
+		}
+		self.deadline.poll(waiter)
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;

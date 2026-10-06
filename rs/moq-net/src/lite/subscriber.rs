@@ -2017,6 +2017,11 @@ mod tests {
 
 			drop(waiting);
 			assert!(
+				kio::Task::poll(&mut run, &waiter).is_pending(),
+				"{stage}: lingers for a returning subscriber"
+			);
+			moq_net_sim::advance(track::REQUEST_LINGER).await;
+			assert!(
 				kio::Task::poll(&mut run, &waiter).is_ready(),
 				"{stage}: an unused track kept waiting on TRACK_INFO"
 			);
@@ -3454,8 +3459,8 @@ enum ServeEnd {
 
 /// Serves one requested track for a relay: owns this session's copy of the
 /// track (pumped into the origin's logical track), driving the single upstream
-/// subscription (opened lazily on the first downstream subscriber, canceled when
-/// the last one leaves) concurrently with any number of one-shot fetches.
+/// subscription (opened lazily on the first downstream subscriber, canceled once
+/// the last one stays gone) concurrently with any number of one-shot fetches.
 #[derive(Clone)]
 struct TrackServe<S: crate::transport::poll::Session> {
 	subscriber: Subscriber<S>,
@@ -3501,7 +3506,7 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 
 	/// Apply a subscription-demand change: hand back an [`Establish`] to open the
 	/// upstream SUBSCRIBE on the first subscriber, buffer a SUBSCRIBE_UPDATE while
-	/// live (the caller flushes), or cancel outright when the last one leaves.
+	/// live (the caller flushes), or [`Begin::Idle`] when the last one leaves.
 	fn begin_subscription(
 		&self,
 		producer: &mut track::Producer,
@@ -3569,21 +3574,23 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 					}
 				}
 			}
-			None => {
-				// Last subscriber left: cancel the upstream subscription outright. An
-				// idle subscription still streams every group into a cache nobody
-				// reads, and the upstream counts it as a live viewer of the broadcast.
-				// A returning subscriber re-establishes from the current demand.
-				if let Sub::Active(active) = sub {
-					self.subscriber.remove_subscribe(active.id);
-					let _ = active.stream.writer.finish();
-					tracing::info!(track = %self.name, "subscribe canceled (idle)");
-					*sub = Sub::None;
-					// The copy is still held: what it cached goes stale from here.
-					producer.set_idle();
-				}
-				Ok(Begin::None)
-			}
+			// The serve loop lingers before canceling, for a subscriber returning soon.
+			None => Ok(Begin::Idle),
+		}
+	}
+
+	/// Cancel the upstream subscription once nobody subscribes through the linger. An
+	/// idle subscription still streams every group into a cache nobody reads, and the
+	/// upstream counts it as a live viewer of the broadcast. A returning subscriber
+	/// re-establishes from the current demand.
+	fn cancel_subscription(&self, producer: &mut track::Producer, sub: &mut Sub<S>) {
+		if let Sub::Active(active) = sub {
+			self.subscriber.remove_subscribe(active.id);
+			let _ = active.stream.writer.finish();
+			tracing::info!(track = %self.name, "subscribe canceled (idle)");
+			*sub = Sub::None;
+			// The copy is still held: what it cached goes stale from here.
+			producer.set_idle();
 		}
 	}
 
@@ -3693,6 +3700,8 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 					std::future::poll_fn(|cx| active.stream.writer.poll_flush(cx)).await?;
 				}
 			}
+			// As if the linger already ran out.
+			Begin::Idle => self.cancel_subscription(producer, sub),
 		}
 		Ok(())
 	}
@@ -3708,6 +3717,9 @@ enum Begin<S: crate::transport::poll::Session> {
 	None,
 	/// Open an upstream SUBSCRIBE for the first subscriber.
 	Establish(Establish<S>),
+	/// The last subscriber left: cancel the upstream subscription, unless one returns
+	/// within [`track::REQUEST_LINGER`].
+	Idle,
 }
 
 /// Buffer a SUBSCRIBE_UPDATE echoing the current params, varying only the end
@@ -3846,6 +3858,9 @@ enum TrackRunState<S: crate::transport::poll::Session> {
 	Info {
 		request: Option<track::Request>,
 		info: TrackInfoFetch<S>,
+		/// Runs while nobody wants the track: a subscriber returning soon rides this
+		/// request rather than a fresh one.
+		cancel: crate::time::Linger,
 	},
 	Serve(ServeLoop<S>),
 	/// Preserve the lite07 completion FIN until the publisher acknowledges it.
@@ -3859,6 +3874,7 @@ impl<S: crate::transport::poll::Session> TrackServeRun<S> {
 			TrackRunState::Info {
 				request: Some(request),
 				info: TrackInfoFetch::new(&serve),
+				cancel: crate::time::Linger::new(&serve.subscriber.runtime, track::REQUEST_LINGER),
 			}
 		} else {
 			// Older wires declare no publisher retention limit.
@@ -3875,20 +3891,22 @@ impl<S: crate::transport::poll::Session> kio::Task for TrackServeRun<S> {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		loop {
 			match &mut self.state {
-				TrackRunState::Info { request, info } => {
-					// Nobody wants the track anymore (the origin failed over, the reader
-					// left): stop waiting on a peer that may never answer, which would
-					// otherwise hold this task, its TRACK stream, and the track for good.
-					// Dropping the fetch resets the stream.
+				TrackRunState::Info { request, info, cancel } => {
+					// Nobody wants the track anymore through the linger (the origin failed
+					// over, the reader left): stop waiting on a peer that may never answer,
+					// which would otherwise hold this task, its TRACK stream, and the track
+					// for good. Dropping the fetch resets the stream.
 					let pending = request.as_ref().expect("request pending");
-					if pending.demand().poll_unused(waiter).is_ready() {
-						if pending.reject_unused(Error::Cancel) {
-							self.state = TrackRunState::Done;
-							return Poll::Ready(());
-						}
-						// Demand returned in the gap and won inside `reject_unused`: poll
-						// again so the unused wait is armed for when it leaves.
-						continue;
+					let demand = pending.demand();
+					let unused = demand.poll_unused(waiter).is_ready();
+					if unused {
+						let _ = demand.poll_used(waiter);
+					}
+					// Demand returning in the gap wins inside `reject_unused`, and already
+					// woke the `used` wait above to restart the linger.
+					if cancel.poll(unused, waiter).is_ready() && pending.reject_unused(Error::Cancel) {
+						self.state = TrackRunState::Done;
+						return Poll::Ready(());
 					}
 					let res = ready!(info.poll_fetch(&self.serve, waiter));
 					let request = request.take().expect("request pending");
@@ -4048,8 +4066,9 @@ impl<S: crate::transport::poll::Session> TrackInfoFetch<S> {
 
 /// The serve loop proper: owns this session's copy of the track (pumped into
 /// the origin's logical track), driving the single upstream subscription
-/// (opened lazily on the first downstream subscriber, canceled when the last
-/// one leaves) concurrently with any number of one-shot fetches.
+/// (opened lazily on the first downstream subscriber, canceled once the last
+/// one stays gone through [`track::REQUEST_LINGER`]) concurrently with any number
+/// of one-shot fetches.
 struct ServeLoop<S: crate::transport::poll::Session> {
 	/// This session's copy, accepted with the resolved info. The origin pumps
 	/// it into the logical track; demand from the logical subscribers arrives
@@ -4070,9 +4089,14 @@ struct ServeLoop<S: crate::transport::poll::Session> {
 	supports_fetch: bool,
 	timescale: Option<Timescale>,
 	mode: ServeMode<S>,
-	/// Armed while nobody holds the copy: it stays, cache and all, for a returning
+	/// Runs while nobody holds the copy: it stays, cache and all, for a returning
 	/// reader until this fires.
-	linger: crate::time::Deadline,
+	linger: crate::time::Linger,
+	/// Set while the upstream subscription has no subscriber left.
+	unsubscribed: bool,
+	/// Runs while `unsubscribed`: the upstream subscription stays, for a subscriber
+	/// returning soon, until this fires.
+	cancel: crate::time::Linger,
 }
 
 // A state machine's enum is its storage: one transient instance per stream, so the
@@ -4119,7 +4143,9 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 			supports_fetch: serve.subscriber.version.has_track_stream(),
 			timescale,
 			mode: ServeMode::Select,
-			linger: crate::time::Deadline::new(&serve.subscriber.runtime),
+			linger: crate::time::Linger::new(&serve.subscriber.runtime, track::IDLE_LINGER),
+			unsubscribed: false,
+			cancel: crate::time::Linger::new(&serve.subscriber.runtime, track::REQUEST_LINGER),
 		}
 	}
 
@@ -4208,8 +4234,12 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 								self.supports_update,
 								self.timescale,
 							) {
-								Ok(Begin::Establish(est)) => self.mode = ServeMode::Establish(est),
-								Ok(Begin::None) => {}
+								Ok(Begin::Establish(est)) => {
+									self.unsubscribed = false;
+									self.mode = ServeMode::Establish(est);
+								}
+								Ok(Begin::None) => self.unsubscribed = false,
+								Ok(Begin::Idle) => self.unsubscribed = true,
 								// Updating the upstream failed: hand the track back for
 								// another route to resume.
 								Err(err) => return Poll::Ready(ServeEnd::GiveBack(err)),
@@ -4220,6 +4250,15 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 						Poll::Pending => {}
 					}
 
+					// The last subscriber left. The upstream subscription lingers, so one
+					// returning soon (a re-subscribe or a seek) rides it rather than a cancel
+					// and a fresh SUBSCRIBE. Its return is the change polled above.
+					let unsubscribed = self.unsubscribed && matches!(self.sub, Sub::Active(_));
+					if self.cancel.poll(unsubscribed, waiter).is_ready() {
+						serve.cancel_subscription(&mut self.serving, &mut self.sub);
+						self.unsubscribed = false;
+					}
+
 					// (2) In-flight fetches; completions just retire.
 					let _ = self.fetches.poll(waiter);
 
@@ -4227,18 +4266,13 @@ impl<S: crate::transport::poll::Session> ServeLoop<S> {
 					// went with the last subscriber, so it lingers, cache and all, for a
 					// reader or fetch that asks again soon, then is dropped. In-flight
 					// fetches keep it alive: work already accepted still gets finished.
-					if self.fetches.is_empty() && self.demand.poll_unused(waiter).is_ready() {
-						if self.linger.deadline().is_none() {
-							let now = serve.subscriber.runtime.now();
-							self.linger.set(now.checked_add(track::IDLE_LINGER));
-						}
-						if self.linger.poll(waiter).is_ready() {
-							return Poll::Ready(ServeEnd::Idle);
-						}
-						// A reader returning restarts the countdown when it next leaves.
+					let unused = self.fetches.is_empty() && self.demand.poll_unused(waiter).is_ready();
+					if self.linger.poll(unused, waiter).is_ready() {
+						return Poll::Ready(ServeEnd::Idle);
+					}
+					// A reader returning restarts the countdown when it next leaves.
+					if unused {
 						let _ = self.demand.poll_used(waiter);
-					} else {
-						self.linger.set(None);
 					}
 
 					// (4) The upstream subscribe stream closed, or carried a START/END/DROP.
@@ -4391,6 +4425,9 @@ struct FetchServeRun<S: crate::transport::poll::Session> {
 	timescale: Option<Timescale>,
 	group: u64,
 	state: FetchRunState<S>,
+	/// Runs while nobody wants the fetch: it stays in flight, for a caller returning
+	/// soon, until this fires.
+	linger: crate::time::Linger,
 }
 
 enum FetchRunState<S: crate::transport::poll::Session> {
@@ -4422,9 +4459,9 @@ enum FetchRunState<S: crate::transport::poll::Session> {
 
 impl<S: crate::transport::poll::Session> FetchRunState<S> {
 	/// The downstream request, while it waits on the publisher's answer.
-	fn request(&self) -> Option<&group::Request> {
+	fn request(&mut self) -> Option<&mut group::Request> {
 		match self {
-			Self::Open { request } | Self::Send { request, .. } | Self::Answer { request, .. } => request.as_ref(),
+			Self::Open { request } | Self::Send { request, .. } | Self::Answer { request, .. } => request.as_mut(),
 			Self::Ingest { .. } | Self::Done => None,
 		}
 	}
@@ -4434,12 +4471,14 @@ impl<S: crate::transport::poll::Session> FetchServeRun<S> {
 	fn new(serve: TrackServe<S>, request: group::Request, timescale: Option<Timescale>) -> Self {
 		let session = serve.subscriber.session.clone();
 		let group = request.sequence();
+		let linger = crate::time::Linger::new(&serve.subscriber.runtime, track::REQUEST_LINGER);
 		Self {
 			serve,
 			session,
 			timescale,
 			group,
 			state: FetchRunState::Open { request: Some(request) },
+			linger,
 		}
 	}
 }
@@ -4450,10 +4489,11 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
 		let mut cx = waiter.context();
 		loop {
-			// A fetch nobody waits on any more is cancelled upstream, so the publisher stops
-			// serving it (and a relay there releases its own FETCH). Ingest has its own check.
+			// A fetch nobody waits on through the linger is cancelled upstream, so the
+			// publisher stops serving it (and a relay there releases its own FETCH). A caller
+			// returning meanwhile joins it instead. Ingest has its own check.
 			if let Some(request) = self.state.request()
-				&& request.demand().poll_unused(waiter).is_ready()
+				&& request.poll_abandon(&mut self.linger, waiter).is_ready()
 			{
 				tracing::debug!(track = %self.serve.name, group = self.group, "fetch abandoned");
 				if let FetchRunState::Send { stream, .. } | FetchRunState::Answer { stream, .. } =
@@ -4619,10 +4659,17 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 				} => {
 					let Poll::Ready(res) = ingest.poll(&mut stream.reader, producer, waiter) else {
 						// Still short of its end, so completion always wins. Once nobody
-						// wants the rest (no joined fetch left to pick it up, no reader),
-						// cancel upstream and abort the truncated group, never caching it
-						// as complete. The abort is atomic with a new reader arriving.
-						if joined.poll_unused(waiter).is_pending() || producer.poll_unused(waiter).is_pending() {
+						// wants the rest (no joined fetch left to pick it up, no reader)
+						// through the linger, cancel upstream and abort the truncated group,
+						// never caching it as complete. The abort is atomic with a new reader
+						// arriving.
+						let unused =
+							joined.poll_unused(waiter).is_ready() && producer.poll_unused(waiter).is_ready();
+						if unused {
+							let _ = joined.poll_used(waiter);
+							let _ = producer.demand().poll_used(waiter);
+						}
+						if self.linger.poll(unused, waiter).is_pending() {
 							return Poll::Pending;
 						}
 						if !producer.abort_unused(Error::Cancel) {

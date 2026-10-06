@@ -117,7 +117,7 @@ competes with remote routes to its path on cost like any other route, winning
 only a tie. Retracting a route (an unannounce, or the peer's `ANNOUNCE_END`)
 stops new requests from resolving through it but leaves subscriptions already
 in flight alone: each track runs to its own end or failure, or until its last
-subscriber leaves, which cancels it upstream. On moq-lite 05 and
+subscriber stays gone for a second, which cancels it upstream. On moq-lite 05 and
 newer, a clean end requires `SUBSCRIBE_END` before the publisher's FIN. A FIN
 without that declaration fails the subscription with `ProtocolViolation`; older
 moq-lite versions use FIN alone. moq-transport requires `PUBLISH_DONE` before FIN.
@@ -310,9 +310,11 @@ budget behind the new route's live edge. A successor group with no timestamp
 leaves the preceding group's reach unbounded until its first frame arrives; if
 it is dropped first, the next group takes its place.
 
-A relay cancels its upstream subscription once nobody subscribes, but keeps its
-copy of the track for 30 seconds after the last reader leaves, so a returning
-reader or the next fetch finds its cache. That copy is not live meanwhile:
+A relay keeps its upstream subscription or fetch for one second after the last
+reader leaves, so a reader that re-subscribes, seeks, or blips rides the request
+still in flight rather than a cancel and a fresh one. It then cancels upstream,
+but keeps its copy of the track for 30 seconds after the last reader leaves, so
+a returning reader or the next fetch finds its cache. That copy is not live meanwhile:
 readers get nothing from its cache until the source answers again, since how
 stale it is cannot be told. lite-07 and moq-transport answer with their largest
 position, and older lite versions are asked from the head of the newest cached
