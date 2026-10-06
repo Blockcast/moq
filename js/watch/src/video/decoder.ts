@@ -170,7 +170,10 @@ export class Decoder {
 			this.#active.set(undefined);
 			// A paused or hidden player keeps its picture, but with nothing selectable (every rendition
 			// disabled or removed) it shows black rather than a frozen frame.
-			if (enabled && broadcast && !track) this.#clearCurrentFrame();
+			if (enabled && broadcast && !track) {
+				this.#clearCurrentFrame();
+				this.#out.buffered.set([]);
+			}
 			return;
 		}
 

@@ -192,15 +192,12 @@ In addition to the WebCodecs fields, each rendition MAY carry the common renditi
 type VideoDecoderConfigExtensions = {
   "displayAspectWidth": number | undefined,
   "displayAspectHeight": number | undefined,
-  "enabled": boolean | undefined,
 }
 ~~~
 
 `displayAspectWidth` and `displayAspectHeight` give the display aspect ratio of the media, stretching or shrinking the coded pixels.
 A consumer that understands neither field MUST assume square pixels, a 1:1 ratio.
 Both MUST be present together; a consumer that sees only one MUST ignore it.
-
-`enabled` is defined in {{field-enabled}}.
 
 For example:
 
@@ -237,14 +234,6 @@ For example:
 }
 ~~~
 
-### enabled {#field-enabled}
-The `enabled` field says whether a consumer may select an audio or video rendition.
-When `enabled` is false, no frames are coming, and a consumer MUST NOT select the rendition.
-If absent, `enabled` defaults to true; a publisher SHOULD only write it when false.
-
-Earlier versions defined a video `stalled` field instead.
-A publisher MUST NOT write `stalled`, and a consumer MUST ignore it.
-
 
 ## Audio
 An audio track contains the necessary information to decode an audio stream.
@@ -259,7 +248,7 @@ The `renditions` field contains a map of track names to audio decoder configurat
 See the [WebCodecs specification](https://www.w3.org/TR/webcodecs/#audio-decoder-config) for specifics and registered codecs.
 Any field carrying raw bytes, notably `description`, is a hex string ({{binary}}).
 
-In addition to the WebCodecs fields, each rendition MAY carry the common rendition fields ({{common}}) and `enabled` ({{field-enabled}}).
+In addition to the WebCodecs fields, each rendition MAY carry the common rendition fields ({{common}}).
 
 ### PCM {#audio-pcm}
 
@@ -494,6 +483,7 @@ type CommonExtensions = {
   "container": Container,
   "jitter": number | undefined,
   "delay": number | undefined,
+  "enabled": boolean | undefined,
 }
 ~~~
 
@@ -557,6 +547,14 @@ A consumer SHOULD hold at least the largest `delay` plus `jitter` among the rend
 A consumer MUST NOT subtract one rendition's `delay` from another's: each is a maximum over the life of the stream, so two values need not share an origin.
 
 For example, a video encoder that flushes 200 milliseconds after the audio encoder for the same media time advertises a video `delay` of 200 and no audio `delay`.
+
+### enabled {#field-enabled}
+The `enabled` field says whether a consumer may select an audio or video rendition; a text rendition does not carry it.
+When `enabled` is false, no frames are coming, and a consumer MUST NOT select the rendition.
+If absent, `enabled` defaults to true; a publisher SHOULD only write it when false.
+
+Earlier versions defined a video `stalled` field instead.
+A publisher MUST NOT write `stalled`, and a consumer MUST ignore it.
 
 # Container {#container}
 Audio, video, and text tracks use a container to encapsulate the media payload.
