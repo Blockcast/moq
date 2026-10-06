@@ -102,16 +102,17 @@ fn is_set<T>(slot: &kio::Ref<'_, Option<T>>) -> Poll<()> {
 /// wakes; the send side's `poll_closed` reads this without consuming state.
 #[derive(Default)]
 struct ClosedSignal {
-	/// Set once the peer signals stop or drops. Setting it wakes pending
-	/// `poll_closed` watches.
-	result: kio::Shared<Option<Result<(), MockError>>>,
+	/// Set once the peer signals stop or drops, with when the sender learns of it.
+	/// Setting it wakes pending `poll_closed` watches.
+	result: kio::Shared<Option<(tokio::time::Instant, Result<(), MockError>)>>,
 }
 
 impl ClosedSignal {
-	fn set(&self, result: Result<(), MockError>) {
+	/// Signal the sender once `delay` has passed: a STOP_SENDING crosses the link like data.
+	fn set(&self, delay: Duration, result: Result<(), MockError>) {
 		let mut slot = self.result.lock();
 		if slot.is_none() {
-			*slot = Some(result);
+			*slot = Some((tokio::time::Instant::now() + delay, result));
 		}
 	}
 }
@@ -123,6 +124,8 @@ type Flight = (tokio::time::Instant, StreamChunk);
 pub struct MockSendStream {
 	tx: Option<kio::Queue<Flight>>,
 	closed: Arc<ClosedSignal>,
+	/// Wakes `poll_closed` when the peer's stop lands.
+	landing: Option<Pin<Box<tokio::time::Sleep>>>,
 	park: kio::Park,
 	/// Acknowledge the FIN as soon as it is sent, for a stream the peer's transport holds
 	/// back from its application (see [`MockSession::hold_unis`]).
@@ -168,7 +171,7 @@ impl poll::SendStream for MockSendStream {
 			// trusts this signal ahead of the connection error.
 			let pushed = self.push(StreamChunk::Fin);
 			if pushed.is_ok() && (self.ack_fin || self.conn.ack_fins.load(Ordering::Relaxed)) {
-				self.closed.set(Ok(()));
+				self.closed.set(Duration::ZERO, Ok(()));
 			}
 			self.tx = None;
 			pushed?;
@@ -187,9 +190,17 @@ impl poll::SendStream for MockSendStream {
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
 		let waiter = self.park.hold(cx);
 		if !self.conn.hold_fins.load(Ordering::Relaxed)
-			&& let Poll::Ready(result) = self.closed.result.poll(waiter, is_set)
+			&& let Poll::Ready(slot) = self.closed.result.poll(waiter, is_set)
 		{
-			return Poll::Ready(result.clone().expect("set"));
+			let (arrival, result) = slot.clone().expect("set");
+			drop(slot);
+			let landing = self
+				.landing
+				.get_or_insert_with(|| Box::pin(tokio::time::sleep_until(arrival)));
+			landing.as_mut().reset(arrival);
+			if landing.as_mut().poll(cx).is_ready() {
+				return Poll::Ready(result);
+			}
 		}
 		drop(std::task::ready!(self.conn.close_state.poll(waiter, is_set)));
 		Poll::Ready(Err(self.conn.error().expect("closed")))
@@ -293,7 +304,7 @@ impl poll::RecvStream for MockRecvStream {
 	}
 
 	fn stop(&mut self, _code: u32) {
-		self.closed.set(Ok(()));
+		self.closed.set(self.conn.latency(), Ok(()));
 		self.done = true;
 	}
 
@@ -326,7 +337,7 @@ impl Drop for MockRecvStream {
 	fn drop(&mut self) {
 		// Signal the paired SendStream that the receiver is gone (implicit STOP),
 		// and fail its future writes.
-		self.closed.set(Ok(()));
+		self.closed.set(self.conn.latency(), Ok(()));
 		self.rx.close();
 	}
 }
@@ -341,6 +352,7 @@ fn new_stream_pair(conn: &Arc<ConnectionState>) -> (MockSendStream, MockRecvStre
 	let send = MockSendStream {
 		tx: Some(queue.clone()),
 		closed: closed.clone(),
+		landing: None,
 		park: kio::Park::default(),
 		ack_fin: false,
 		withhold_fin: Arc::default(),

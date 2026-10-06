@@ -38,8 +38,6 @@ Public API: none. Wire: none.
 - [Scoped WARN capture](/quest/m1/test-flakes-2/warn-capture.md) - the drop-unfinished tests count only their own WARNs
 - [moq-mux debounce clock](/quest/m1/test-flakes-2/mux-debounce-clock.md) - the TS export debounce test advances on the paused clock
 - [js/publish audio clock](/quest/m1/test-flakes-2/publish-audio-clock.md) - the audio encoder delay test runs on mock time
-- [Rejoin after idle](/quest/m1/test-flakes-2/rejoin-idle-race.md) - an IETF rejoin never gets the stale warm cache first, because the copy goes idle before the cancel
-
 ## Related
 
 - [Archive enrollment](/quest/m1/archive/enrollment-flake.md) - the same
