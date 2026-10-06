@@ -118,7 +118,8 @@ Any broadcasts and subscriptions are transparently proxied by the CDN behind the
 ## Broadcast
 A Broadcast is a collection of Tracks named by a path.
 This corresponds to a MoqTransport's "track namespace".
-A path names one Broadcast whichever publisher serves it: a publisher MUST NOT reuse a path for different content, and publishes a new instance under a new path instead.
+A path naming an epoch (see [Epochs](#epochs)) names one Broadcast from one publisher, whichever relay serves it: a publisher MUST NOT reuse an epoch for different content, and publishes a new instance under a new epoch instead.
+A path without an epoch makes no such promise: two publishers of one such path, such as two claimants of a transcoder's prefix, may serve different content.
 
 A publisher advertises what it can serve via ANNOUNCE_START messages, each carrying a path prefix: a route covering every broadcast path beneath it.
 A route is the only shape an advertisement takes: a publisher that serves only some of the paths beneath a prefix, such as a transcoder for any broadcast's derivative, advertises the covering prefix and refuses the requests it will not serve (see [Resolution](#resolution)); no message narrows a route.
@@ -425,7 +426,8 @@ Applying one rule to both advertisement and dispatch keeps advertised paths trut
 
 When resolving a path covered by several routes (across any number of streams), the subscriber SHOULD prefer the most specific covering route (see [Resolution](#resolution)), then a path that contains no 0 Hop ID over one that does, then the lowest Warm Route Cost after adding each arriving link's cost (see [Cost Parameter](#cost-parameter)), breaking ties toward the lowest Cold Route Cost, then toward the shortest path, and then toward the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
 
-Every route covering a path serves the same Broadcast, so a relay MAY move a live subscription between them, continuing from the first frame the subscriber lacks, and a route change (a reconnect, a cheaper path, a draining session) is invisible to the subscriber.
+Every route serving a path that names an epoch serves the same Broadcast, so a relay MAY move a live subscription between them, continuing from the first frame the subscriber lacks, and a route change (a reconnect, a cheaper path, a draining session) is invisible to the subscriber.
+For any other path, a relay MUST NOT move a live subscription to another route, whose content may differ: the subscription stays on the route that first served it and ends when that route goes, and a repeated request resolves afresh.
 
 #### Resolution {#resolution}
 A SUBSCRIBE, FETCH, or TRACK request names a path, and the receiver resolves it against the routes covering that path, after the per-subscriber exclusion above.
@@ -459,9 +461,11 @@ A publisher that may restart SHOULD publish each run under a fresh epoch, so a r
 An epoch only ever ends a path: a publisher MUST NOT announce a path with an epoch segment before its last, and a receiver MAY refuse such an announcement.
 The segment is ordinary path text on the wire.
 
-A request for a path naming no epoch that no route covers resolves to the greatest epoch one segment below it that a route covers; UUIDv7 text orders by creation time.
-When the path later resolves elsewhere (a newer epoch, an older one once the newest is retracted, or a route covering the path), the receiver MUST reset the request with UNROUTABLE rather than move it to a different Broadcast, and a repeated request resolves afresh.
+A request for a path naming no epoch resolves to the greatest epoch one segment below it that a route covers, ahead of any route covering the path itself; UUIDv7 text orders by creation time.
+With no such epoch, it resolves through a route covering the path, as any other path does.
+The request is bound once, when it is received: a newer epoch is a different Broadcast, and the receiver MUST NOT move the request to it, so the request ends with the epoch it was bound to and a repeated request resolves afresh.
 A request naming an epoch never moves.
+A subscriber that wants each new epoch as it appears watches the announcements below the name and requests each epoch by its full path, treating the switch as a discontinuity.
 This is receiver behavior on every version: a receiver without it finds no route covering the path, and the request is unroutable.
 
 ### Subscribe
@@ -1372,7 +1376,7 @@ The `Message Length` describes the payload size on the wire.
 - The subscriber FINs its Subscribe Stream after settling its tail; graceful session close waits for that FIN or reset.
 - Made TRACK_INFO Publisher Max Age optional, encoded as milliseconds plus one with zero meaning no limit.
 - Added `Largest Group` and `Largest Frame` to SUBSCRIBE_OK: the publisher's largest position when it answers, which a subscriber takes as where the live feed is. A publisher MUST answer at once when the requested start is past it. Earlier versions carry no such position, so a subscriber takes the first frame instead.
-- A path names one Broadcast whichever publisher serves it, and a publisher MUST NOT reuse a path for different content. A relay MAY move a subscription between any routes covering the path, continuing from the first frame the subscriber lacks instead of at a group boundary. Replaces the first-hop identity.
+- A path naming an epoch names one Broadcast whichever relay serves it, and a publisher MUST NOT reuse an epoch for different content. A relay MAY move a subscription between routes serving an epoch path, continuing from the first frame the subscriber lacks instead of at a group boundary, and MUST NOT move one for a path without an epoch. Replaces the first-hop identity.
 
 - Assigned `moq-lite-07-wip` as this draft's protocol identifier until it is finalized as `moq-lite-07`.
 - Switched every variable-length integer, including SETUP parameter values, from QUIC's two-bit length prefix to moq-transport's leading-ones encoding, widening the range to 64 bits.
@@ -1383,7 +1387,7 @@ The `Message Length` describes the payload size on the wire.
 - Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live advertisement's suffix, and ANNOUNCE_START and ANNOUNCE_UPDATE gain `Hop Base` and `Hop Keep` to copy the tail of a live advertisement's Hop ID list.
 - Capped the SETUP Message Length at 65,536 bytes.
 - A relay puts a random Hop ID, picked per session, in front of an announcement whose reconstructed path starts with 0, and writes that stamp followed by 0 for an empty path.
-- Specified epochs: a final `@<uuidv7>` segment names one run of a path and never appears earlier, a request for an uncovered name resolves to its newest covered epoch, and a request that would move to another epoch is reset with UNROUTABLE.
+- Specified epochs: a final `@<uuidv7>` segment names one run of a path and never appears earlier, a request for a bare name binds once to its newest covered epoch ahead of a route covering the name, and never moves to a newer one.
 
 ## moq-lite-06
 

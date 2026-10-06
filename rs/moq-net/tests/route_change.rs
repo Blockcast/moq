@@ -1,8 +1,8 @@
 //! A subscription survives its route changing, end to end over real sessions.
 //!
 //! A publisher `P` is pulled by two relays `A` and `B`, both of which re-advertise
-//! it to the subscribing relay `R`. A path is one broadcast whoever serves it, so `R`
-//! may resume a subscription served through one onto the other. The reader on `R`
+//! it to the subscribing relay `R`. A path naming an epoch is one broadcast whoever
+//! relays it, so `R` may resume a subscription served through one onto the other. The reader on `R`
 //! must see every frame exactly once, in order, whether the route changes between
 //! groups or in the middle of one, and however it changes.
 
@@ -18,6 +18,9 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Frames per group.
 const FRAMES: u64 = 4;
+
+/// The broadcast, under an epoch: only an epoch path resumes across routes.
+const LIVE: &str = "live/@0199b7f4-3c2a-7d1e-9f0b-2b6c1a9d8e7f";
 
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
@@ -86,7 +89,7 @@ impl Topology {
 		let relay_b = produce_origin(3);
 		let subscriber = produce_origin(4);
 
-		let broadcast = publisher.create_broadcast("live").unwrap();
+		let broadcast = publisher.create_broadcast(LIVE).unwrap();
 		let track = broadcast.create_track("video", None).unwrap();
 		broadcast.announce(Default::default()).unwrap();
 
@@ -95,8 +98,8 @@ impl Topology {
 		let a_to_r = link(version, &relay_a, &subscriber).await;
 
 		let consumer = subscriber.consume();
-		consumer.routed("live").await.unwrap();
-		let remote = consumer.request_broadcast("live").await.unwrap();
+		consumer.routed(LIVE).await.unwrap();
+		let remote = consumer.request_broadcast(LIVE).await.unwrap();
 		let prefs = track::Subscription::default().with_max_age(Duration::from_secs(60));
 		let sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
 
@@ -354,8 +357,8 @@ async fn lagging_route_dies(version: Version) -> mpsc::UnboundedReceiver<(u64, m
 	}
 	async fn subscribe(origin: &origin::Producer) -> track::Subscriber {
 		let consumer = origin.consume();
-		consumer.routed("live").await.unwrap();
-		let remote = consumer.request_broadcast("live").await.unwrap();
+		consumer.routed(LIVE).await.unwrap();
+		let remote = consumer.request_broadcast(LIVE).await.unwrap();
 		let preferences = track::Subscription::default().with_max_age(Duration::from_secs(60));
 		remote.track("video").unwrap().subscribe(preferences).await.unwrap()
 	}
@@ -371,7 +374,7 @@ async fn lagging_route_dies(version: Version) -> mpsc::UnboundedReceiver<(u64, m
 		produce_origin(4),
 		produce_origin(5),
 	);
-	let broadcast = p.create_broadcast("live").unwrap();
+	let broadcast = p.create_broadcast(LIVE).unwrap();
 	let track = broadcast.create_track("video", None).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 	let p_a = lagged(version, &p, &a, Duration::from_millis(300)).await;

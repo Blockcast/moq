@@ -668,13 +668,12 @@ class OriginState {
 	}
 
 	/**
-	 * The path a request for `path` is served from: `path` itself when anything routes it,
-	 * otherwise the newest epoch below it that something routes. A path naming an epoch
-	 * pins it. Mirrors Rust's resolution, so a bare name follows its newest live epoch and
-	 * falls back to an older one when the newest goes away.
+	 * The path a request for `path` is served from: the newest epoch below a bare `path`
+	 * that something routes, ahead of any route covering the name, otherwise `path` itself.
+	 * A path naming an epoch pins it. Mirrors Rust's resolution; a request re-reads it, so
+	 * a bare name's `active` swaps to a newer epoch as a new broadcast, never a continuation.
 	 */
 	target(path: Path.Valid): Path.Valid {
-		if (this.local.peek()?.has(path) || this.bestEntry(path)) return path;
 		if (Path.splitEpoch(path).epoch !== undefined) return path;
 		let newest: Path.Valid | undefined;
 		const consider = (candidate: Path.Valid) => {

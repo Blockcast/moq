@@ -11,8 +11,9 @@ route lingers, is resumed into the old broadcast and stalls viewers until its
 sequence catches up.
 
 Each first-party publish of `demo/BBB.hang` goes out as
-`demo/BBB.hang/@<uuidv7>`, so a restart is a new broadcast. A viewer of the
-bare name follows the newest live epoch as soon as it is announced. Moving to
+`demo/BBB.hang/@<uuidv7>`, so a restart is a new broadcast. A smart viewer
+switches to the newest epoch as soon as it is announced, and a bare-name viewer
+binds to the newest when it subscribes. Moving to
 a new epoch is a clean boundary (a fresh catalog and tracks, never resumed
 across), and each run stays addressable by its full path.
 
@@ -41,13 +42,21 @@ Decided:
   already carries one"). Minting is one call: `Path::mint_epoch` in Rust and
   `Path.mintEpoch` in TypeScript append a fresh `@<uuidv7>`. Each first-party
   publisher calls it once per run; a redundant pair passes a shared epoch.
-- Viewers follow the greatest epoch with a live route. When it goes away and an
-  older one is still live, they fall back to it.
-- A bare request with no route covering the name resolves to that same epoch
-  on every version, so lite-06 and IETF clients keep working through an
-  epoch-aware relay. When the name resolves elsewhere, the bare subscription
-  ends with an `Unroutable` reset, and the client's normal resubscribe lands on
-  the new one. A route covering the name wins over its epochs.
+- Smart subscribers use epochs natively (decided 2026-10-05 in #4817): they
+  watch the announcements below a name, request each epoch by its full path,
+  and treat a new epoch as a discontinuity (a fresh decoder). Dumb subscribers
+  use bare names and are sticky.
+- A bare request binds once, when made, to the newest epoch with a live route,
+  ahead of any route covering the name (a fully qualified epoch wins). With no
+  epoch it goes through the covering route, such as an on-demand transcode
+  claim, which never announces its output. The binding never moves: a newer
+  epoch is a different broadcast, and the request ends with the epoch it bound
+  to. In TypeScript the long-lived request's `active` swaps to the newer epoch
+  as a new broadcast.
+- Only an epoch names one origin, so only an epoch path resumes across routes.
+  A path without an epoch stays on the route that first served it and ends
+  when that route goes; it is never stitched (decided 2026-10-05). Two
+  unrelated epochs are never stitched either.
 - A grant that admits a name admits its epochs (a `name/@*` sibling); a grant
   on one epoch reaches only that epoch. The sibling admits any single `@`
   segment, not only UUIDv7 text, since a pattern cannot spell one (decided
@@ -56,13 +65,10 @@ Decided:
   `name/@e/more` fails with `MisplacedEpoch`, and `with_epoch`
   (`Path.withEpoch` in TypeScript) replaces a final epoch rather than stacking
   one, with `None` removing it.
-- A catalog `broadcast` reference follows by default (decided 2026-10-05 in
+- A catalog `broadcast` reference is bare by default (decided 2026-10-05 in
   #4817): it resolves against the catalog's name past its final epoch, so a
-  bare and a pinned fetch agree, and follows the target's newest epoch unless
-  it spells one. A transcoder pins its source by writing `./source/@<epoch>`.
-- Precedence and the move reset stay as built (decided 2026-10-05): any route
-  covering the name, an ancestor prefix included, wins over its epochs, and a
-  bare subscription that moves ends with `Unroutable` (0x36).
+  bare and a pinned fetch agree, and binds to the target's newest epoch when
+  requested unless it spells one. A transcoder pins its source by writing `./source/@<epoch>`.
 - An unmodified third-party relay routes `foo/@<epoch>` but never resolves a
   bare `foo`, since a route covers its descendants, not its parent. A
   bare-name viewer behind one needs a publisher that publishes the bare name.
@@ -80,19 +86,20 @@ Decided:
   release) moved under it, and the OBS half of GStreamer and OBS moved to m1
   as [OBS publishes under epochs](/quest/m1/obs-epoch.md), so the release
   gate no longer waits on m1 work.
-- Derived output mirrors the epoch it came from
-  (`.pro/transcode/<pid>/foo.hang/@e`, per the
-  [wildcard](/quest/m0/wildcard/README.md) line's derived-output layout), so
-  the service's prefix claim still covers it.
+- Derived output served on demand through a claim stays bare and sticky per
+  relay (decided 2026-10-05): a worker dying costs its subscribers one reset
+  and a cold start on the next claimant, never a splice. Whether that removes
+  the [wildcard](/quest/m0/wildcard/README.md) line's mirrored-epoch and
+  group-start requirements is the wildcard line's call.
 
 This README owns:
 
 - An end-to-end relay test: republish a name while the old publisher's session
-  stays open. A new-API viewer and a lite-06 or IETF bare-path viewer both
-  reach the new epoch within one RTT-scale bound rather than the idle timeout.
-  Killing the newest epoch falls back to a still-live older one.
+  stays open. A new-API viewer following announcements reaches the new epoch
+  within one RTT-scale bound rather than the idle timeout, and a lite-06 or
+  IETF bare-path viewer that resubscribes binds to it.
 - A `doc/concept` page on broadcast naming: what an epoch is, publish and
-  consume behavior, takeover and fallback, bare-path resolution, and the
+  consume behavior, smart and sticky subscribers, bare-path binding, and the
   bare-name opt-out.
 
 ## Required

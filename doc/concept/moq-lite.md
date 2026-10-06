@@ -96,9 +96,12 @@ always a prefix, on every wire version and on moq-transport alike; a service
 that serves only some of the paths beneath its prefix refuses the rest as they
 are requested. Each route carries the chain of relay identities it passed
 through, which is how forwarding loops are caught, and a cost, which is how a
-subscriber picks among several routes to the same broadcast. A path names one
-broadcast whoever publishes it, so a subscription moves between routes without
-a seam; a publisher must not reuse a path for different content. A hop of 0 is
+subscriber picks among several routes to the same broadcast. A path naming an
+[epoch](#publisher-epochs) is one broadcast from one publisher, so a subscription
+to it moves between routes without a seam; a publisher must not reuse an epoch
+for different content. A path without an epoch carries no such promise (two
+transcoder claimants may serve different bytes), so its subscription stays on
+the route that first served it and ends when that route goes. A hop of 0 is
 the anonymous mark and travels the chain unchanged; when it is the first hop, a
 relay puts a random ID, fresh per connection, in front of it. A route that passed through an
 anonymous hop at any depth ranks below every fully identified route, whatever
@@ -157,23 +160,28 @@ The segment travels as part of the ordinary broadcast path on every supported
 wire version. Epochs do not hide a broadcast; a leading `.` in a name segment
 still does.
 
-A request for a bare name that no route covers resolves to its newest epoch:
-the greatest `name/@<uuidv7>` with a live route. The broadcast is still named
-`name`. A catalog's relative references resolve against its name past any final
+A request for a bare name binds once, when made, to its newest epoch: the
+greatest `name/@<uuidv7>` with a live route, ahead of any route covering the
+name. With no epoch it goes through a route covering the name, such as a
+transcoder's claim, and stays on that route. The broadcast is still named
+`name`, and it never moves to a newer epoch, which is a different broadcast: in
+Rust it ends with the epoch it was bound to, and the next request binds to the
+newest. In TypeScript a request is long-lived, so its `active` broadcast swaps
+to the newer epoch as a new broadcast, and js/watch restarts its decoders on it.
+A path naming an epoch pins it and never moves. A smart subscriber watches the
+announcements below a name and requests each epoch by its full path, treating
+a new one as a discontinuity.
+
+A catalog's relative references resolve against its name past any final
 epoch, so they mean the same whether the catalog was requested by name or by
-epoch, and a reference follows its target's newest epoch unless it spells one
-(`./source/@<uuidv7>`). When the
-name resolves elsewhere (a newer epoch, an older one once the newest is
-retracted, or a route covering the name itself), a Rust origin ends the
-broadcast and resets its tracks with `Unroutable`, and the next request lands
-on the new resolution; it never splices one epoch into another. In TypeScript
-the request's `active` broadcast swaps to the new one. A path naming an epoch
-pins it and never moves. A relay resolves bare requests this way for every
-client and protocol version, so an older client subscribing by name keeps
-working, provided it resubscribes after an `Unroutable` reset. A relay without this support routes
-`name/@<uuidv7>` but never resolves bare `name`, since a route covers its
-descendants, not its parent: a bare-name viewer behind one needs a publisher
-that publishes the bare name itself.
+epoch, and a reference binds to its target's newest epoch when requested unless it spells one
+(`./source/@<uuidv7>`).
+
+A relay resolves bare requests this way for every client and protocol
+version, so an older client subscribing by name keeps working. A relay without
+this support routes `name/@<uuidv7>` but never resolves bare `name`, since a
+route covers its descendants, not its parent: a bare-name viewer behind one
+needs a publisher that publishes the bare name itself.
 
 A grant that admits a name also admits its epochs: an exact `room/camera`
 grant reaches `room/camera/@<uuidv7>` for publishing and subscribing, and

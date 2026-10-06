@@ -421,11 +421,11 @@ fn bench_request(c: &mut Criterion) {
 	group.finish();
 }
 
-/// Resolving a bare name to its newest epoch, with `names` names in the table
+/// Binding a bare name to its newest epoch, with `names` names in the table
 /// each published under `epochs` live epochs: the walk reads only the epochs
 /// one segment below the requested name, so `names` must not show.
-fn bench_follow(c: &mut Criterion) {
-	let mut group = c.benchmark_group("origin/follow");
+fn bench_bind(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/bind");
 	for names in [100, 1_000] {
 		for epochs in [1, 8, 64] {
 			let (producer, mut driver) = origin::Producer::new(origin::Config::default());
@@ -458,13 +458,14 @@ fn bench_follow(c: &mut Criterion) {
 	group.finish();
 }
 
-/// Publisher handoff at one path: a subscriber is reading from one local
+/// Publisher handoff at one epoch path: a subscriber is reading from one local
 /// source when a second announces at the same path and takes over (newest
-/// wins). Measured from the standby's attach to the subscriber receiving its
+/// wins). Only an epoch path resumes across sources. Measured from the standby's attach to the subscriber receiving its
 /// first group, with `publishers` unrelated broadcasts in the table.
 fn bench_handoff(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/handoff");
 	group.measurement_time(Duration::from_secs(5));
+	let live = moq_net::Path::new("room/live").mint_epoch();
 	for publishers in [1, 1_000] {
 		group.bench_function(BenchmarkId::from_parameter(format!("{publishers}p")), |b| {
 			let runtime = tokio::runtime::Builder::new_current_thread()
@@ -483,18 +484,18 @@ fn bench_handoff(c: &mut Criterion) {
 				runtime.block_on(async {
 					let mut total = Duration::ZERO;
 					for _ in 0..iterations {
-						let incumbent = producer.publish("room/live", origin::Route::default()).unwrap();
+						let incumbent = producer.publish(&live, origin::Route::default()).unwrap();
 						let track = incumbent.create_track("video", None).unwrap();
 						let mut first = track.append_group().unwrap();
 						first.write_frame(Timestamp::ZERO, b"one".as_ref()).unwrap();
 						first.finish().unwrap();
 
-						let resolved = consumer.request_broadcast("room/live").await.unwrap();
+						let resolved = consumer.request_broadcast(&live).await.unwrap();
 						let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 						subscription.recv_group().await.unwrap().expect("first group");
 
 						let started = std::time::Instant::now();
-						let standby = producer.create_broadcast("room/live").unwrap();
+						let standby = producer.create_broadcast(&live).unwrap();
 						let track = standby.create_track("video", None).unwrap();
 						let mut second = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
 						second.write_frame(Timestamp::ZERO, b"two".as_ref()).unwrap();
@@ -638,7 +639,7 @@ criterion_group!(
 	bench_serve_idle,
 	bench_subscribe,
 	bench_request,
-	bench_follow,
+	bench_bind,
 	bench_handoff,
 	bench_relay,
 	bench_parked

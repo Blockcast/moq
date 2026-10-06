@@ -2256,15 +2256,12 @@ struct FrontTask {
 	shared: kio::Shared<OriginState>,
 	/// The broadcast the front serves.
 	broadcast: broadcast::Producer,
-	/// Absolute path the front selects routes for and requests through.
+	/// Absolute path the front selects routes for and requests through: its own,
+	/// or the epoch a bare name was bound to.
 	path: PathOwned,
-	/// The bare name the front was requested at, when `path` is the epoch it
-	/// resolved to. The front ends once the name resolves elsewhere.
-	follows: Option<PathOwned>,
 	/// The requesters' horizon, applied to every (re)selection.
 	horizon: Horizon,
-	/// Wakes the front when a route covering its path, or an epoch below the
-	/// name it follows, changes.
+	/// Wakes the front when a route covering its path changes.
 	watch: Watch,
 	/// Resolves the requesters parked on the front's channel.
 	request: kio::Producer<PendingBroadcast>,
@@ -2351,7 +2348,6 @@ async fn run_front(task: FrontTask) {
 		shared,
 		broadcast,
 		path,
-		follows,
 		horizon,
 		watch,
 		request,
@@ -2383,48 +2379,41 @@ async fn run_front(task: FrontTask) {
 	// The watch generation the last selection saw.
 	let mut seen = 0;
 	let mut events: VecDeque<Event> = VecDeque::new();
-	// The followed name resolved to another epoch (or its own route): the front
-	// ends, and its tracks with it, so readers ask again and land there.
-	let mut moved = false;
+	// Only an epoch names one origin, so only its routes are interchangeable. A
+	// path without one stays on the route that first served it: it never resumes
+	// through another, whose bytes may differ, and ends once that route is gone.
+	let pinned = path.split_epoch().1.is_none();
 
 	// Read the table for the machine: the best route and whether
 	// the serving source is on its way out. Also what the watch wakes for.
-	let select =
-		|front: &mut Front, sources: &HashMap<u64, broadcast::Consumer>, seen: &mut u64, moved: &mut bool| -> Event {
-			let table = shared.read();
-			if table.closed {
-				return Event::Closed;
-			}
-			// Read alongside the decision, under the lock a poke takes first.
-			*seen = watch.seen();
-			// Moving to another epoch is a new broadcast, never a splice. A name with
-			// nothing left to resolve to ends like any retraction instead.
-			if let Some(name) = &follows
-				&& table
-					.resolve(&name.as_path(), horizon)
-					.is_some_and(|resolved| resolved != path)
-			{
-				*moved = true;
-				return Event::Selected {
-					best: None,
-					serving_closing: false,
-				};
-			}
-			front.retain_routes(|route| table.routes.covers(&path.as_path(), route));
-			let best = table
-				.best_route(&path.as_path(), horizon, front.refused_routes())
-				.map(|entry| Candidate {
-					route: entry.id,
-					local: entry.local,
-				});
-			let serving_closing = front
-				.serving()
-				.and_then(|id| sources.get(&id))
-				.is_some_and(|source| source.is_closing());
-			Event::Selected { best, serving_closing }
-		};
+	let select = |front: &mut Front, sources: &HashMap<u64, broadcast::Consumer>, seen: &mut u64| -> Event {
+		let table = shared.read();
+		if table.closed {
+			return Event::Closed;
+		}
+		// Read alongside the decision, under the lock a poke takes first.
+		*seen = watch.seen();
+		front.retain_routes(|route| table.routes.covers(&path.as_path(), route));
+		let serving_closing = front
+			.serving()
+			.and_then(|id| sources.get(&id))
+			.is_some_and(|source| source.is_closing());
+		if pinned && front.has_served() {
+			let best = front
+				.serving_route()
+				.filter(|serving| table.routes.covers(&path.as_path(), serving.route));
+			return Event::Selected { best, serving_closing };
+		}
+		let best = table
+			.best_route(&path.as_path(), horizon, front.refused_routes())
+			.map(|entry| Candidate {
+				route: entry.id,
+				local: entry.local,
+			});
+		Event::Selected { best, serving_closing }
+	};
 
-	events.push_back(select(&mut front, &sources, &mut seen, &mut moved));
+	events.push_back(select(&mut front, &sources, &mut seen));
 
 	loop {
 		while let Some(event) = events.pop_front() {
@@ -2434,7 +2423,7 @@ async fn run_front(task: FrontTask) {
 			};
 			for action in front.step(event) {
 				match action {
-					Action::Reselect => events.push_back(select(&mut front, &sources, &mut seen, &mut moved)),
+					Action::Reselect => events.push_back(select(&mut front, &sources, &mut seen)),
 					Action::Request { route } => {
 						// The entry and what it serves.
 						let found = {
@@ -2628,14 +2617,6 @@ async fn run_front(task: FrontTask) {
 						// subscriptions already in flight): their readers follow the copy
 						// they read to its end, since no front is left to replace it.
 						broadcast.close();
-						// A followed name moved: nothing carries on, so each reader is
-						// reset and its next request lands on what the name resolves to now.
-						if moved {
-							for (_, mut io) in tracks.drain() {
-								io.end(Err(Error::Unroutable));
-							}
-							return;
-						}
 						for (_, mut io) in tracks.drain() {
 							let used = io.weak.is_used();
 							// A reader still waiting on its source's answer is in flight
@@ -2851,7 +2832,7 @@ async fn run_front(task: FrontTask) {
 				deadline.set(None);
 				Event::Deadline { now: timers.now() }
 			}
-			Step::Table => select(&mut front, &sources, &mut seen, &mut moved),
+			Step::Table => select(&mut front, &sources, &mut seen),
 		};
 		events.push_back(event);
 	}
@@ -3470,33 +3451,33 @@ impl OriginState {
 	}
 
 	/// The path a request for the absolute `path` is served from, for a requester
-	/// seeing `horizon`: `path` itself when a route covers it, otherwise the newest
-	/// epoch below it that a route serves. `None` when nothing serves it.
+	/// seeing `horizon`: the newest epoch below a bare `path` that a route serves,
+	/// otherwise `path` itself when a route covers it. `None` when nothing serves it.
 	fn resolve(&self, path: &Path, horizon: Horizon) -> Option<PathOwned> {
 		let none: HashSet<u64> = HashSet::new();
-		if self.best_route(path, horizon, &none).is_some() {
-			return Some(path.to_owned());
+		// A fully qualified epoch wins over a route covering the bare name. A path
+		// naming an epoch pins it: there is nothing newer to bind to.
+		if path.split_epoch().1.is_none()
+			&& let (_, Some(node)) = self.routes.split(path)
+		{
+			// Canonical UUIDv7 text orders by mint time, so the greatest is the newest.
+			// Sorted as text and parsed lazily: the newest is usually the one served.
+			let mut segments: Vec<&str> = node
+				.children
+				.keys()
+				.filter_map(|segment| segment.strip_prefix('@'))
+				.collect();
+			segments.sort_unstable_by(|a, b| b.cmp(a));
+			let newest = segments
+				.into_iter()
+				.filter_map(|text| text.parse::<crate::Epoch>().ok())
+				.map(|epoch| path.with_epoch(&epoch))
+				.find(|epoch| self.best_route(epoch, horizon, &none).is_some());
+			if newest.is_some() {
+				return newest;
+			}
 		}
-		// A path naming an epoch pins it: there is nothing newer to follow.
-		if path.split_epoch().1.is_some() {
-			return None;
-		}
-		let (_, Some(node)) = self.routes.split(path) else {
-			return None;
-		};
-		// Canonical UUIDv7 text orders by mint time, so the greatest is the newest.
-		// Sorted as text and parsed lazily: the newest is usually the one served.
-		let mut segments: Vec<&str> = node
-			.children
-			.keys()
-			.filter_map(|segment| segment.strip_prefix('@'))
-			.collect();
-		segments.sort_unstable_by(|a, b| b.cmp(a));
-		segments
-			.into_iter()
-			.filter_map(|text| text.parse::<crate::Epoch>().ok())
-			.map(|epoch| path.with_epoch(&epoch))
-			.find(|epoch| self.best_route(epoch, horizon, &none).is_some())
+		self.best_route(path, horizon, &none).map(|_| path.to_owned())
 	}
 }
 
@@ -4249,8 +4230,8 @@ impl Consumer {
 
 	/// Block until `path` resolves to a broadcast: [`Self::request_broadcast`],
 	/// retried whenever the routes covering the path, or the epochs below a bare
-	/// name, change. To follow a bare name across epochs, call it again once the
-	/// broadcast it returned ends.
+	/// name, change. To switch to a newer epoch as soon as it appears, watch
+	/// [`Self::announced`] and request it by its full path.
 	///
 	/// A request answers for the routes as they stand, so it can miss an
 	/// announcement that has not arrived yet, lose its covering route to
@@ -4330,18 +4311,20 @@ impl Consumer {
 	/// the best announced route covering it (the most specific prefix, then the
 	/// cheapest, a broadcast published on this origin winning ties) and
 	/// materializes it, from the broadcast itself or from the peer that
-	/// announced the route. When its serving source dies or a better route
-	/// appears, the front switches to the best remaining route, invisibly to
-	/// subscribers: a path names one broadcast, whoever serves it. Its route
-	/// retracting with no replacement ends the broadcast, and the next request
-	/// re-serves the path. Tracks already in flight carry on to their own end.
+	/// announced the route. For a path naming an epoch, which names one origin,
+	/// the front switches to the best remaining route when its serving source dies
+	/// or a better route appears, invisibly to subscribers. A path without an epoch
+	/// stays on the route that first served it, since another route's bytes may
+	/// differ, and ends once that route goes. Either way, the broadcast ends when
+	/// nothing it may use is left, and the next request re-serves the path.
+	/// Tracks already in flight carry on to their own end.
 	///
-	/// A bare name no route covers resolves to its newest epoch: the greatest
-	/// `path/@<uuidv7>` a route serves. The broadcast is still named `path`, and
-	/// follows that one epoch: once the name resolves elsewhere (a newer epoch, an
-	/// older one after the newest is retracted, or a route covering the name), it
-	/// ends and so do its tracks, with [`Error::Unroutable`], so the next request
-	/// lands on the new resolution. A path naming an epoch pins it.
+	/// A bare name binds once, at request time, to its newest epoch: the greatest
+	/// `path/@<uuidv7>` a route serves, ahead of any route covering the name. With
+	/// no epoch it binds to a route covering the name itself. The broadcast is
+	/// still named `path` and never moves: a newer epoch is a different broadcast,
+	/// served to later requests, and the bound one ends with its epoch. A path
+	/// naming an epoch pins it.
 	///
 	/// The returned future fails with [`Error::Unroutable`] at once when no
 	/// announced route covers the path, including a broadcast created on this
@@ -4399,8 +4382,8 @@ impl Consumer {
 					.with_stats(scope);
 				return kio::Pending::new(pending);
 			}
-			// The front follows an epoch the name has since moved off, and ends
-			// on its next selection: serve the newcomer from a fresh one.
+			// The front stays bound to an older epoch for its own readers, and a
+			// newcomer binds to the newest: a fresh front, never the old one moved.
 			state.fronts.remove(&key);
 		}
 
@@ -4415,7 +4398,7 @@ impl Consumer {
 		});
 		let request = kio::Producer::<PendingBroadcast>::default();
 		let consumer = request.consume();
-		let watch = state.watch(&self.shared, &absolute);
+		let watch = state.watch(&self.shared, &target);
 		state.fronts.insert(
 			key,
 			RemoteFront {
@@ -4430,7 +4413,6 @@ impl Consumer {
 		self.tasks.push(run_front(FrontTask {
 			shared: self.shared.clone(),
 			broadcast,
-			follows: (target != absolute).then_some(absolute),
 			path: target,
 			horizon: self.horizon,
 			watch,
@@ -5807,20 +5789,28 @@ mod tests {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 
-		let _local = producer.publish("room/alice", Route::default().with_cost(5)).unwrap();
+		let _local = producer
+			.publish(epoch("room/alice", OLD), Route::default().with_cost(5))
+			.unwrap();
 		let first = consumer
-			.request_broadcast("room/alice")
+			.request_broadcast(epoch("room/alice", OLD))
 			.await
 			.expect("resolves locally");
 
 		let server = producer
-			.dynamic("room/alice", Route::default().with_hops(hops(&[10])).with_cost(1))
+			.dynamic(
+				epoch("room/alice", OLD),
+				Route::default().with_hops(hops(&[10])).with_cost(1),
+			)
 			.unwrap();
 		let request = queued(&server).await;
 		let upstream = broadcast::Info::new().produce();
 		request.accept(&upstream);
 
-		let second = consumer.request_broadcast("room/alice").await.expect("resolves");
+		let second = consumer
+			.request_broadcast(epoch("room/alice", OLD))
+			.await
+			.expect("resolves");
 		assert!(first.is_clone(&second), "the newcomer joins the front");
 	}
 
@@ -6050,9 +6040,12 @@ mod tests {
 	async fn takeover_keeps_the_open_group_head(dies_first: bool) {
 		let producer = origin(1).produce();
 		let first_server = producer
-			.dynamic("room/alice", Route::default().with_hops(hops(&[10])).with_cost(5))
+			.dynamic(
+				epoch("room/alice", OLD),
+				Route::default().with_hops(hops(&[10])).with_cost(5),
+			)
 			.unwrap();
-		let pending = producer.consume().request_broadcast("room/alice");
+		let pending = producer.consume().request_broadcast(epoch("room/alice", OLD));
 		let upstream = broadcast::Info::new().produce();
 		let mut dynamic = upstream.dynamic();
 		queued(&first_server).await.accept(&upstream);
@@ -6097,7 +6090,10 @@ mod tests {
 		}
 		let cost = if dies_first { 5 } else { 0 };
 		let replacement_server = producer
-			.dynamic("room/alice", Route::default().with_hops(hops(&[10])).with_cost(cost))
+			.dynamic(
+				epoch("room/alice", OLD),
+				Route::default().with_hops(hops(&[10])).with_cost(cost),
+			)
 			.unwrap();
 		let replacement = broadcast::Info::new().produce();
 		let mut replacement_dynamic = replacement.dynamic();
@@ -7267,7 +7263,7 @@ mod tests {
 
 	impl ResumeRig {
 		/// Announce a served route with `first` as its first hop, materialize
-		/// "room/alice" through it with a one-group "before" track, and subscribe.
+		/// epoch("room/alice", OLD) through it with a one-group "before" track, and subscribe.
 		async fn new(first: &[u64]) -> (Self, Dynamic, broadcast::Producer) {
 			let producer = origin(1).produce();
 			let consumer = producer.consume();
@@ -7276,7 +7272,7 @@ mod tests {
 				.dynamic("room", Route::default().with_hops(hops(first)))
 				.unwrap();
 
-			let pending = consumer.request_broadcast("room/alice");
+			let pending = consumer.request_broadcast(epoch("room/alice", OLD));
 			let request = queued(&server).await;
 			let source = broadcast::Info::new().produce();
 			let track = source.create_track("video", None).unwrap();
@@ -7445,7 +7441,12 @@ mod tests {
 			let frame = group.read_frame().await.expect("read frame").expect("frame");
 			assert_eq!(&frame.payload[..], b"after", "first hop {first:?}");
 
-			let resolved = rig.producer.consume().request_broadcast("room/alice").await.unwrap();
+			let resolved = rig
+				.producer
+				.consume()
+				.request_broadcast(epoch("room/alice", OLD))
+				.await
+				.unwrap();
 			assert!(resolved.is_clone(&rig.resolved), "first hop {first:?} left the front");
 			assert!(
 				standby.poll_requested_broadcast(&kio::Waiter::noop()).is_pending(),
@@ -7473,7 +7474,7 @@ mod tests {
 				.dynamic("room", Route::default().with_hops(hops(&[10, 7])))
 				.unwrap();
 
-			let pending = consumer.request_broadcast("room/alice");
+			let pending = consumer.request_broadcast(epoch("room/alice", OLD));
 			let request = queued(&incumbent).await;
 			let source = broadcast::Info::new().produce();
 			let track = source.create_track("video", None).unwrap();
@@ -8046,9 +8047,12 @@ mod tests {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 
-		let first = producer.publish("room/alice", Route::default()).unwrap();
+		let first = producer.publish(epoch("room/alice", OLD), Route::default()).unwrap();
 		let track = first.create_track("video", None).unwrap();
-		let resolved = consumer.request_broadcast("room/alice").await.expect("resolves");
+		let resolved = consumer
+			.request_broadcast(epoch("room/alice", OLD))
+			.await
+			.expect("resolves");
 		let mut subscription = resolved
 			.track("video")
 			.unwrap()
@@ -8062,7 +8066,7 @@ mod tests {
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"before");
 
 		// The newest source is dispatched the track, and refused for its metadata.
-		let second = producer.publish("room/alice", Route::default()).unwrap();
+		let second = producer.publish(epoch("room/alice", OLD), Route::default()).unwrap();
 		let _incompatible = second
 			.create_track("video", track::Info::default().with_timescale(crate::Timescale::MICRO))
 			.unwrap();
@@ -8096,7 +8100,7 @@ mod tests {
 		let server = producer
 			.dynamic("room", Route::default().with_hops(hops(&[10])))
 			.unwrap();
-		let pending = producer.consume().request_broadcast("room/alice");
+		let pending = producer.consume().request_broadcast(epoch("room/alice", OLD));
 		let upstream = broadcast::Info::new().produce();
 		let old = upstream.create_track("video", None).unwrap();
 		queued(&server).await.accept(&upstream);
@@ -8117,7 +8121,7 @@ mod tests {
 	async fn an_unread_draining_track_releases_the_old_source() {
 		let (producer, _server, _upstream, old, subscription) = remote_front().await;
 
-		let newcomer = producer.create_broadcast("room/alice").unwrap();
+		let newcomer = producer.create_broadcast(epoch("room/alice", OLD)).unwrap();
 		let mut handler = newcomer.dynamic();
 		newcomer.announce(Route::default()).unwrap();
 		let _unanswered = tokio::time::timeout(Duration::from_secs(1), handler.requested_track())
@@ -8139,10 +8143,14 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_returning_reader_is_not_stranded_on_a_dropped_copy() {
 		let (producer, _server, upstream, old, mut subscription) = remote_front().await;
-		let resolved = producer.consume().request_broadcast("room/alice").await.unwrap();
+		let resolved = producer
+			.consume()
+			.request_broadcast(epoch("room/alice", OLD))
+			.await
+			.unwrap();
 
 		// No handler and no track: refuses "video" with NotFound.
-		let _second = producer.publish("room/alice", Route::default()).unwrap();
+		let _second = producer.publish(epoch("room/alice", OLD), Route::default()).unwrap();
 		for _ in 0..10 {
 			tokio::task::yield_now().await;
 		}
@@ -8159,7 +8167,7 @@ mod tests {
 			.expect("parked")
 			.expect("open");
 
-		let _third = producer.publish("room/alice", Route::default()).unwrap();
+		let _third = producer.publish(epoch("room/alice", OLD), Route::default()).unwrap();
 		for _ in 0..10 {
 			tokio::task::yield_now().await;
 		}
@@ -8192,9 +8200,12 @@ mod tests {
 	async fn a_refused_copy_is_not_kept_subscribed() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let first = producer.publish("room/alice", Route::default()).unwrap();
+		let first = producer.publish(epoch("room/alice", OLD), Route::default()).unwrap();
 		let track = first.create_track("video", None).unwrap();
-		let resolved = consumer.request_broadcast("room/alice").await.expect("resolves");
+		let resolved = consumer
+			.request_broadcast(epoch("room/alice", OLD))
+			.await
+			.expect("resolves");
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = track.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
@@ -8202,7 +8213,7 @@ mod tests {
 		let mut group = subscription.recv_group().await.unwrap().unwrap();
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"before");
 
-		let second = producer.publish("room/alice", Route::default()).unwrap();
+		let second = producer.publish(epoch("room/alice", OLD), Route::default()).unwrap();
 		let incompatible = second
 			.create_track("video", track::Info::default().with_timescale(crate::Timescale::MICRO))
 			.unwrap();
@@ -8275,9 +8286,12 @@ mod tests {
 	async fn the_end_keeps_the_copy_still_serving() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let first = producer.publish("room/alice", Route::default()).unwrap();
+		let first = producer.publish(epoch("room/alice", OLD), Route::default()).unwrap();
 		let track = first.create_track("video", None).unwrap();
-		let resolved = consumer.request_broadcast("room/alice").await.expect("resolves");
+		let resolved = consumer
+			.request_broadcast(epoch("room/alice", OLD))
+			.await
+			.expect("resolves");
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		let mut group = track.append_group().unwrap();
 		group.write_frame(crate::Timestamp::ZERO, b"before".as_ref()).unwrap();
@@ -8286,7 +8300,7 @@ mod tests {
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"before");
 		drop(group);
 
-		let second = producer.create_broadcast("room/alice").unwrap();
+		let second = producer.create_broadcast(epoch("room/alice", OLD)).unwrap();
 		let mut handler = second.dynamic();
 		second.announce(Route::default()).unwrap();
 		let request = tokio::time::timeout(Duration::from_secs(1), handler.requested_track())
@@ -8776,42 +8790,50 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn a_newer_epoch_resets_bare_readers() {
+	async fn a_bare_request_stays_on_its_epoch() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let _old = publish_epoch(&producer, OLD, b"old");
+		let (_old, old_track) = publish_epoch(&producer, OLD, b"old");
 
 		let bare = consumer.request_broadcast("room/alice").await.unwrap();
-		let pinned = consumer.request_broadcast(epoch("room/alice", OLD)).await.unwrap();
 		let (mut following, payload) = read_video(&bare).await;
 		assert_eq!(payload, b"old");
-		let (mut staying, _) = read_video(&pinned).await;
 
+		// A newer epoch is a different broadcast: the bound request never moves to it.
 		let _new = publish_epoch(&producer, NEW, b"new");
-		// The takeover is a typed reset, never a splice into the new epoch.
-		assert!(matches!(next_group(&mut following).await, Err(Error::Unroutable)));
-		settle(|| bare.is_closed()).await;
-		assert!(!pinned.is_closed(), "a pinned epoch never moves");
-		assert!(staying.poll_recv_group(&kio::Waiter::noop()).is_pending());
+		let mut group = old_track.append_group().unwrap();
+		group
+			.write_frame(crate::Timestamp::ZERO, b"still old".as_ref())
+			.unwrap();
+		group.finish().unwrap();
+		let mut group = next_group(&mut following)
+			.await
+			.unwrap()
+			.expect("the old epoch carries on");
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"still old");
+		assert!(!bare.is_closed());
 
-		// Asking again lands on the new epoch.
-		let bare = consumer.request_broadcast("room/alice").await.unwrap();
-		assert_eq!(read_video(&bare).await.1, b"new");
+		// A later request binds to the newest.
+		let later = consumer.request_broadcast("room/alice").await.unwrap();
+		assert!(!later.is_clone(&bare));
+		assert_eq!(read_video(&later).await.1, b"new");
 	}
 
 	#[tokio::test]
-	async fn retracting_the_newest_epoch_falls_back_to_an_older_one() {
+	async fn a_bare_request_ends_with_its_epoch() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let _old = publish_epoch(&producer, OLD, b"old");
-		let (new, _track) = publish_epoch(&producer, NEW, b"new");
+		let (new, track) = publish_epoch(&producer, NEW, b"new");
 
 		let bare = consumer.request_broadcast("room/alice").await.unwrap();
 		let (mut following, payload) = read_video(&bare).await;
 		assert_eq!(payload, b"new");
 
-		new.close();
-		assert!(matches!(next_group(&mut following).await, Err(Error::Unroutable)));
+		// Never spliced into the older epoch still live: the binding ends with its epoch.
+		drop((new, track));
+		assert!(!matches!(next_group(&mut following).await, Ok(Some(_))));
+		settle(|| bare.is_closed()).await;
 		let bare = consumer.request_broadcast("room/alice").await.unwrap();
 		assert_eq!(read_video(&bare).await.1, b"old");
 	}
@@ -8833,10 +8855,11 @@ mod tests {
 	}
 
 	#[tokio::test]
-	async fn a_route_covering_the_name_beats_its_epochs() {
+	async fn an_epoch_beats_a_route_covering_the_name() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let _new = publish_epoch(&producer, NEW, b"new");
+		let _claim = producer.dynamic("room", Route::default()).unwrap();
 		let raw = producer.publish("room/alice", Route::default()).unwrap();
 		let track = raw.create_track("video", None).unwrap();
 		let mut group = track.append_group().unwrap();
@@ -8844,19 +8867,84 @@ mod tests {
 		group.finish().unwrap();
 
 		let bare = consumer.request_broadcast("room/alice").await.unwrap();
-		assert_eq!(read_video(&bare).await.1, b"raw");
+		assert_eq!(read_video(&bare).await.1, b"new");
+	}
+
+	/// A worker's answer for bare `room/alice`: its broadcast, its `video` track,
+	/// and that track's open group.
+	type Worker = (broadcast::Producer, track::Producer, crate::group::Producer);
+
+	/// Serve bare `room/alice` through `server` with a `video` track holding one
+	/// open group that has written `payload`.
+	async fn serve_bare(server: &Dynamic, payload: &'static [u8]) -> Worker {
+		let request = queued(server).await;
+		let source = broadcast::Info::new().produce();
+		let track = source.create_track("video", None).unwrap();
+		let mut group = track.append_group().unwrap();
+		group.write_frame(crate::Timestamp::ZERO, payload).unwrap();
+		request.accept(&source);
+		(source, track, group)
 	}
 
 	#[tokio::test]
-	async fn a_bare_follower_moves_to_a_route_covering_the_name() {
+	async fn a_bare_path_stays_on_its_first_route() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
-		let _new = publish_epoch(&producer, NEW, b"new");
+		let first = producer
+			.dynamic("room/alice", Route::default().with_hops(hops(&[10])).with_cost(5))
+			.unwrap();
 
-		let bare = consumer.request_broadcast("room/alice").await.unwrap();
-		let (mut following, _) = read_video(&bare).await;
-		let _raw = producer.publish("room/alice", Route::default()).unwrap();
-		assert!(matches!(next_group(&mut following).await, Err(Error::Unroutable)));
+		let pending = consumer.request_broadcast("room/alice");
+		let (_source, _track, mut open) = serve_bare(&first, b"first").await;
+		let bare = pending.await.unwrap();
+		let mut subscription = bare.track("video").unwrap().subscribe(None).await.unwrap();
+		let mut reading = next_group(&mut subscription).await.unwrap().unwrap();
+		assert_eq!(&reading.read_frame().await.unwrap().unwrap().payload[..], b"first");
+
+		// A cheaper route serving the same bare path is never asked: its bytes may differ.
+		let cheaper = producer
+			.dynamic("room/alice", Route::default().with_hops(hops(&[11])).with_cost(1))
+			.unwrap();
+		for _ in 0..10 {
+			tokio::task::yield_now().await;
+		}
+		assert!(cheaper.poll_requested_broadcast(&kio::Waiter::noop()).is_pending());
+		open.write_frame(crate::Timestamp::ZERO, b"more".as_ref()).unwrap();
+		assert_eq!(&reading.read_frame().await.unwrap().unwrap().payload[..], b"more");
+	}
+
+	/// Two claimants serve one bare path with different bytes. Killing the serving one
+	/// mid-group ends the subscription instead of resuming it on the other.
+	#[tokio::test]
+	async fn a_bare_path_never_resumes_on_another_route() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let first = producer
+			.dynamic("room/alice", Route::default().with_hops(hops(&[10])))
+			.unwrap();
+		let second = producer
+			.dynamic("room/alice", Route::default().with_hops(hops(&[11])).with_cost(5))
+			.unwrap();
+
+		let pending = consumer.request_broadcast("room/alice");
+		let (source, track, open) = serve_bare(&first, b"worker one").await;
+		let bare = pending.await.unwrap();
+		let mut subscription = bare.track("video").unwrap().subscribe(None).await.unwrap();
+		let mut reading = next_group(&mut subscription).await.unwrap().unwrap();
+		assert_eq!(&reading.read_frame().await.unwrap().unwrap().payload[..], b"worker one");
+
+		drop((open, track, source, first));
+		// The open group and the track end; nothing from the other worker is spliced in.
+		assert!(!matches!(reading.read_frame().await, Ok(Some(_))));
+		assert!(!matches!(next_group(&mut subscription).await, Ok(Some(_))));
+		settle(|| bare.is_closed()).await;
+		assert!(second.poll_requested_broadcast(&kio::Waiter::noop()).is_pending());
+
+		// Asking again binds afresh, to the survivor.
+		let pending = consumer.request_broadcast("room/alice");
+		let _worker = serve_bare(&second, b"worker two").await;
+		let again = pending.await.unwrap();
+		assert!(!again.is_clone(&bare));
 	}
 
 	#[tokio::test]

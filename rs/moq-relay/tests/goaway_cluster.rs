@@ -726,13 +726,15 @@ async fn collect_group(sub: &mut moq_net::track::Subscriber, seen: &mut BTreeSet
 }
 
 /// An empty-URI GOAWAY ("reconnect to me") makes the cluster redial the same
-/// endpoint. Both sessions' routes name the same first hop, so the subscription
-/// through the drained session re-splices onto the redial and keeps delivering.
+/// endpoint. The broadcast names an epoch, so the subscription through the drained
+/// session re-splices onto the redial and keeps delivering.
 async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
 	let upstream_origin = moq_tokio::origin::spawn();
-	let broadcast = upstream_origin.create_broadcast("cam").expect("create broadcast");
+	// Only an epoch path resumes across sessions.
+	let cam = moq_net::Path::new("cam").mint_epoch();
+	let broadcast = upstream_origin.create_broadcast(&cam).expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
 	let track = broadcast.create_track("video", None).expect("create track");
 
@@ -759,8 +761,8 @@ async fn cluster_reconnects_on_empty_uri_goaway_inner() {
 	// Downstream consumer sees group 0 through the first session.
 	let bc = within("broadcast announced", async {
 		let consumer = cluster.origin.consume();
-		consumer.routed("cam").await?;
-		consumer.request_broadcast("cam").await.ok()
+		consumer.routed(&cam).await?;
+		consumer.request_broadcast(&cam).await.ok()
 	})
 	.await
 	.expect("broadcast announced");

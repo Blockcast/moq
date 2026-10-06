@@ -1865,24 +1865,25 @@ test("a received epoch serves a bare request through its session", async () => {
 	origin.close();
 });
 
-test("a route covering the name beats its epochs", async () => {
+test("an epoch beats a route covering the name", async () => {
 	const origin = new Producer();
 	const consumer = origin.consume();
 	const epoch = publish(origin, NEW);
 	const raw = publish(origin, Path.from("room/alice"));
 
 	const request = consumer.request(Path.from("room/alice"));
-	const active = request.active.peek();
-	const own = consumer.request(Path.from("room/alice"));
-	expect(active?.path).toBe(Path.from("room/alice"));
-	raw.close();
-	await settle();
-	expect(request.active.peek()).not.toBe(active);
-	expect(request.active.peek()).toBeDefined();
-
-	own.close();
-	request.close();
+	const fromEpoch = request.active.peek();
+	expect(fromEpoch).toBeDefined();
+	// Served from the epoch: once it goes, the bare name falls through to its own route,
+	// as a new broadcast. Had the route won, nothing would change here.
 	epoch.close();
+	await settle();
+	const fromRoute = request.active.peek();
+	expect(fromRoute).toBeDefined();
+	expect(fromRoute).not.toBe(fromEpoch);
+
+	request.close();
+	raw.close();
 	origin.close();
 });
 

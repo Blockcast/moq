@@ -9,10 +9,11 @@
 //! sources, the tracks, the clock) and executes the actions; see
 //! `origin::run_front`.
 //!
-//! A path names one broadcast, whoever serves it, so any route covering the path
-//! may take over from another and its tracks resume where they stopped. A
-//! publisher reusing a name for different content is a bug; it publishes under a
-//! new name (an epoch) instead.
+//! A path naming an epoch names one origin's broadcast, whoever relays it, so any
+//! route serving it may take over from another and its tracks resume where they
+//! stopped. A path without an epoch carries no such promise: the driver keeps it
+//! on the route that first served it (see `origin::run_front`), and the machine
+//! never sees another.
 //!
 //! Sources and tracks are named by ids and names, never handles, so a
 //! transition can be checked in a unit test by comparing the actions it emits.
@@ -222,6 +223,16 @@ impl Front {
 	/// The attached source, if any.
 	pub(super) fn serving(&self) -> Option<u64> {
 		self.serving.map(|(source, _)| source)
+	}
+
+	/// The route the attached source came through, if any.
+	pub(super) fn serving_route(&self) -> Option<Candidate> {
+		self.serving.map(|(_, candidate)| candidate)
+	}
+
+	/// Whether a source ever attached: the front has served bytes.
+	pub(super) fn has_served(&self) -> bool {
+		self.resolved
 	}
 
 	/// Whether the front is over.

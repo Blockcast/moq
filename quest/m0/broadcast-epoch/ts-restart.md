@@ -20,8 +20,9 @@ and a flagged forward jump publishes break markers and carries on.
 Decided (maintainer, 2026-09-30):
 
 - A rewind is new content, so it is always a new broadcast at a new epoch
-  path (`Path::mint_epoch`), never a continuation of the old name. Viewers of
-  the bare name follow it through the origin's newest-epoch resolution.
+  path (`Path::mint_epoch`), never a continuation of the old name. Smart viewers
+  switch to it from its announcement; a bare-name viewer binds to it on its
+  next subscribe.
 - `decode` stops at the flagged rewind and reports it. The caller finishes the
   old broadcast (a clean end, not an abort, so its viewers read to its end),
   publishes a new broadcast at a fresh epoch path, and calls
