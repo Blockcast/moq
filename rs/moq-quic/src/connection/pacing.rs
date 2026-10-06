@@ -188,7 +188,9 @@ impl Pacer {
             warn!("received a timestamp early than a previous recorded time, ignoring");
             Default::default()
         });
-        let new_tokens = (rate as f64 * time_elapsed.as_secs_f64()) as u64;
+        let new_tokens =
+            u64::try_from(u128::from(rate) * time_elapsed.as_nanos() / 1_000_000_000)
+                .unwrap_or(u64::MAX);
 
         // Advance `prev` only once whole bytes have been earned, so elapsed time too short to
         // pay for a single byte is carried over rather than discarded. Without this, a slow
@@ -207,8 +209,11 @@ impl Pacer {
 
         // Wait for the shortfall only. Deriving the delay from `bytes_to_send` would re-arm
         // the same interval on every poll and never retire, stalling the connection.
+        // Round up, so the wait always earns the whole shortfall. At a high rate it can be under
+        // a nanosecond, and truncating that to zero would re-arm the timer at `now` forever.
         let deficit = target - self.tokens;
-        Some(now + Duration::from_secs_f64(deficit as f64 / rate as f64))
+        let nanos = (u128::from(deficit) * 1_000_000_000).div_ceil(u128::from(rate));
+        Some(now + Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX)))
     }
 }
 
@@ -407,6 +412,26 @@ mod tests {
             None,
             "the delay the pacer asked for must be long enough to unblock the send"
         );
+    }
+
+    #[test]
+    fn sub_nanosecond_shortfall_still_waits() {
+        let mtu = 1500;
+        let rtt = Duration::from_micros(1);
+        let window = 2_000_000;
+        let now = Instant::now();
+        // 33 GB/s, as BBR3's Startup derives from a microsecond RTT: three bytes take under a
+        // nanosecond to earn.
+        let metrics = paced_metrics(window, 33_000_000_000, 2 * u64::from(mtu));
+        let mut pacer = Pacer::new(rtt, window, mtu, None, now);
+        pacer.delay(rtt, u64::from(mtu), mtu, now, &metrics);
+        pacer.tokens = u64::from(mtu) - 3;
+
+        let resume = pacer
+            .delay(rtt, u64::from(mtu), mtu, now, &metrics)
+            .expect("three bytes short must wait");
+        assert!(resume > now, "the pacer re-armed its timer at the current instant");
+        assert_eq!(pacer.delay(rtt, u64::from(mtu), mtu, resume, &metrics), None);
     }
 
     #[test]
