@@ -302,7 +302,7 @@ type TextConfig = {
   "format": "vtt" | "ttml" | "utf8" | string,
   "role": "subtitle" | "caption" | string | undefined,
   "lang": string | undefined,
-  // plus the common rendition fields
+  // plus the common rendition fields, except `enabled`
 }
 ~~~
 

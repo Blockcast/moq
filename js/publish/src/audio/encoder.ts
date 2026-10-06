@@ -216,7 +216,8 @@ export class Encoder {
 	// The last config published while enabled, which a disabled rendition keeps advertising.
 	#last?: Catalog.AudioConfig;
 	// Whether the rendition was disabled since a config last resolved, so it keeps advertising `#last`
-	// as disabled until the re-enabled capture resolves a new one.
+	// as disabled until the re-enabled capture resolves a new one. A capture that never reopens leaves
+	// it disabled, which is accurate: no frames are coming.
 	#paused = false;
 
 	constructor(name: string, props?: EncoderProps) {
