@@ -1417,7 +1417,11 @@ mod tests {
 		let [(path, true, before)] = &take_epochs(&mut events)[..] else {
 			panic!("expected one announce");
 		};
-		let stats = origin.consume().request_broadcast(path.as_str()).await.expect("resolve");
+		let stats = origin
+			.consume()
+			.request_broadcast(path.as_str())
+			.await
+			.expect("resolve");
 		let mut old = subscribe(&stats, "publisher.json").await;
 		while try_next_frame(&mut old).is_some() {}
 
@@ -1437,7 +1441,11 @@ mod tests {
 		let end = old.next_group().now_or_never().expect("the old subscription ended");
 		assert!(!matches!(end, Ok(Some(_))), "still reading the old epoch");
 
-		let stats = origin.consume().request_broadcast(path.as_str()).await.expect("resolve");
+		let stats = origin
+			.consume()
+			.request_broadcast(path.as_str())
+			.await
+			.expect("resolve");
 		assert_eq!(read_last_frame(&stats, "publisher.json").await["foo/bar"].bytes, 30);
 	}
 
@@ -1716,12 +1724,18 @@ mod tests {
 			panic!("expected both groups to announce again, got {restarted:?}");
 		};
 		assert_eq!((acme_again.as_str(), feed_again.as_str()), (ACME, FEED));
-		assert!(new_acme > acme_epoch && new_feed > feed_epoch, "a returning group mints a new epoch");
+		assert!(
+			new_acme > acme_epoch && new_feed > feed_epoch,
+			"a returning group mints a new epoch"
+		);
 		let acme = origin.consume().request_broadcast(ACME).await.expect("resolve");
 		assert_eq!(read_last_frame(&acme, "publisher.json").await["acme/live"].bytes, 25);
 		let mut track = subscribe(&acme, "publisher.json").await;
 		let group = track.next_group().await.expect("ok").expect("group");
-		assert!(group.sequence < old_sequence, "a new epoch numbers its groups from zero");
+		assert!(
+			group.sequence < old_sequence,
+			"a new epoch numbers its groups from zero"
+		);
 	}
 
 	#[tokio::test(start_paused = true)]
