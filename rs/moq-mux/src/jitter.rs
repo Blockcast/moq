@@ -56,10 +56,14 @@ pub(crate) enum Push {
 /// emit them in the same order. A frame that arrives past its deadline would break that
 /// order, so it is dropped and counted.
 ///
-/// The clock is acquired before anything goes out: frames are held until a track starts a
-/// new group, or for a delay at most, and the clock is anchored on the freshest of them, the
-/// one that arrived least behind its decode time, so that frame is due a delay after it
-/// arrived. A joiner is handed the group it joined at once, already partly old, and
+/// The clock is acquired before anything goes out: frames are held until every expected
+/// track has delivered (two delays at most) and a track starts a new group, or for a delay
+/// at most once all have. Each track's freshest frame, the one that arrived least behind its
+/// decode time, shows how far ahead of its decode time the source sends it; the clock is
+/// anchored on the track sent latest, so its freshest frame is due a delay after it arrived
+/// and every other track has at least the delay. A TS source sends video most of a second
+/// ahead and audio just in time, and a clock anchored on the video would make every audio
+/// frame late. A joiner is handed the group it joined at once, already partly old, and
 /// anchoring on its first frame would carry that lag for the whole run. What the anchor
 /// makes due before the acquisition ended is dropped instead, without counting as late.
 ///
@@ -78,8 +82,9 @@ pub(crate) enum Push {
 /// The clock follows the source's: a source clock running slower than ours would make
 /// every frame late in the end, and a faster one would hold more and more. So the clock
 /// measures the source's rate and runs its decode timeline at it, holding the freshest
-/// frames a delay. Each [`STEER`] of decode time gives a floor, the most slack a frame
-/// arrived with, which queueing and retransmission only ever lower; the upper envelope of
+/// frames of the track sent latest a delay. Each [`STEER`] of decode time gives a floor, the
+/// most slack a frame of that track arrived with (the least across tracks of each one's
+/// most), which queueing and retransmission only ever lower; the upper envelope of
 /// the floors over [`RATE_WINDOW`] gives the rate (its slope) and the slack now, so a
 /// spell of queueing shorter than half the window moves neither. The decode timeline is
 /// the output's system clock, so it keeps to what ISO/IEC 13818-1 2.4.2.1 allows one:
@@ -223,8 +228,8 @@ struct Floor<K> {
 }
 
 struct Track<T> {
-	/// Frames in arrival order, each with its generation and deadline.
-	queue: VecDeque<(u64, Instant, T)>,
+	/// Frames in arrival order, each with its generation, decode time and deadline.
+	queue: VecDeque<(u64, Timestamp, Instant, T)>,
 	/// The source's restart and skip counters at the last frame.
 	restart: u64,
 	skip: u64,
@@ -261,7 +266,8 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		}
 	}
 
-	/// The tracks an acquisition should hear from before it anchors.
+	/// The tracks an acquisition waits to hear from, two delays at most, before it anchors: any
+	/// of them may be the one sent latest against its decode time.
 	pub fn expect(&mut self, keys: impl IntoIterator<Item = K>) {
 		self.expect = keys.into_iter().collect();
 	}
@@ -405,7 +411,9 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 			_ if track.waiting.is_some() && !arrival.sync => Push::Waiting,
 			Some(deadline) if arrival.arrived <= deadline || self.delay.is_zero() => {
 				track.waiting = None;
-				track.queue.push_back((generation, deadline, arrival.item));
+				track
+					.queue
+					.push_back((generation, arrival.decode, deadline, arrival.item));
 				self.horizon = self.horizon.max(Some(deadline));
 				Push::Queued
 			}
@@ -530,16 +538,19 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		)
 	}
 
-	/// The generation, deadline and track of the frame that goes out next: generation by
-	/// generation, earliest deadline first, ties by track.
-	fn front(&self) -> Option<(u64, Instant, &K)> {
+	/// The deadline and track of the frame that goes out next: generation by generation, then
+	/// in decode order, ties by track. Not in deadline order: two frames of one decode time
+	/// queued either side of a steering step can be due nanoseconds apart, which would make
+	/// the order depend on when each was read rather than on the media.
+	fn front(&self) -> Option<(Instant, &K)> {
 		self.tracks
 			.iter()
 			.filter_map(|(key, track)| {
-				let (generation, deadline, _) = track.queue.front()?;
-				Some((*generation, *deadline, key))
+				let (generation, decode, deadline, _) = track.queue.front()?;
+				Some(((*generation, decode.as_nanos(), key), *deadline))
 			})
-			.min()
+			.min_by(|a, b| a.0.cmp(&b.0))
+			.map(|((_, _, key), deadline)| (deadline, key))
 	}
 
 	/// When the acquisition under way ends, unless a track starts a new group first.
@@ -570,11 +581,11 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 				self.acquired();
 				continue;
 			}
-			let front = self.front().map(|(_, deadline, key)| (deadline, key.clone()));
+			let front = self.front().map(|(deadline, key)| (deadline, key.clone()));
 			if let Some((deadline, key)) = &front
 				&& (self.delay.is_zero() || now >= *deadline)
 			{
-				let (generation, _, item) = self.tracks.get_mut(key).and_then(|t| t.queue.pop_front()).unwrap();
+				let (generation, _, _, item) = self.tracks.get_mut(key).and_then(|t| t.queue.pop_front()).unwrap();
 				self.released = true;
 				return Poll::Ready(Ready {
 					track: key.clone(),
@@ -602,7 +613,7 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 	#[cfg(test)]
 	pub fn next_deadline(&self) -> Option<Instant> {
 		self.front()
-			.map(|(_, deadline, _)| deadline)
+			.map(|(deadline, _)| deadline)
 			.into_iter()
 			.chain(self.acquired_by())
 			.min()
@@ -1114,6 +1125,60 @@ mod tests {
 		tokio::time::advance(DELAY).await;
 		assert_eq!(due(&mut buffer), ["v240"]);
 		assert_eq!(buffer.dropped(), 0, "trimming the join is not a loss");
+	}
+
+	/// A source that sends one track well ahead of its decode time and another just in time
+	/// (a TS mux's video and audio) has the clock anchored on the one sent latest, so both
+	/// keep the delay: anchored on the video, every audio frame would be late.
+	#[tokio::test(start_paused = true)]
+	async fn a_joiner_anchors_on_the_track_sent_latest() {
+		let start = Instant::now();
+		let mut buffer = Buffer::new(DELAY);
+		buffer.expect([1, 2]);
+		// Video is sent 300 ms ahead of its decode time, audio as it decodes.
+		buffer.push(1, arrival(start, 300, "v300")).unwrap();
+		tokio::time::advance(Duration::from_millis(20)).await;
+		buffer
+			.push(2, arrival(start + Duration::from_millis(20), 20, "a20"))
+			.unwrap();
+		tokio::time::advance(Duration::from_millis(100)).await;
+		assert_eq!(due(&mut buffer), ["a20"], "the audio keeps the delay");
+		assert_eq!(buffer.next_deadline(), Some(start + Duration::from_millis(400)));
+		assert_eq!(buffer.dropped(), 0);
+	}
+
+	/// The acquisition waits to hear from every track it expects, since the silent one may be
+	/// the one sent latest, but two delays at most.
+	#[tokio::test(start_paused = true)]
+	async fn the_acquisition_waits_two_delays_at_most_for_a_silent_track() {
+		let start = Instant::now();
+		let mut buffer = Buffer::new(DELAY);
+		buffer.expect([1, 2]);
+		buffer.push(1, arrival(start, 0, "v0")).unwrap();
+		assert_eq!(buffer.next_deadline(), Some(start + 2 * DELAY));
+		tokio::time::advance(2 * DELAY).await;
+		assert_eq!(due(&mut buffer), ["v0"]);
+	}
+
+	/// Frames of one decode time go out by track, even when a steering step between their
+	/// pushes put their deadlines a nanosecond apart: the order is the media's, not the
+	/// moment each was read.
+	#[tokio::test(start_paused = true)]
+	async fn a_steering_step_does_not_reorder_a_tie() {
+		let start = Instant::now();
+		let order = |first: (u16, &'static str), second: (u16, &'static str)| {
+			let mut buffer = Buffer::new(DELAY).replay();
+			buffer.push(1, arrival(start, 0, "v0")).unwrap();
+			buffer.push(first.0, arrival(start, 100, first.1)).unwrap();
+			buffer.clock.as_mut().unwrap().anchor += Duration::from_nanos(1);
+			buffer.push(second.0, arrival(start, 100, second.1)).unwrap();
+			buffer
+		};
+		let mut video_first = order((1, "v100"), (2, "a100"));
+		let mut audio_first = order((2, "a100"), (1, "v100"));
+		tokio::time::advance(Duration::from_secs(1)).await;
+		assert_eq!(due(&mut video_first), ["v0", "v100", "a100"]);
+		assert_eq!(due(&mut audio_first), ["v0", "v100", "a100"]);
 	}
 
 	/// A frame the acquisition holds that is still in time goes out on time: the
