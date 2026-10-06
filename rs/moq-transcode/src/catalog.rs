@@ -166,18 +166,13 @@ impl Decoders {
 pub(crate) async fn choose_source(video: &Video, decoders: &mut Decoders) -> Result<(String, VideoConfig), Error> {
 	// Best first. A rendition without dimensions ranks after every one with them:
 	// it can't be chosen yet, but it can still keep the transcoder waiting.
-	let ranked = |enabled: bool| {
-		video
-			.ranked()
-			.filter(move |(_, config)| config.enabled == enabled)
-			// A rendition that itself lives in another broadcast can't be subscribed
-			// through this one; composing relative references is a follow-up.
-			.filter(|(_, config)| config.broadcast.is_none())
-	};
-	// A disabled rendition sends no frames. It is the source only when nothing enabled is,
-	// so the rungs inherit `enabled: false` rather than the ladder vanishing.
-	let candidates = ranked(true)
-		.chain(ranked(false))
+	// A disabled rendition ranks last, so it is the source only when nothing enabled is,
+	// and the rungs inherit `enabled: false` rather than the ladder vanishing.
+	let candidates = video
+		.ranked()
+		// A rendition that itself lives in another broadcast can't be subscribed
+		// through this one; composing relative references is a follow-up.
+		.filter(|(_, config)| config.broadcast.is_none())
 		.filter_map(|(name, config)| Some((name, config, codec(config)?)));
 
 	let mut refused = None;
@@ -237,7 +232,8 @@ pub(crate) async fn follow_source(
 		kept = Some(config);
 	}
 
-	// A disabled source gives way only to an enabled one.
+	// A disabled source gives way only to an enabled one. An enabled source is never
+	// swapped for a better one, even its own predecessor re-enabled, to avoid churning the ladder.
 	match (kept, choose_source(video, decoders).await) {
 		(Some(config), Ok((_, chosen))) if !chosen.enabled => Ok((current.to_string(), config.clone())),
 		(Some(config), Err(_)) => Ok((current.to_string(), config.clone())),

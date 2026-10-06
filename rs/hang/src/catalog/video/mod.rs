@@ -106,16 +106,17 @@ impl Video {
 		self.renditions.remove(name)
 	}
 
-	/// Iterate the renditions best first: largest picture, then highest bitrate.
+	/// Iterate the renditions best first: enabled, then largest picture, then highest bitrate.
 	///
 	/// A consumer that carries one rendition takes the first it supports, so the
-	/// picture doesn't depend on how the tracks are named. Unknown dimensions or
-	/// bitrate rank below known ones, and exact ties keep name order.
+	/// picture doesn't depend on how the tracks are named. A disabled rendition sends
+	/// no frames, so it ranks below every enabled one. Unknown dimensions or bitrate
+	/// rank below known ones, and exact ties keep name order.
 	pub fn ranked(&self) -> impl Iterator<Item = (&String, &VideoConfig)> {
 		let mut ranked: Vec<_> = self.renditions.iter().collect();
 		ranked.sort_by_key(|(_, config)| {
 			let area = u64::from(config.coded_width.unwrap_or(0)) * u64::from(config.coded_height.unwrap_or(0));
-			std::cmp::Reverse((area, config.bitrate))
+			std::cmp::Reverse((config.enabled, area, config.bitrate))
 		});
 		ranked.into_iter()
 	}
@@ -324,6 +325,11 @@ mod test {
 
 		let names: Vec<_> = video.ranked().map(|(name, _)| name.as_str()).collect();
 		assert_eq!(names, ["f", "d", "e", "c", "b", "a"]);
+
+		// A disabled rendition sends no frames, so it ranks below every enabled one.
+		video.renditions.get_mut("f").unwrap().enabled = false;
+		let names: Vec<_> = video.ranked().map(|(name, _)| name.as_str()).collect();
+		assert_eq!(names, ["d", "e", "c", "b", "a", "f"]);
 	}
 
 	#[test]
