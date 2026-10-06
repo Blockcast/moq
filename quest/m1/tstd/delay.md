@@ -87,7 +87,9 @@ Public API: `ts::Export` takes the delay in place of its max age and loses the
 hold; breaking. `Export::stats` already returns `ts::stats::Export`, the
 per-stream rows, so the release-clock counters (`dropped`, `drift`,
 `out_of_tolerance`) become fields on it rather than a new `ts::export::Stats`
-(decided in the 2026-10-05 audit). Wire: none.
+(decided in the 2026-10-05 audit). `stats::Log` reads an export through
+`From<Export> for Snapshot`, which drops anything but the rows, so `Log` must
+report the new counters too, or `moq subscribe` never logs them. Wire: none.
 
 ## Closes
 
