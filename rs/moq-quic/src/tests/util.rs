@@ -683,6 +683,28 @@ pub(super) fn client_config_with_deterministic_pns() -> ClientConfig {
     cfg
 }
 
+/// Transport running Cubic instead of the default BBR3
+///
+/// For tests that script a lockstep packet schedule. At the harness's zero RTT the window-derived
+/// pacer stops pacing, while BBR3 paces from its own rate and releases a burst nanoseconds later.
+pub(super) fn cubic_transport() -> TransportConfig {
+    let mut transport = TransportConfig::default();
+    transport.congestion_controller_factory(Arc::new(congestion::CubicConfig::default()));
+    transport
+}
+
+pub(super) fn client_config_cubic() -> ClientConfig {
+    let mut cfg = client_config();
+    cfg.transport = Arc::new(cubic_transport());
+    cfg
+}
+
+pub(super) fn server_config_cubic() -> ServerConfig {
+    let mut cfg = server_config();
+    cfg.transport = Arc::new(cubic_transport());
+    cfg
+}
+
 pub(super) fn client_config_with_certs(certs: Vec<CertificateDer<'static>>) -> ClientConfig {
     ClientConfig::new(Arc::new(client_crypto_inner(Some(certs), None)))
 }

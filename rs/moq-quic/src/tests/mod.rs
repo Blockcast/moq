@@ -800,13 +800,14 @@ fn full_initial_window() {
     let _guard = subscribe();
 
     // Keep `current_mtu` pinned to `INITIAL_MTU`, which the default initial window of 12000 bytes
-    // is an exact multiple of, so that the window can be filled precisely.
-    let mut transport = TransportConfig::default();
+    // is an exact multiple of, so that the window can be filled precisely. Cubic keeps the window
+    // at its initial size through the handshake.
+    let mut transport = cubic_transport();
     transport.mtu_discovery_config(None);
     let mut config = client_config();
     config.transport = Arc::new(transport);
 
-    let mut pair = Pair::default();
+    let mut pair = Pair::new(Default::default(), server_config_cubic());
     let (client_ch, _) = pair.connect_with(config);
     assert_eq!(pair.client_conn_mut(client_ch).bytes_in_flight(), 0);
     let window = pair.client_conn_mut(client_ch).congestion_window();
@@ -2798,7 +2799,7 @@ fn tail_loss_probe_keeps_ping_when_datagram_does_not_fit() {
     const PATH_MTU: u16 = 1452;
 
     let client_config = {
-        let mut config = client_config();
+        let mut config = client_config_cubic();
         Arc::get_mut(&mut config.transport)
             .unwrap()
             .initial_mtu(PATH_MTU)
@@ -4205,7 +4206,7 @@ fn endpoint_and_connection_impl_send_sync() {
 fn stream_gso() {
     let _guard = subscribe();
     let mut pair = Pair::default();
-    let (client_ch, _) = pair.connect();
+    let (client_ch, _) = pair.connect_with(client_config_cubic());
 
     let s = pair.client_streams(client_ch).open(Dir::Uni).unwrap();
 
@@ -4355,7 +4356,7 @@ fn min_mtu_does_not_pad_zero_rtt_batch_tail() {
     let _guard = subscribe();
     const MTU: u16 = 1333;
     for pad_to_mtu in [false, true] {
-        let mut transport = TransportConfig::default();
+        let mut transport = cubic_transport();
         transport
             // Allow the Initial and 0-RTT data to be sent in one GSO batch without pacing delays.
             .initial_rtt(Duration::from_millis(10))
@@ -4418,7 +4419,7 @@ fn min_mtu_limits_application_loss_probes() {
     let _guard = subscribe();
     const MIN_MTU: u16 = 1280;
     const MTU: u16 = 1452;
-    let mut transport = TransportConfig::default();
+    let mut transport = cubic_transport();
     transport
         .initial_mtu(MTU)
         .min_mtu(MIN_MTU)
@@ -4426,7 +4427,7 @@ fn min_mtu_limits_application_loss_probes() {
         .pad_to_mtu(true);
     let mut config = client_config();
     config.transport_config(Arc::new(transport));
-    let mut pair = Pair::default();
+    let mut pair = Pair::new(Default::default(), server_config_cubic());
     let (client_ch, _) = pair.connect_with(config);
 
     pair.client_conn_mut(client_ch).ping();
@@ -4849,8 +4850,8 @@ fn preferred_address() {
 fn handshake_sequence() {
     let _guard = subscribe();
 
-    let mut pair = Pair::default();
-    let ch = pair.begin_connect(client_config());
+    let mut pair = Pair::new(Default::default(), server_config_cubic());
+    let ch = pair.begin_connect(client_config_cubic());
 
     pair.step();
     assert_matches!(pair.client_conn_mut(ch).poll(), None);
@@ -4888,8 +4889,8 @@ fn handshake_confirmation_no_resumption_shortcut() {
     let _guard = subscribe();
 
     // Initial connection
-    let mut pair = Pair::default();
-    let config = client_config();
+    let mut pair = Pair::new(Default::default(), server_config_cubic());
+    let config = client_config_cubic();
     let (ch, _) = pair.connect_with(config.clone());
     pair.client
         .connections
