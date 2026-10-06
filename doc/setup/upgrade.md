@@ -65,6 +65,11 @@ These land with the next breaking release, not the 2026-09-23 train.
   a `transport::Error`. moq-tokio's `Client` and `Server` are unchanged. A
   custom transport handed straight to moq-net implements these traits; a
   `moq-uring` session is wrapped with `moq_uring::transport::Session::new`.
+- **`--cluster-mesh` and `--cluster-linger` are unknown flags.** moq-relay
+  0.17 refuses them by name; later relays reject them, and TOML `mesh` and
+  `linger`, like any unknown setting. `MOQ_CLUSTER_MESH` and
+  `MOQ_CLUSTER_LINGER` are no longer read, so drop them from the environment.
+  In Rust, `cluster::Config` has no `mesh` or `linger` field.
 - **moq-mux data producers take a broadcast-clock `Timestamp`.** `json` and
   `binary` `Snapshot::update` and `Stream::append` take `Timed<_, Timestamp>`
   instead of `Timed<_, Instant>`, and publish it as given. Convert a capture
@@ -85,6 +90,11 @@ These land with the next breaking release, not the 2026-09-23 train.
   broadcast that ends with media queued behind an undescribed track is an error
   rather than an empty `Ok(None)`. Restart the export to pick up a new
   rendition.
+- **Opus mapping family lives only on `mapping`.**
+  `moq_mux::codec::opus::Config::mapping_family` is gone. Family 0 is
+  `mapping: None`; any other family is the mapping's own (`mapping.family()`).
+  Set `mapping` alone when building a surround head. The OpusHead bytes are
+  unchanged.
 
 ## Wire
 

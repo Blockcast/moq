@@ -1794,6 +1794,15 @@ impl Producer {
 		self.state.read().max_sequence
 	}
 
+	/// Ready once the track holds a group past `sequence`, or is closed.
+	pub(crate) fn poll_past(&self, sequence: u64, waiter: &kio::Waiter) -> Poll<()> {
+		let past = self.state.poll_ref(waiter, |state| match state.max_sequence {
+			Some(latest) if latest > sequence => Poll::Ready(()),
+			_ => Poll::Pending,
+		});
+		past.map(|_| ())
+	}
+
 	/// Return true if this is the same track.
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.state.same_channel(&other.state)
@@ -6773,7 +6782,7 @@ mod test {
 			drop(writer);
 			drop(producer);
 		});
-		assert!(warns >= 1, "unfinished drop must emit unfinished-producer WARN");
+		assert_eq!(warns, 1, "unfinished drop must emit one unfinished-producer WARN");
 	}
 
 	#[tokio::test]
