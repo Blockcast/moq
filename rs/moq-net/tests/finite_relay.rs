@@ -10,11 +10,14 @@ mod support;
 
 use std::time::Duration;
 
-use moq_net::track::{Position, Subscription};
+use futures::{SinkExt, StreamExt};
+
+use moq_net::track::Subscription;
 use moq_net::{Hop, Timestamp, Version};
 use support::harness::{MockConnectOptions, connect_mock};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_AGE: Duration = Duration::from_secs(5);
 const GROUPS: u64 = 4;
 
 const VERSIONS: &[&str] = &[
@@ -29,7 +32,7 @@ const VERSIONS: &[&str] = &[
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
-	tokio::spawn(support::harness::run(driver));
+	support::harness::spawn(driver);
 	producer
 }
 
@@ -56,72 +59,81 @@ async fn round(name: &str) -> (Vec<u64>, Result<(), moq_net::Error>) {
 	let downstream = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	tokio::time::timeout(TIMEOUT, consumer.routed("bcast"))
+	moq_net_sim::timeout(TIMEOUT, consumer.routed("bcast"))
 		.await
 		.expect("announce timeout")
 		.expect("routed");
-	let remote = tokio::time::timeout(TIMEOUT, consumer.request_broadcast("bcast"))
+	let remote = moq_net_sim::timeout(TIMEOUT, consumer.request_broadcast("bcast"))
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
 
-	let reader = tokio::spawn(async move {
-		let subscription = Subscription::default()
-			.with_max_age(Duration::from_secs(5))
-			.with_start(Position::group(0));
+	let (mut heads, mut opened) = futures::channel::mpsc::unbounded();
+	let reader = moq_net_sim::spawn(async move {
+		let subscription = Subscription::default().with_max_age(MAX_AGE).with_groups(0..);
 		let mut sub = remote
 			.track("tail")
 			.unwrap()
 			.subscribe(subscription)
 			.await
 			.expect("subscribe");
-		let mut seen = Vec::new();
+		let mut tails = Vec::new();
 		let end = loop {
 			let mut group = match sub.recv_group().await {
 				Ok(Some(group)) => group,
 				Ok(None) => break Ok(()),
 				Err(err) => break Err(err),
 			};
-			let mut frames = 0;
-			let read = loop {
-				match group.read_frame().await {
-					Ok(Some(_)) => frames += 1,
-					Ok(None) => break Ok(()),
-					Err(err) => break Err(err),
-				}
-			};
-			if let Err(err) = read {
-				break Err(err);
-			}
-			if frames == 2 {
-				seen.push(group.sequence);
-			}
+			let head = group.read_frame().await.unwrap().expect("head frame");
+			assert_eq!(&head.payload[..], b"head");
+			heads.send(group.sequence).await.unwrap();
+			tails.push(moq_net_sim::spawn(async move {
+				let tail = group.read_frame().await?.expect("tail frame");
+				assert_eq!(&tail.payload[..], b"tail");
+				assert!(group.read_frame().await?.is_none(), "extra frame");
+				Ok::<_, moq_net::Error>(group.sequence)
+			}));
 		};
+		let mut seen = Vec::new();
+		for tail in tails {
+			match tail.await.expect("tail reader panicked") {
+				Ok(sequence) => seen.push(sequence),
+				Err(err) => return (seen, Err(err)),
+			}
+		}
 		seen.sort();
 		(seen, end)
 	});
 
-	tokio::time::timeout(TIMEOUT, track.demand().used())
+	moq_net_sim::timeout(TIMEOUT, track.demand().used())
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();
 	track.finish_at(GROUPS).unwrap();
 	let mut groups = Vec::new();
-	for _ in 0..GROUPS {
+	for sequence in 0..GROUPS {
 		let mut group = track.append_group().unwrap();
 		group.write_frame(Timestamp::ZERO, &b"head"[..]).unwrap();
 		groups.push(group);
+		// IETF requests the live edge, so observe each header before advancing it.
+		assert_eq!(
+			moq_net_sim::timeout(TIMEOUT, opened.next())
+				.await
+				.expect("head timeout"),
+			Some(sequence),
+		);
 	}
 
-	// Paused time advances only once every task is idle: each group has reached the
+	// Simulated time advances only once every task is idle: each group has reached the
 	// subscriber, so the relay's downstream subscription has seen the end.
-	tokio::time::sleep(Duration::from_millis(100)).await;
+	moq_net_sim::sleep(Duration::from_millis(100)).await;
 	for mut group in groups {
 		group.write_frame(Timestamp::ZERO, &b"tail"[..]).unwrap();
 		group.finish().unwrap();
 	}
 
-	let outcome = tokio::time::timeout(TIMEOUT, reader)
+	// Lite03 carries no declared end: each of the two hops waits one max-age grace.
+	let outcome = moq_net_sim::timeout(MAX_AGE * 2 + TIMEOUT, reader)
 		.await
 		.unwrap_or_else(|_| panic!("{name}: the track never ended"))
 		.expect("reader panicked");
@@ -129,9 +141,8 @@ async fn round(name: &str) -> (Vec<u64>, Result<(), moq_net::Error>) {
 	outcome
 }
 
-#[tokio::test]
+#[moq_net_sim::test]
 async fn relay_keeps_groups_in_flight_past_the_end() {
-	tokio::time::pause();
 	for version in VERSIONS {
 		let (seen, end) = round(version).await;
 		assert_eq!(seen, [0, 1, 2, 3], "{version}: end={end:?}");
