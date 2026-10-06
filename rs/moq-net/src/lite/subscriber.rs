@@ -3056,6 +3056,51 @@ mod tests {
 		announced.withdraw(&path);
 		cursor.assert_next_ended("room/host");
 	}
+
+	/// An unknown announce type between two starts is skipped without ending the
+	/// stream.
+	#[tokio::test(start_paused = true)]
+	async fn an_unknown_announce_type_keeps_the_stream() {
+		const VERSION: Version = Version::Lite06;
+		let start = |suffix| lite::AnnounceBroadcast::Active {
+			suffix: lite::PathRef::literal(Path::new(suffix)),
+			hops: lite::HopsRef::literal(crate::Hops::new()),
+			cost: crate::origin::Cost::default(),
+		};
+		let mut script = Vec::new();
+		lite::AnnounceOk {
+			origin: crate::Hop::new(9).unwrap(),
+			active: 2,
+		}
+		.encode(&mut script, VERSION)
+		.unwrap();
+		start("a").encode(&mut script, VERSION).unwrap();
+		// An unknown announce type with an empty body, which decodes as `Skipped`.
+		script.extend([0x3f, 0x00]);
+		start("b").encode(&mut script, VERSION).unwrap();
+
+		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let consumer = origin.consume();
+		let subscriber = Subscriber::new(SubscriberConfig {
+			runtime: crate::time::Clock::tokio(),
+			session: crate::lite::test_transport::ScriptedSession::new(script),
+			origin,
+			recv_bandwidth: None,
+			version: VERSION,
+			peer_setup: Default::default(),
+			cost: Some(1),
+			peer_hop: None,
+			going_away: Default::default(),
+		});
+		let mut prefix = AnnouncePrefix::new(subscriber, Path::new("").to_owned());
+		let mut cursor = consumer.announced();
+
+		let mut run = std::pin::pin!(kio::wait(|waiter| prefix.poll(waiter)));
+		assert!(futures::poll!(run.as_mut()).is_pending());
+
+		cursor.assert_next_active("a");
+		cursor.assert_next_active("b");
+	}
 }
 
 /// The four wire fields a subscription's half-open range encodes to.

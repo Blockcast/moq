@@ -729,6 +729,27 @@ test("a draft-05 duplicate start is still a restart", async () => {
 	subscriber.close();
 });
 
+// Mirrors the Rust `an_unknown_announce_type_keeps_the_stream`.
+test("an unknown announce type between starts keeps the stream", async () => {
+	const { subscriber, send, settle } = announceHarness(Version.DRAFT_06);
+	const announced = subscriber.announced();
+	await settle();
+
+	const start = (suffix: string) => (w: Writer) =>
+		encodeAnnounceBroadcast(w, { status: "active", suffix: Path.from(suffix), hops: [] }, Version.DRAFT_06);
+	await send((w) => new AnnounceOk(PEER, 2).encode(w, Version.DRAFT_06));
+	await send(start("a"));
+	// An unknown announce type with an empty body, which decodes as skipped.
+	await send((w) => w.write(new Uint8Array([0x3f, 0x00])));
+	await send(start("b"));
+
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("a"), kind: "start" });
+	expect(await announced.next()).toMatchObject({ prefix: Path.from("b"), kind: "start" });
+
+	announced.close();
+	subscriber.close();
+});
+
 interface FakeStream {
 	inbound: ReadableStreamDefaultController<Uint8Array>;
 	// Resolves once the subscriber waits on a read the test has not answered.
