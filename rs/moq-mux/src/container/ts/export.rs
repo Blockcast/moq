@@ -1316,15 +1316,15 @@ impl<E: catalog::Catalog> Export<E> {
 	/// A track stalled upstream stops advancing its row while the PSI and the other PIDs
 	/// keep flowing, which nothing graded on the output bytes alone can see. Empty until the
 	/// program tables are built. Cheap enough to poll per frame.
-	pub fn stats(&self) -> super::Stats {
-		let mut stats = super::Stats::default();
+	pub fn stats(&self) -> super::stats::Export {
+		let mut stats = super::stats::Export::default();
 		if self.psi.is_none() {
 			return stats;
 		}
 		for track in self.tracks.values() {
 			let (units, quiet) = self.liveness.stream(track.pid);
-			let row = super::StreamStats {
-				track: track.kind.suffix(),
+			let row = super::stats::Stream {
+				track: track.kind.suffix().to_string(),
 				units,
 				quiet,
 				..Default::default()

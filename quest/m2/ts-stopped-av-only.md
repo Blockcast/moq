@@ -18,17 +18,16 @@ second after each cue.
 Decision (2026-10-01): ✅ grade only audio/video. Rejected: learning each
 PID's usual gap (more logic) and leaving the noise.
 
-`Log::sample` only sees `Stats`, and `StreamStats` carries no stream type; the
+`Log::sample` only sees `stats::Snapshot`, and `stats::Stream` carries no stream type; the
 `track` suffix can't tell (`.ts` is any verbatim data, `""` is MPEG-1/2 video).
-Carry the classification import already resolved into `StreamStats` for active,
+Carry the classification import already resolved into `stats::Stream` for active,
 retired, and section rows, not the raw PMT `stream_type`: `0x86` is DTS or,
 with a CUEI descriptor, SCTE-35, and import routes the latter to sections.
 Test a sparse CUEI-marked `0x86` PID beside a stalled video PID.
 
-Public API: an additive field on the `#[non_exhaustive]` `StreamStats`. Wire:
+Public API: an additive field on the `#[non_exhaustive]` `stats::Stream`. Wire:
 none.
 
 ## Related
 
-- [TS stats module](/quest/m1/ts-stats-module.md) - renames these types
 - [TS health stats](/quest/m2/ts-health-stats.md) - publishes the same per-PID liveness

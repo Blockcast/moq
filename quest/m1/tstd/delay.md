@@ -81,10 +81,10 @@ to `main` once the line (#4640) lands, and merge `main` in.
 Update `doc/bin/cli.md` and the `moq export ts` examples.
 
 Public API: `ts::Export` takes the delay in place of its max age and loses the
-hold; breaking. `Export::stats` returns `ts::stats::Export` (decided in the
-2026-10-05 audit, matching [TS stats module](/quest/m1/ts-stats-module.md)),
-not a new `ts::export::Stats`. Wire:
-none.
+hold; breaking. `Export::stats` already returns `ts::stats::Export`, the
+per-stream rows, so the release-clock counters (`dropped`, `drift`,
+`out_of_tolerance`) become fields on it rather than a new `ts::export::Stats`
+(decided in the 2026-10-05 audit). Wire: none.
 
 ## Closes
 
