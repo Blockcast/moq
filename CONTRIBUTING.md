@@ -52,17 +52,14 @@ Prefer a quest for work needing durable scope or coordination.
 AI agents review every push on their own.
 Never explicitly request a review.
 
-Codex reacts with thumbs up if there are no findings.
-CodeRabbit may be rate-limited, treat it as optional.
-
 For each finding:
 
 - If you don't agree with it, reply to the finding and move on.
 - If it's a relatively easy improvement, fix it and push. Update the summary if needed.
 
-Wait for Codex to review the final head before merging.
-Merge only on its thumbs up, or once every Codex finding on the PR is fixed or replied to.
-Codex skips fork PRs; ask the maintainer to request one.
+Wait for a review of the final head from any reviewer other than Grok.
+Codex and OpenAI refer to the same reviewer.
+Merge only when that review has no findings, or every finding is fixed or replied to.
 
 # CI
 
