@@ -28,9 +28,9 @@ you already have.
 MPEG-TS `Import::stats` returns a `ts::stats::Snapshot` of cumulative per-PID
 `ts::stats::Stream` rows: delivered `units`, transport-clock `quiet` time, audio
 `resyncs`, scanned bytes `discarded`, frames `unconfirmed`, damaged units refused
-in `damaged`, and the PID's share of the TR 101 290 counters. A malformed media packet, PES header, or codec unit is
-dropped whole; only that PID loses sync, and video closes its group at the break
-and waits for its next keyframe. Publishing and catalog failures remain
+in `damaged`, and the PID's share of the TR 101 290 counters. A malformed media
+packet, PES header, or codec unit is dropped whole; only that PID loses sync, and
+video closes its group at the break and waits for its next keyframe. Publishing and catalog failures remain
 fatal. `ts::stats::Log` reports these counters for both the CLI and SRT gateway.
 `Export::stats` returns a `ts::stats::Export` of the same rows, where only `units`
 and `quiet` move.

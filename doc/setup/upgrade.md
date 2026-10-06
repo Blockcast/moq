@@ -78,6 +78,12 @@ These land with the next breaking release, not the 2026-09-23 train.
   broadcast that ends with media queued behind an undescribed track is an error
   rather than an empty `Ok(None)`. Restart the export to pick up a new
   rendition.
+- **moq-mux TS stats live in `ts::stats`.** `ts::Stats` is
+  `ts::stats::Snapshot` and `ts::StreamStats` is `ts::stats::Stream`, whose
+  `track` is an owned `String`. `ts::Export::stats` returns
+  `ts::stats::Export`, which carries only `streams`; feed it to
+  `stats::Log` with `.into()`. `ts::MultipleProgramsError` is
+  `#[non_exhaustive]`: recover it by downcast and read `programs`.
 
 ## Wire
 
