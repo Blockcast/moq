@@ -973,9 +973,8 @@ impl Container {
 }
 
 /// The MPEG-TS stdout container.
-///
-/// It keeps `--max-age` rather than [`Container`]'s `--max-delay`: TS export is moving to
-/// a fixed release delay that subsumes the staleness budget under its own flag.
+// It keeps `--max-age` rather than `Container`'s `--max-delay`: TS export is moving to a
+// fixed release delay that subsumes the staleness budget under its own flag.
 #[derive(usage::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Transport {
