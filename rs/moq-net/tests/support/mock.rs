@@ -335,7 +335,8 @@ impl poll::RecvStream for MockRecvStream {
 impl Drop for MockRecvStream {
 	fn drop(&mut self) {
 		// Signal the paired SendStream that the receiver is gone (implicit STOP),
-		// and fail its future writes.
+		// and fail its future writes. Unlike QUIC, writes fail at once, a link
+		// latency before `poll_closed` reports the stop.
 		self.closed.set(self.conn.latency(), Ok(()));
 		self.rx.close();
 	}

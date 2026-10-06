@@ -333,14 +333,7 @@ async fn rejoin_goes_live_without_the_join_head() {
 /// copy idle, or it takes the cached group as the live edge.
 #[tokio::test(start_paused = true)]
 async fn rejoin_during_the_cancel_skips_the_cache() {
-	let pre06 = [
-		"moq-lite-01",
-		"moq-lite-02",
-		"moq-lite-03",
-		"moq-lite-04",
-		"moq-lite-05",
-	];
-	for version in Version::names().filter(|version| !pre06.contains(version)) {
+	for version in Version::names() {
 		tokio::time::timeout(TEST_TIMEOUT, async {
 			let publisher = produce_origin(1);
 			let relay = produce_origin(2);
