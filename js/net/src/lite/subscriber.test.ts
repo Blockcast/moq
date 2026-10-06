@@ -12,7 +12,6 @@ import { Subscriber } from "./subscriber.ts";
 import { TrackInfo } from "./track.ts";
 import { Version } from "./version.ts";
 
-
 test("closing the subscriber suppresses probe stream warnings", async () => {
 	let readable!: ReadableStreamDefaultController<Uint8Array>;
 	const quic = {

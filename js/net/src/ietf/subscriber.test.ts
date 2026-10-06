@@ -17,7 +17,6 @@ import { SubscribeNamespace, SubscribeNamespaceEntry, SubscribeNamespaceEntryDon
 import { Subscriber } from "./subscriber.ts";
 import { ALPN, Version } from "./version.ts";
 
-
 const VERSION = Version.DRAFT_19;
 
 /** How long to wait for a stream before calling it absent. */

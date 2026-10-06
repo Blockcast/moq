@@ -8,7 +8,6 @@ import { Producer } from "./origin.ts";
 import * as Path from "./path.ts";
 import { wireOf } from "./wire.ts";
 
-
 function publish(origin: Producer, path: Path.Valid) {
 	const broadcast = origin.createBroadcast(path);
 	broadcast.announce();

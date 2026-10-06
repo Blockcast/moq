@@ -128,6 +128,18 @@ impl Callback {
 		let announced = id(self.recv());
 		(announced, announce_info(announced))
 	}
+
+	/// Like [`recv_terminal`](Self::recv_terminal), but first frees any announce
+	/// events still queued ahead of it.
+	fn recv_announce_terminal(&self) -> i32 {
+		loop {
+			let code = self.recv();
+			if code <= 0 {
+				return code;
+			}
+			assert_eq!(moq_origin_announced_free(id(code)), 0);
+		}
+	}
 }
 
 /// Read an announce event delivered to an `on_announce` callback.
@@ -2089,7 +2101,7 @@ fn announced_hides_dot_paths_unless_asked() {
 		assert_eq!(moq_origin_announced_free(announced), 0);
 		assert_eq!(moq_origin_announced_cancel(task), 0);
 		// Later events may be queued ahead of the terminal; free them.
-		assert_eq!(cb.recv_terminal(), 0);
+		assert_eq!(cb.recv_announce_terminal(), 0);
 	}
 
 	assert_eq!(moq_publish_close(stats), 0);

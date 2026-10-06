@@ -23,7 +23,6 @@ import type { Producer as TrackProducer } from "./track.ts";
 import { withTimeout } from "./util/timeout.ts";
 import { wireOf } from "./wire.ts";
 
-
 function publish(origin: OriginProducer, path: Path.Valid) {
 	const broadcast = origin.createBroadcast(path);
 	broadcast.announce();

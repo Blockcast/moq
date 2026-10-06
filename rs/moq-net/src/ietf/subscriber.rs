@@ -932,9 +932,7 @@ where
 		//
 		// This is what moq-lite already does, where the equivalent map is a local whose
 		// guards drop.
-		let res = self
-			.run_namespace_entries(&mut stream, &prefix, &peer, &mut live)
-			.await;
+		let res = self.run_namespace_entries(&mut stream, &prefix, &peer, &mut live).await;
 		for path in live {
 			let _ = self.stop_announce(path);
 		}
