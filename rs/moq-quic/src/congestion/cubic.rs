@@ -351,7 +351,15 @@ mod tests {
         cubic.state.ssthresh = window;
         cubic.state.w_max = window as f64;
 
-        cubic.on_congestion_event(now, now + Duration::from_millis(1), true, false, 0);
+        cubic.on_congestion_event(
+            now,
+            now + Duration::from_millis(1),
+            true,
+            false,
+            0,
+            0,
+            SpaceId::Data,
+        );
 
         // RFC 9438 §4.8 (Timeout): ssthresh is the pre-event window reduced by β_cubic
         // exactly once, as in §4.6; only cwnd is lowered to the minimum window.
