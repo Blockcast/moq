@@ -58,7 +58,9 @@ For each finding:
 - If it's a relatively easy improvement, fix it and push. Update the summary if needed.
 
 Wait for a review of the final head from any reviewer other than Grok.
-Codex and OpenAI refer to the same reviewer.
+Codex (OpenAI) reacts with a thumbs up when it has no findings; that counts as a review.
+Skipped or rate-limited reviews do not count.
+For a fork with no automatic non-Grok review, ask the maintainer to arrange one.
 Merge only when that review has no findings, or every finding is fixed or replied to.
 
 # CI
