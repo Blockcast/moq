@@ -51,15 +51,16 @@ vector the 2026-09-30 cache-tiers audit kept:
   routes learned on another upstream link, and a route learned upstream keeps
   a down-only mark across other links so a mesh with two uplinks cannot leak
   CDN routes back into the CDN. An edge marks its core links upstream; a
-  Starlink drone marks its CDN link upstream. See
-  [Upstream links](/quest/m1/cluster-routing/transit.md).
+  Starlink drone marks its CDN link upstream. The per-link mark landed on
+  today's path vector (`doc/bin/relay/cluster.md`); the down-only mark lands
+  with [Routes and announces](/quest/m1/cluster-routing/routes.md).
 - **One node id space, no cluster ids.** A customer cluster is nodes behind
   upstream or trusted links. Loop detection by cluster id would drop a
   partitioned swarm's traffic to itself through the CDN (BGP's partitioned-AS
   problem). Folding a large customer cluster into one id at its boundary is
   [Routing cost domains](/quest/m3/routing-cost-domains.md)'s.
-- **Every session speaks it**, relays, apps, and browsers, in the wip lite
-  version; a plain client with one link advertises only itself. Node ids are
+- **Every session speaks it**, relays, apps, and browsers, in lite-07 (the
+  current wip version, decided 2026-10-05); a plain client with one link advertises only itself. Node ids are
   opaque randoms, so routes reveal no backbone addresses.
 - **Trust.** Cluster-peer links may advertise any node; a client link's node
   ids stay scoped to its session. Promoting them is
@@ -77,8 +78,11 @@ vector the 2026-09-30 cache-tiers audit kept:
   own ([Link quality](/quest/m1/cluster-routing/link-quality.md)).
 - **Topology now, wire later.** moq.pro's edge and core migration runs on
   today's lite-06 path vector with upstream links; the route layer lands in
-  the wip version afterwards with no re-layout, once
-  [the simulator](/quest/m1/cluster-routing/sim.md) has compared it.
+  lite-07 (the current wip version) afterwards with no re-layout, once
+  [the simulator](/quest/m1/cluster-routing/sim.md) has compared it. Decided
+  2026-10-05: this line gates
+  [Finalize moq-lite-07](/quest/m1/lite07-finalize.md), and lite-07 loses
+  its hop list and `Hop Base`/`Hop Keep` compression.
 
 Kept from 2026-09-30: core links are configured and may skip PoPs; Warm and
 Cold collapse to one cost ([One route cost](/quest/m1/route-cost.md));
@@ -127,7 +131,6 @@ Once every child has landed:
 
 ## Required
 
-- [Upstream links](/quest/m1/cluster-routing/transit.md) - a link marked upstream never receives routes learned on another upstream link, which builds edge tiers and drone uplinks from one rule
 - [Selection](/quest/m1/cluster-routing/selection.md) - a broadcast under overlapping prefixes routes to one origin deterministically, and same-path origins are one source
 - [Multi-CDN endpoints](/quest/m1/cluster-routing/multi-cdn.md) - an endpoint holds sessions to several CDNs, uses its preferred one, and fails over to the next
 - [Simulate the split](/quest/m1/cluster-routing/sim.md) - moq.pro's simulator compares the route layer with path vector before the wire is written
@@ -143,5 +146,5 @@ Once every child has landed:
 - [One route cost](/quest/m1/route-cost.md) - Warm and Cold collapse to one static cost
 - [Same-epoch importers](/quest/m1/hop-aligned-import.md) - the importer half of a redundant pair under one explicit epoch
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - a redundant pair shares one epoch
-- [Cross-relay delivery under bursts](/quest/m1/cross-relay-bursts.md) - its #4349 report shows closed broadcasts announced for up to 229 s
+- [Cross-relay bursts re-run](/quest/m1/cross-relay-bursts.md) - its #4349 report shows closed broadcasts announced for up to 229 s
 - [Routing cost domains](/quest/m3/routing-cost-domains.md) - policy and aggregation at boundaries between operators
