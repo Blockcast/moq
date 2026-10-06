@@ -302,10 +302,14 @@ impl Server {
 		}
 
 		// Only the QUIC backend verifies client certificates; the qmux listeners
-		// (tcp/unix/websocket) carry no TLS of their own, so a stream-only server
-		// would ignore the CA. A caller opening only the streams owns QUIC elsewhere.
-		if parts.quic() && !config.tls.root.is_empty() && !(build_quic && cfg!(feature = "noq")) {
-			return Err(Error::MtlsUnsupported);
+		// (tcp/unix/websocket) never ask for one, even over `tls://`, so a
+		// stream-only server would ignore the CA. A caller opening only the streams owns QUIC elsewhere.
+		if parts.quic() && !config.tls.root.is_empty() {
+			if !build_quic {
+				return Err(Error::MtlsUnsupported);
+			}
+			#[cfg(not(feature = "noq"))]
+			return Err(Error::NoBackend("--listen-tls-root requires the noq feature"));
 		}
 
 		// The member is a serving handle released by a complete reuseport group,
@@ -2371,7 +2375,7 @@ mod tests {
 	}
 
 	/// A client CA on a stream-only server is refused: no QUIC listener would
-	/// verify it, and the stream listeners carry no TLS.
+	/// verify it, and the stream listeners never ask for a client certificate.
 	#[cfg(feature = "tcp")]
 	#[tokio::test]
 	async fn client_ca_without_a_quic_listener_is_rejected() {
@@ -2393,6 +2397,29 @@ mod tests {
 	fn quic_bind_without_a_quic_backend_is_rejected() {
 		let config = crate::listen::Config {
 			bind: Some("127.0.0.1:0".parse().unwrap()),
+			..Default::default()
+		};
+
+		assert!(matches!(
+			Config {
+				listen: config,
+				..Default::default()
+			}
+			.init(),
+			Err(Error::NoBackend(_))
+		));
+	}
+
+	/// A client CA on the default QUIC listener names the missing backend, not a
+	/// stream-only server the caller never configured.
+	#[cfg(not(feature = "noq"))]
+	#[test]
+	fn client_ca_without_a_quic_backend_is_rejected() {
+		let config = crate::listen::Config {
+			tls: crate::tls::Listen {
+				root: vec!["ca.pem".into()],
+				..Default::default()
+			},
 			..Default::default()
 		};
 

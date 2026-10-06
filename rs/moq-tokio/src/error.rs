@@ -138,9 +138,9 @@ pub enum Error {
 	#[error("Iroh support is not enabled")]
 	IrohDisabled,
 
-	/// A client CA was configured, but no QUIC listener is built to verify it.
+	/// A client CA was configured on a stream-only server, which has no QUIC listener to verify it.
 	#[error(
-		"tls.root (mTLS) needs a QUIC listener; the TCP, Unix, and WebSocket listeners carry no TLS to verify a client certificate"
+		"--listen-tls-root (mTLS) needs a QUIC listener (--listen); the TCP and Unix listeners never ask for a client certificate"
 	)]
 	MtlsUnsupported,
 

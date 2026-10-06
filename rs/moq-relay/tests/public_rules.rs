@@ -275,7 +275,8 @@ async fn a_client_ca_needs_an_auth_server() {
 }
 
 /// A stream-only relay has no QUIC listener to verify a client CA, and its stream
-/// listeners carry no TLS, so the CA is refused rather than silently ignored.
+/// listeners never ask for a client certificate, so the CA is refused rather than
+/// silently ignored.
 #[tokio::test]
 async fn a_client_ca_needs_a_quic_listener() {
 	let mut config = moq_relay::Config::default();
