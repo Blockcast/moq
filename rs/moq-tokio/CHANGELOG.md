@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - *(moq-tokio)* finite default connection receive window (backport #4605) ([#4858](https://github.com/moq-dev/moq/pull/4858))
 
+### Other
+
+- release ([#4867](https://github.com/moq-dev/moq/pull/4867))
+
+## [0.19.23](https://github.com/moq-dev/moq/compare/moq-tokio-v0.19.22...moq-tokio-v0.19.23) - 2026-10-06
+
+### Fixed
+
+- *(moq-tokio)* finite default connection receive window (backport #4605) ([#4858](https://github.com/moq-dev/moq/pull/4858))
+
 ## [0.19.22](https://github.com/moq-dev/moq/compare/moq-tokio-v0.19.21...moq-tokio-v0.19.22) - 2026-10-05
 
 ### Other
