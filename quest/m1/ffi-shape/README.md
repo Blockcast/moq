@@ -37,7 +37,10 @@ Settled shape:
   track accepted from a request; the codecs take the broadcast and its
   catalog. JSON and flate producers take the broadcast too, whose catalog
   advertises the track, as `moq_mux::catalog::Producer::json_snapshot` does. Sketch, not a contract: `json.SnapshotProducer(track, config)`,
-  `video.Encoder(broadcast, catalog, config)`.
+  `video.Producer(broadcast, catalog, config)` for Rust's
+  `encode::Producer`, and the codec-only `video.Encoder(config)` for
+  `encode::Encoder` (decided 2026-10-06, see
+  [Codecs](/quest/m1/ffi-shape/codec.md)).
 - UniFFI 0.32 allows one namespace per crate, so moq-ffi groups by type and
   the wrappers supply real namespaces in each language's idiom: Python
   submodules, Go subpackages (`moq.dev/moq/json`, aliased on import next to
@@ -69,4 +72,4 @@ work no child does:
 ## Required
 
 - [Bindings](/quest/m0/broadcast-epoch/bindings.md) - lands first; this line adopts its epoch surface and the `session.epoch()` rename
-- [Codecs](/quest/m1/ffi-shape/codec.md) - audio and video encoders and decoders move under their own namespaces with one constructor shape
+- [Codecs](/quest/m1/ffi-shape/codec.md) - audio and video producers, codec-only encoders, and decoders move under their own namespaces, named as in Rust

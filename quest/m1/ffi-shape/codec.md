@@ -2,12 +2,27 @@
 
 ## Goal
 
-`audio` and `video` each own an encoder and a decoder constructed from the
-handles moq-audio and moq-video take (the broadcast and its catalog), with one shape between them. `BroadcastProducer` loses
+`audio` and `video` each own a broadcast-bound producer, a codec-only
+encoder, and a decoder, mirroring moq-audio's and moq-video's types, with one
+shape between them. `video.Producer` and `audio.Producer` mirror Rust's
+`encode::Producer` and are constructed from the handles it takes (the
+broadcast and its catalog). `video.Encoder` and `audio.Encoder` mirror
+`encode::Encoder` and take only a codec config. `BroadcastProducer` loses
 `encode_audio`/`encode_video` and `BroadcastConsumer` loses
 `decode_audio`/`decode_video`.
 
 ## Plan
+
+Decided by the maintainer in the 2026-10-06 audit: the binding names mirror
+Rust, so every moq-ffi type maps to the Rust type of the same name. The
+broadcast-bound types are `video.Producer`/`audio.Producer`
+(`rs/moq-video/src/encode/producer.rs`, `rs/moq-audio/src/encode/producer.rs`),
+and this quest also owns the codec-only `video.Encoder`/`audio.Encoder`
+(`encode::Encoder` in `encoder.rs`). The OBS adapters
+([video](/quest/m1/obs-moq-video/adapter.md),
+[audio](/quest/m1/obs-moq-video/audio-publish.md)) consume these rather than
+adding their own. Rejected: shipping only the Producers here and leaving the
+codec-only Encoder to the OBS audio quest.
 
 Mirror moq-audio's and moq-video's `encode`/`decode` modules. Today the two
 disagree on where the track name goes (`encode_audio` takes it as an
