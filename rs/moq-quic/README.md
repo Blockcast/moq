@@ -23,7 +23,15 @@ git -C ../quinn format-patch -1 --stdout <sha> -- quinn-proto \
 
 ### Carried changes
 
-None besides the crate rename.
+Besides the crate rename:
+
+- **BBR3**, from [quinn#2481](https://github.com/quinn-rs/quinn/pull/2481) at [`55f74c0d`](https://github.com/quinn-rs/quinn/pull/2481/commits/55f74c0dd0738b5ad7d7676c0b2869a547783f83) (open upstream), rebased onto the fork point with authorship kept. It replaces quinn's BBR and is the default controller. It carries the BBR correctness fixes moq-dev/noq shipped in `moq-noq` 1.3.1, and with them the `Controller` changes BBR needs: packets named by number and `SpaceId`, `on_packet_sent`, `on_packet_lost`, `on_cwnd_limited`, `on_app_limited`, `on_ack_frequency_update`, and a `pacing_rate` and `send_quantum` the pacer obeys. `ControllerMetrics` rates are bytes per second.
+- **Classic ECN for BBR3**, ported from [moq-dev/noq#12](https://github.com/moq-dev/noq/pull/12): CE exits Startup, stops a bandwidth probe, or lowers the short-term model, once per recovery episode, instead of counting as a loss.
+- **Pacer rounding**: a wait shorter than a nanosecond rounds up instead of re-arming the pacing timer at the current instant.
+- **qlog pacing rate** in bits per second, as qlog defines it.
+- moq-dev/noq's congestion-callback regressions, reworked onto quinn's test harness.
+
+Recheck these when cherry-picking quinn#2481 updates, or if it merges.
 
 ### Advisory triage
 
