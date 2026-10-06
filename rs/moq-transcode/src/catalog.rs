@@ -159,18 +159,25 @@ impl Decoders {
 }
 
 /// Pick the rendition to transcode from: the best [ranked](Video::ranked) rendition local
-/// to the source broadcast that this host can decode.
+/// to the source broadcast that this host can decode, enabled ones first.
 ///
 /// [`Error::NoSource`] means wait for a later snapshot. Any other error means
 /// nothing on offer can be decoded here, and is why the best one refused.
 pub(crate) async fn choose_source(video: &Video, decoders: &mut Decoders) -> Result<(String, VideoConfig), Error> {
 	// Best first. A rendition without dimensions ranks after every one with them:
 	// it can't be chosen yet, but it can still keep the transcoder waiting.
-	let candidates = video
-		.ranked()
-		// A rendition that itself lives in another broadcast can't be subscribed
-		// through this one; composing relative references is a follow-up.
-		.filter(|(_, config)| config.broadcast.is_none())
+	let ranked = |enabled: bool| {
+		video
+			.ranked()
+			.filter(move |(_, config)| config.enabled == enabled)
+			// A rendition that itself lives in another broadcast can't be subscribed
+			// through this one; composing relative references is a follow-up.
+			.filter(|(_, config)| config.broadcast.is_none())
+	};
+	// A disabled rendition sends no frames. It is the source only when nothing enabled is,
+	// so the rungs inherit `enabled: false` rather than the ladder vanishing.
+	let candidates = ranked(true)
+		.chain(ranked(false))
 		.filter_map(|(name, config)| Some((name, config, codec(config)?)));
 
 	let mut refused = None;
@@ -216,6 +223,7 @@ pub(crate) async fn follow_source(
 	current: &str,
 	decoders: &mut Decoders,
 ) -> Result<(String, VideoConfig), Error> {
+	let mut kept = None;
 	if let Some(config) = video.renditions.get(current)
 		&& config.broadcast.is_none()
 		&& dimensions(config).is_some()
@@ -223,9 +231,18 @@ pub(crate) async fn follow_source(
 		// The name can stay while the codec changes under it.
 		&& decoders.probe(codec, config).await
 	{
-		return Ok((current.to_string(), config.clone()));
+		if config.enabled {
+			return Ok((current.to_string(), config.clone()));
+		}
+		kept = Some(config);
 	}
-	choose_source(video, decoders).await
+
+	// A disabled source gives way only to an enabled one.
+	match (kept, choose_source(video, decoders).await) {
+		(Some(config), Ok((_, chosen))) if !chosen.enabled => Ok((current.to_string(), config.clone())),
+		(Some(config), Err(_)) => Ok((current.to_string(), config.clone())),
+		(_, chosen) => chosen,
+	}
 }
 
 /// Whether a rung decoding `old` can keep decoding `new` untouched.
@@ -819,6 +836,47 @@ mod tests {
 		video.renditions.insert("avc".to_string(), hevc(640, 360));
 		let (name, _) = follow_source(&video, "avc", &mut decoders).await.unwrap();
 		assert_eq!(name, "tall");
+	}
+
+	/// A disabled rendition sends no frames, so an enabled one wins even when it ranks lower,
+	/// and a disabled one is chosen only when nothing enabled is on offer.
+	#[tokio::test]
+	async fn chooses_an_enabled_source_first() {
+		let mut video = Video::default();
+		let mut high = source(1920, 1080, None);
+		high.enabled = false;
+		video.insert("high", high).unwrap();
+		video.insert("low", source(640, 360, None)).unwrap();
+
+		let (name, _) = choose_source(&video, &mut decodes_all()).await.unwrap();
+		assert_eq!(name, "low");
+
+		video.renditions.get_mut("low").unwrap().enabled = false;
+		let (name, config) = choose_source(&video, &mut decodes_all()).await.unwrap();
+		assert_eq!(name, "high");
+		assert!(!config.enabled);
+	}
+
+	/// A source that is disabled gives way to an enabled rendition, but stays put when every
+	/// rendition is disabled, so its rungs inherit `enabled: false` instead of switching.
+	#[tokio::test]
+	async fn follow_leaves_a_disabled_source_only_for_an_enabled_one() {
+		let mut video = Video::default();
+		let mut low = source(640, 360, None);
+		low.enabled = false;
+		video.insert("low", low).unwrap();
+		let mut high = source(1920, 1080, None);
+		high.enabled = false;
+		video.insert("high", high).unwrap();
+		let mut decoders = decodes_all();
+
+		let (name, config) = follow_source(&video, "low", &mut decoders).await.unwrap();
+		assert_eq!(name, "low");
+		assert!(!config.enabled);
+
+		video.renditions.get_mut("high").unwrap().enabled = true;
+		let (name, _) = follow_source(&video, "low", &mut decoders).await.unwrap();
+		assert_eq!(name, "high");
 	}
 
 	/// Probing opens a real decoder, so each codec is opened once per transcoder
