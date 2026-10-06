@@ -36,6 +36,11 @@ pub(super) struct Pair {
     pub(super) mtu: usize,
     /// Simulates explicit congestion notification
     pub(super) congestion_experienced: bool,
+    /// Replaces the ECN codepoint of every delivered datagram after any marking, as a path that
+    /// bleaches the field (`Some(None)`) or re-marks it
+    pub(super) rewrite_ecn: Option<Option<EcnCodepoint>>,
+    /// Queues client-to-server datagrams at a bottleneck, if set
+    pub(super) bottleneck: Option<Bottleneck>,
     // One-way
     pub(super) latency: Duration,
     /// Number of spin bit flips
@@ -79,6 +84,8 @@ impl Pair {
             spins: 0,
             last_spin: false,
             congestion_experienced: false,
+            rewrite_ecn: None,
+            bottleneck: None,
         }
     }
 
@@ -150,9 +157,18 @@ impl Pair {
                 socket.send_to(&buffer, packet.destination).unwrap();
             }
             if self.server.addr == packet.destination {
-                let ecn = set_congestion_experienced(packet.ecn, self.congestion_experienced);
+                let (sent, marked) = match &mut self.bottleneck {
+                    Some(bottleneck) => match bottleneck.enqueue(self.time, buffer.len()) {
+                        Some(dequeued) => dequeued,
+                        None => continue,
+                    },
+                    None => (self.time, false),
+                };
+                let ecn = self.rewrite_ecn.unwrap_or_else(|| {
+                    set_congestion_experienced(packet.ecn, self.congestion_experienced || marked)
+                });
                 self.server.inbound.push_back((
-                    self.time + self.latency,
+                    sent + self.latency,
                     ecn,
                     buffer.as_ref().into(),
                 ));
@@ -174,7 +190,9 @@ impl Pair {
                 socket.send_to(&buffer, packet.destination).unwrap();
             }
             if self.client.addr == packet.destination {
-                let ecn = set_congestion_experienced(packet.ecn, self.congestion_experienced);
+                let ecn = self.rewrite_ecn.unwrap_or_else(|| {
+                    set_congestion_experienced(packet.ecn, self.congestion_experienced)
+                });
                 self.client.inbound.push_back((
                     self.time + self.latency,
                     ecn,
@@ -287,6 +305,82 @@ impl Pair {
 impl Default for Pair {
     fn default() -> Self {
         Self::new(Default::default(), server_config())
+    }
+}
+
+/// A rate-limited FIFO queue, as at a bottleneck router
+#[derive(Debug, Clone)]
+pub(super) struct Bottleneck {
+    time_per_byte: Duration,
+    /// The queueing delay past which packets are tail-dropped
+    max_queue: Duration,
+    /// Whether packets are marked CE once the queue is half full, as a classic AQM does
+    marks_ce: bool,
+    /// When the link finishes serving everything queued so far
+    busy_until: Option<Instant>,
+    pub(super) stats: QueueStats,
+}
+
+impl Bottleneck {
+    /// A link serving `bytes_per_second`, queueing up to `buffer_size` bytes
+    pub(super) fn new(bytes_per_second: u64, buffer_size: u32, marks_ce: bool) -> Self {
+        let time_per_byte = Duration::from_nanos(1_000_000_000 / bytes_per_second);
+        Self {
+            time_per_byte,
+            max_queue: buffer_size * time_per_byte,
+            marks_ce,
+            busy_until: None,
+            stats: QueueStats::default(),
+        }
+    }
+
+    /// Queues `bytes` arriving at `now`, returning when they leave the link and whether they
+    /// were marked CE, or `None` if the full queue dropped them
+    fn enqueue(&mut self, now: Instant, bytes: usize) -> Option<(Instant, bool)> {
+        let busy_until = self.busy_until.unwrap_or(now).max(now);
+        let delay = busy_until - now;
+        if delay > self.max_queue {
+            self.stats.dropped += 1;
+            return None;
+        }
+        let service = bytes as u32 * self.time_per_byte;
+        self.stats.queued += 1;
+        self.stats.total_delay += delay;
+        self.stats.max_delay = self.stats.max_delay.max(delay);
+        if delay > self.max_queue / 2 {
+            self.stats.congested += service;
+        }
+
+        let done = busy_until + service;
+        self.busy_until = Some(done);
+        let marked = self.marks_ce && done > now + self.max_queue / 2;
+        self.stats.marked += marked as u64;
+        Some((done, marked))
+    }
+}
+
+/// What a [`Bottleneck`] queue has seen
+#[derive(Debug, Default, Clone)]
+pub(super) struct QueueStats {
+    /// Packets tail-dropped
+    pub(super) dropped: u64,
+    /// Packets marked CE
+    pub(super) marked: u64,
+    /// Packets queued for delivery
+    pub(super) queued: u32,
+    /// The queueing delay delivered packets met, summed
+    pub(super) total_delay: Duration,
+    /// The longest queueing delay a delivered packet met
+    pub(super) max_delay: Duration,
+    /// How long the link spent serving packets that queued past half full, the marking
+    /// threshold, so how long the sender took to answer congestion, summed over the run
+    pub(super) congested: Duration,
+}
+
+impl QueueStats {
+    /// The mean queueing delay delivered packets met
+    pub(super) fn mean_delay(&self) -> Duration {
+        self.total_delay / self.queued.max(1)
     }
 }
 
