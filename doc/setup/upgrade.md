@@ -100,8 +100,9 @@ These land with the next breaking release, not the 2026-09-23 train.
   `with_export_max_delay`, `export_max_delay`, and `DEFAULT_MAX_DELAY`. In
   TypeScript, `Track.Subscription`'s `maxAge` is `maxDelay`, as are
   `Container.Consumer`'s `maxAge` prop and `@moq/watch`'s `Sync.out.maxAge`;
-  JavaScript ignores an unknown `maxAge` key at runtime, so untyped callers
-  must rename it or get a zero budget.
+  JavaScript refuses a `maxAge` key in subscription options or container consumer
+  props with a `TypeError` naming `maxDelay`, including when both keys are supplied
+  or `maxAge` is `undefined`. Untyped callers must rename it.
   moq-ffi's `MoqSubscription`, `MoqAudioDecoderOutput`, and
   `MoqVideoDecoderOutput` take `max_delay_us` (each binding in its own casing),
   and so do C's `moq_subscription`, `moq_audio_decoder_output`,

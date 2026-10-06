@@ -6,7 +6,7 @@ import type { Format } from "./format";
 import { Jitter } from "./jitter";
 import type { BufferedRanges, Frame } from "./types";
 
-/** Options for constructing a {@link Consumer}. */
+/** Options for constructing a {@link Consumer}; the obsolete `maxAge` prop is refused. */
 export interface ConsumerProps {
 	/** The container format used to decode each MoQ frame. */
 	format: Format;
@@ -118,6 +118,7 @@ export class Consumer {
 
 	/** Start consuming the given track, decoding frames with `props.format`. */
 	constructor(track: Moq.Track.Subscriber, props: ConsumerProps) {
+		if ("maxAge" in props) throw new TypeError("Consumer maxAge is unsupported; use maxDelay");
 		this.#track = track;
 		this.#format = props.format;
 		this.#maxDelay = getter(props.maxDelay ?? Moq.Time.Milli.zero);

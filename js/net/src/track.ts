@@ -21,7 +21,7 @@ import { type Broadcast as BroadcastWire, registerTrackConsumer } from "./wire.t
 export type { Datagram } from "./datagram.ts";
 
 // Wall-clock bound for idle cached content, matching Rust cache::DEFAULT_EXPIRY.
-// Media maxAge only bounds how far behind the live edge a reader may fall.
+// Media maxDelay only bounds how far behind the live edge a reader may fall.
 const CACHE_WINDOW_MS = 30_000;
 
 // The cache scans at most this many times per idle cache window.
@@ -124,6 +124,7 @@ export interface Groups {
 /**
  * Per-subscription options, requested when a subscription opens and adjustable later via
  * {@link Subscriber.update}. Mirrors the Rust `Subscription`.
+ * The obsolete subscriber `maxAge` field is refused at runtime; use `maxDelay`.
  */
 export interface Subscription {
 	/** Delivery priority relative to this session's other subscriptions (`0..=255`). Defaults to `0`. */
@@ -150,6 +151,7 @@ export interface Subscription {
 // Materialize the defaults at the model boundary so every layer observes a complete
 // subscription rather than interpreting an omitted field differently.
 function subscriptionDefaults(subscription: Subscription = {}): Subscription {
+	if ("maxAge" in subscription) throw new TypeError("Subscriber maxAge is unsupported; use maxDelay");
 	const bounds = groupBounds(subscription.groups ?? {});
 	return {
 		priority: priorityByte(subscription.priority ?? 0),

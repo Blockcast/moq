@@ -3,7 +3,7 @@ import { TooFarBehind } from "./error.ts";
 import { Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
 import { hooks } from "./internal.ts";
 import { Milli, Timescale, Timestamp } from "./time.ts";
-import { infoDefaults, Producer as TrackProducer } from "./track.ts";
+import { infoDefaults, type Subscription, Producer as TrackProducer } from "./track.ts";
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -279,6 +279,25 @@ test("subscriber options and updates are forwarded to the producer's aggregate",
 		maxDelay: Milli(250),
 		groups: { start: { included: 2 }, end: { excluded: 9 } },
 	});
+});
+
+test("subscriber maxAge is refused before defaults or updates take effect", () => {
+	const producer = new TrackProducer("test");
+	const track = producer.subscribe({ maxDelay: Milli(250) });
+	const original = producer.subscription.peek();
+
+	for (const maxAge of [Milli(500), undefined]) {
+		expect(() => producer.subscribe({ maxAge } as Subscription)).toThrow("maxDelay");
+		const options = { maxDelay: Milli(100), maxAge };
+		expect(() => producer.subscribe(options)).toThrow(TypeError);
+		expect(() => track.update(options)).toThrow("maxDelay");
+		expect(producer.subscription.peek()).toEqual(original);
+	}
+
+	// Publisher retention keeps its distinct maxAge field.
+	producer.accept({ maxAge: Milli(500) });
+	track.close();
+	producer.close();
 });
 
 test("a fractional maxDelay is rounded up before the wire sees it", async () => {

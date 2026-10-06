@@ -53,6 +53,18 @@ function replay(track: Track.Producer): Track.Subscriber {
 	return track.subscribe({ maxDelay: Time.Milli(30_000) });
 }
 
+test("Consumer refuses maxAge before taking ownership of the track", () => {
+	const producer = new Track.Producer("test");
+	const track = producer.subscribe();
+	for (const maxAge of [Time.Milli(500), undefined]) {
+		const props = { format: new LegacyFormat("data"), maxAge };
+		expect(() => new Consumer(track, props)).toThrow("maxDelay");
+		expect(track.closed.peek()).toBeUndefined();
+	}
+	track.close();
+	producer.close();
+});
+
 // --- LegacyFormat ---
 
 test("LegacyFormat decodes a valid frame", () => {
