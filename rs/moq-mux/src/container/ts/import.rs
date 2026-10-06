@@ -963,7 +963,7 @@ impl<E: catalog::Catalog> Import<E> {
 			.streams
 			.iter()
 			.filter_map(|(pid, stream)| Some((pid.as_u16(), stream.stats()?)))
-			.chain(self.sections.keys().map(|&pid| (pid, stats::Stream::new(".ts"))));
+			.chain(self.sections.keys().map(|&pid| (pid, stats::Stream::new(".ts", stats::Class::Data))));
 		for (pid, current) in routes {
 			streams
 				.entry(pid)
@@ -972,7 +972,7 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 		// A dedicated PCR PID routes no stream, so its damage gets a clock-only row.
 		for (&pid, &damaged) in &self.damaged {
-			streams.entry(pid).or_insert_with(|| stats::Stream::new("")).damaged = damaged;
+			streams.entry(pid).or_insert_with(|| stats::Stream::new("", stats::Class::Data)).damaged = damaged;
 		}
 		for (pid, stats) in &mut streams {
 			(stats.units, stats.quiet) = self.liveness.stream(*pid);
@@ -1915,11 +1915,11 @@ impl<E: catalog::Catalog> Stream<E> {
 		Some(match self {
 			Stream::Aac(stream) => stream.resync.stats(),
 			Stream::Legacy(stream) => stream.resync.stats(),
-			Stream::H264 { .. } => stats::Stream::new(".avc3"),
-			Stream::H265 { .. } => stats::Stream::new(".hev1"),
-			Stream::Opus(_) => stats::Stream::new(".opus"),
-			Stream::Verbatim(_) => stats::Stream::new(".ts"),
-			Stream::Clock => stats::Stream::new(""),
+			Stream::H264 { .. } => stats::Stream::new(".avc3", stats::Class::Video),
+			Stream::H265 { .. } => stats::Stream::new(".hev1", stats::Class::Video),
+			Stream::Opus(_) => stats::Stream::new(".opus", stats::Class::Audio),
+			Stream::Verbatim(_) => stats::Stream::new(".ts", stats::Class::Data),
+			Stream::Clock => stats::Stream::new("", stats::Class::Video),
 			Stream::Ignored => return None,
 		})
 	}
@@ -1991,7 +1991,7 @@ impl Resync {
 			// count from it for the life of the broadcast.
 			unconfirmed: true,
 			draining: false,
-			stats: stats::Stream::new(track),
+			stats: stats::Stream::new(track, stats::Class::Audio),
 		}
 	}
 
@@ -2522,9 +2522,7 @@ fn opus_config(descriptors: &[catalog::Descriptor]) -> crate::Result<opus::Confi
 
 	let mut config = opus::Config::new(48_000, channels);
 	if channels > 2 {
-		let mapping = opus::Mapping::vorbis(channels as u8)?;
-		config.mapping_family = mapping.family();
-		config.mapping = Some(mapping);
+		config.mapping = Some(opus::Mapping::vorbis(channels as u8)?);
 	}
 	Ok(config)
 }
@@ -3431,6 +3429,65 @@ pub(super) mod test {
 		);
 	}
 
+	/// A CUEI-marked 0x86 section is data, not audio, so a quiet second is not logged.
+	/// The video PID beside it, stalled with the same frozen count, is.
+	#[test]
+	#[tracing_test::traced_test]
+	fn sparse_cuei_pid_beside_a_stalled_video_is_not_logged() {
+		use crate::catalog::hang::Catalog;
+		use crate::container::ts::catalog::Ext;
+
+		// Not 0x100: `synth_pmt` puts the PMT there, and a later packet on that PID is PSI.
+		const VIDEO: u16 = 0x110;
+		const CUE_PID: u16 = 0x21;
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(
+			&mut broadcast,
+			crate::catalog::Config::default().with_catalog(Catalog::<Ext>::default()),
+		)
+		.unwrap();
+		let mut import = super::Import::new(broadcast, catalog.reserve());
+
+		let mut bytes = bytes::BytesMut::new();
+		bytes.extend_from_slice(&synth_pmt(
+			&[
+				(StreamType::Mpeg2Video, VIDEO),
+				(StreamType::Dts8ChannelLosslessAudio, CUE_PID),
+			],
+			true,
+		));
+		bytes.extend_from_slice(&pes_packet(VIDEO, 90_000));
+		bytes.extend_from_slice(&packet(true, 0, 0, &CUE));
+		import.decode(&bytes).unwrap();
+
+		let stats = import.stats();
+		assert_eq!(stats.streams[&VIDEO].class, super::stats::Class::Video);
+		assert_eq!(stats.streams[&VIDEO].track, "");
+		assert!(
+			stats.streams[&VIDEO].units >= 1,
+			"the video PID delivered before it stalled"
+		);
+		assert_eq!(stats.streams[&CUE_PID].class, super::stats::Class::Data, "{stats:?}");
+		assert_eq!(stats.streams[&CUE_PID].track, ".ts");
+		assert!(stats.streams[&CUE_PID].units >= 1, "the cue section was counted");
+
+		let mut log = crate::container::ts::stats::Log::default();
+		log.sample(stats);
+		log.sample(import.stats());
+
+		logs_assert(|lines: &[&str]| {
+			let stopped: Vec<_> = lines
+				.iter()
+				.filter(|line| line.contains("stopped delivering access units"))
+				.collect();
+			match stopped.as_slice() {
+				[line] if line.contains("pid=272 ") && !line.contains("pid=33 ") => Ok(()),
+				_ => Err(format!("expected only the stalled video PID, got {stopped:?}")),
+			}
+		});
+	}
+
 	/// A PUSI TS packet on `pid` carrying a minimal PES with `pts` (90 kHz) and a
 	/// 1-byte dummy payload, for streams we observe only for their PTS.
 	fn pes_packet(pid: u16, pts: u64) -> Vec<u8> {
@@ -4104,6 +4161,7 @@ pub(super) mod test {
 				AAC_PID,
 				super::stats::Stream {
 					track: ".aac".to_string(),
+					class: super::stats::Class::Audio,
 					units: 4,
 					quiet: None,
 					resyncs: 1,
@@ -4298,6 +4356,7 @@ pub(super) mod test {
 				MP2_PID,
 				super::stats::Stream {
 					track: ".mp2".to_string(),
+					class: super::stats::Class::Audio,
 					units: 4,
 					quiet: None,
 					resyncs: 1,
@@ -4486,6 +4545,7 @@ pub(super) mod test {
 				MP2_PID,
 				super::stats::Stream {
 					track: ".mp2".to_string(),
+					class: super::stats::Class::Audio,
 					units: 2,
 					quiet: None,
 					resyncs: 0,

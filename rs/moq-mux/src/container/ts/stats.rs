@@ -84,6 +84,8 @@ pub struct Stream {
 	/// or empty for MPEG-1/2 video, which is read for its clock and not published. At export,
 	/// the suffix an import of the output would give the PID.
 	pub track: String,
+	/// How this PID was classified. See [`Class`].
+	pub class: Class,
 	/// Access units the stream delivered: frames published for decoded media, PES payloads or
 	/// sections carried verbatim, and PES read on MPEG-1/2 video. At export, the PES or
 	/// sections written for each frame.
@@ -117,9 +119,10 @@ pub struct Stream {
 }
 
 impl Stream {
-	pub(super) fn new(track: &str) -> Self {
+	pub(super) fn new(track: &str, class: Class) -> Self {
 		Self {
 			track: track.to_string(),
+			class,
 			..Default::default()
 		}
 	}
@@ -128,9 +131,34 @@ impl Stream {
 	/// Delivery and damage are kept per PID rather than per route, so they need no merging.
 	pub(super) fn merge(&mut self, current: &Self) {
 		self.track.clone_from(&current.track);
+		self.class = current.class;
 		self.resyncs += current.resyncs;
 		self.discarded += current.discarded;
 		self.unconfirmed += current.unconfirmed;
+	}
+}
+
+/// Audio, video, or other data, as import or export already resolved the PID.
+///
+/// Not the PMT `stream_type`. `0x86` is DTS audio or, with a CUEI registration, an SCTE-35
+/// section, and those take different routes. The stopped-stream log grades audio and video
+/// only; a sparse data PID stays counted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Class {
+	/// Undecoded or sparse data (SCTE-35, ID3, private sections, verbatim PES), or a PCR PID
+	/// that carries no elementary stream. A quiet second is not a stall.
+	#[default]
+	Data,
+	/// Continuous audio.
+	Audio,
+	/// Continuous video, including MPEG-1/2 video read only for its clock.
+	Video,
+}
+
+impl Class {
+	/// Audio and video have a cadence. Data does not, so a quiet second is not a stall.
+	pub(super) fn graded(self) -> bool {
+		matches!(self, Self::Audio | Self::Video)
 	}
 }
 
@@ -139,7 +167,8 @@ impl Stream {
 ///
 /// Take one with [`Export::stats`](super::Export::stats). Its rows are an import's, but only
 /// `units` and `quiet` move: the exporter builds every frame header itself, so it has no frame
-/// sync to lose, and it grades nothing.
+/// sync to lose and it runs no TR 101 290 checks. [`Log`] still grades an audio or video row
+/// whose `units` stay still.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Export {
@@ -179,15 +208,17 @@ impl Log {
 
 	/// Compare a snapshot taken [`INTERVAL`](Self::INTERVAL) after the last.
 	///
-	/// Logs a stream whose access units did not advance since the last sample, once per
-	/// silence, any stream whose loss counters moved, and PSI sections dropped since.
+	/// Logs an audio or video stream whose access units did not advance since the last
+	/// sample, once per silence. Sparse data (SCTE-35, ID3, other verbatim PIDs) is counted
+	/// and not graded. Also logs any stream whose loss counters moved, and PSI sections
+	/// dropped since.
 	pub fn sample(&mut self, latest: Snapshot) {
 		self.sync(&latest);
 		for (pid, stream) in &latest.streams {
 			let previous = self.previous.as_ref().and_then(|previous| previous.streams.get(pid));
 			if previous.is_none_or(|previous| previous.units != stream.units) {
 				self.quiet.remove(pid);
-			} else if self.quiet.insert(*pid) {
+			} else if stream.class.graded() && self.quiet.insert(*pid) {
 				tracing::info!(
 					pid = *pid,
 					track = stream.track,
@@ -276,9 +307,13 @@ mod test {
 		const AUDIO: u16 = 0x101;
 		let sample = |video: u64, audio: u64| {
 			let mut stats = Snapshot::default();
-			for (pid, track, units) in [(VIDEO, ".avc3", video), (AUDIO, ".mp2", audio)] {
+			for (pid, track, class, units) in [
+				(VIDEO, ".avc3", Class::Video, video),
+				(AUDIO, ".mp2", Class::Audio, audio),
+			] {
 				let stream = Stream {
 					track: track.to_string(),
+					class,
 					units,
 					quiet: Some(std::time::Duration::from_millis(40)),
 					..Default::default()
@@ -306,6 +341,56 @@ mod test {
 		assert!(!logs_contain("audio frame sync lost"), "nothing lost frame sync");
 	}
 
+	/// A CUEI-marked 0x86 section is sparse data. A second without a section is not a stall,
+	/// even beside a video PID whose access units stopped.
+	#[test]
+	#[tracing_test::traced_test]
+	fn sparse_data_pid_beside_a_stalled_video_is_not_logged() {
+		const VIDEO: u16 = 0x100;
+		const CUE: u16 = 0x21;
+		let sample = |video: u64, cue: u64| {
+			let mut stats = Snapshot::default();
+			stats.streams.insert(
+				VIDEO,
+				Stream {
+					track: ".avc3".to_string(),
+					class: Class::Video,
+					units: video,
+					quiet: Some(std::time::Duration::from_secs(1)),
+					..Default::default()
+				},
+			);
+			stats.streams.insert(
+				CUE,
+				Stream {
+					track: ".ts".to_string(),
+					class: Class::Data,
+					units: cue,
+					quiet: Some(std::time::Duration::from_secs(1)),
+					..Default::default()
+				},
+			);
+			stats
+		};
+
+		let mut log = Log::default();
+		log.sample(sample(4, 1));
+		log.sample(sample(4, 1));
+		log.sample(sample(4, 2));
+		log.sample(sample(4, 2));
+
+		logs_assert(|lines: &[&str]| {
+			let stopped: Vec<_> = lines
+				.iter()
+				.filter(|line| line.contains("stopped delivering access units"))
+				.collect();
+			match stopped.as_slice() {
+				[line] if line.contains("pid=256") && !line.contains("pid=33") => Ok(()),
+				_ => Err(format!("expected only the stalled video PID, got {stopped:?}")),
+			}
+		});
+	}
+
 	/// A resync is reported on the sample that saw it, and the end of input still reports one
 	/// the last partial interval found.
 	#[test]
@@ -314,6 +399,7 @@ mod test {
 		let sample = |resyncs: u64, units: u64| {
 			let stream = Stream {
 				track: ".mp2".to_string(),
+				class: Class::Audio,
 				units,
 				resyncs,
 				..Default::default()
