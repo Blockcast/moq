@@ -19,10 +19,13 @@ import * as Loc from "@moq/loc";
 const format = new Loc.Format();
 const frames = format.decode(rawFrameBytes);
 
-// Encode outgoing LOC frames
+// Encode outgoing LOC frames. A keyframe starts a group.
 const producer = new Loc.Producer(track);
 producer.encode(payload, timestampMicros, keyframe);
 ```
+
+Each group ends with an empty duration frame, at the next keyframe's timestamp or one interval after the last sample when the track closes.
+Readers skip that frame.
 
 ## License
 
