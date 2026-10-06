@@ -169,6 +169,4 @@ owned by that prerequisite, not duplicated in archive storage.
 
 - [Bounded HLS playlists](/quest/m1/hls-bounded.md) - the live renderer rules a replayed archive inherits, planned outside this line
 - [Catalog track identity](/quest/m2/catalog-tracks.md) - explore immutable definitions or explicit version binding independently of archives
-
-- [wildcard](/quest/m0/wildcard/README.md) - catch-all routing exposes an archive at its stable replay path
 - [e2ee](/quest/m1/e2ee/README.md) - protected broadcasts are excluded initially

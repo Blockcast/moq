@@ -69,7 +69,5 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Wildcard](/quest/m0/wildcard/README.md) - landed (#4403) the `sync_route`, `poke_below`, and `origin/pool_churn` bench this reworks
-
 - [Front deadlines](/quest/m1/front-deadline-index.md) - each spurious wake also pays that per-track poll and deadline scan
 - [Front parking](/quest/m1/origin-front-parks.md) - replaces the `routed_broadcast` watch loop this wakes

@@ -29,9 +29,8 @@ whether expiry during a seek needs a group eviction API in `moq-net`.
 `moq-hls` reads a timeline from the catalog's own broadcast, and an
 `archive.replay` path only marks it non-durable. Decided (09-29): the exporter
 does not follow `replay`, and viewers don't address a separate replay
-broadcast. A recording is the broadcast. Under the
-[wildcard](/quest/m0/wildcard/README.md) plan the archive serves the source
-path through the root claim, and a live announcement shadows it. So when live
+broadcast. A recording is the broadcast. Since Wildcard (#4403) the archive
+serves the source path through the root claim, and a live announcement shadows it. So when live
 ends, `moq-hls` resolves the same name and falls through to the recording:
 playlists keep serving for rewind and for players finishing the last
 segments. The fall-through needs the recording to publish its catalog live,
@@ -56,7 +55,3 @@ numbers when the name moves from the live publisher to the archive.
 ## Closes
 
 - [#2275](https://github.com/moq-dev/moq/issues/2275) - close this issue when the quest finishes
-
-## Related
-
-- [Wildcard](/quest/m0/wildcard/README.md) - landed (#4403) the root claim that serves the source path once the live announcement ends
