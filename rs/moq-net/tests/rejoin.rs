@@ -388,13 +388,13 @@ async fn rejoin_during_the_cancel_skips_the_cache() {
 /// rejoin with that group, right after the one the relay cached. Its header lands before its
 /// first frame. Shown in between, it would leave the cached group without a stamped
 /// successor, and a reader at the live edge would be handed that older group first.
-#[tokio::test(start_paused = true)]
+#[moq_net_sim::test]
 async fn rejoin_waits_for_the_answers_first_frame() {
 	// Lite01/02 carry no max age, so the publisher serves the relay's cached head again and
 	// that answer is what makes the cache current.
 	let unbudgeted = ["moq-lite-01", "moq-lite-02"];
 	for version in Version::names().filter(|version| !unbudgeted.contains(version)) {
-		tokio::time::timeout(TEST_TIMEOUT, async {
+		moq_net_sim::timeout(TEST_TIMEOUT, async {
 			let publisher = produce_origin(1);
 			let relay = produce_origin(2);
 
@@ -430,7 +430,7 @@ async fn rejoin_waits_for_the_answers_first_frame() {
 
 			pair.server_transport.split_unis();
 			let mut sub = remote.track("video").unwrap().subscribe(None).await.unwrap();
-			let early = tokio::time::timeout(Duration::from_secs(1), sub.recv_group()).await;
+			let early = moq_net_sim::timeout(Duration::from_secs(1), sub.recv_group()).await;
 			assert!(
 				early.is_err(),
 				"{version}: the rejoining reader got the cached group {:?} first",
