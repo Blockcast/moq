@@ -1,9 +1,10 @@
-# [XS] First C++ package release
+# [S] First C++ package release
 
 ## Goal
 
-The first `cpp-v<version>` tag is pushed and `release-cpp.yml` publishes one
-`moq-cpp-<version>-<target>` archive per target to its GitHub release, plus the
+The OBS release path is dry-run nightly, then the first `cpp-v<version>` tag
+is pushed and `release-cpp.yml` publishes one `moq-cpp-<version>-<target>`
+archive per target to its GitHub release, plus the
 matching `obs-moq-v<version>` plugin release. A maintainer cuts it by hand
 once `main` reaches `release`; check with
 `gh release list --repo moq-dev/moq | grep cpp-v`.
@@ -19,9 +20,14 @@ last moq-c build until this tag. Decided when the C++ line landed on `main`
 Advanced settings or the dock's protocol and reconnect reason that the moq-c
 build had, so those parity quests gate this release.
 
-The `obs-build` job runs only after a tagged C++ release, so this tag is the
-first run of `just obs package --moq-release`. Watch it, and fix forward with
-a plugin version bump if the fetch or the archive layout is wrong.
+Before the tag, give the OBS release path a nightly dry run. `obs-build` in
+`release-cpp.yml` needs the tag-only `release` job, so the nightly
+`workflow_call` builds the C++ archives but never runs
+`just obs package --moq-release` against them. Add a local-archive override
+to `cpp/obs/CMakeLists.txt` beside the release-download branch, so the dry run
+links the build job's `moq-cpp-<version>-<target>` artifacts instead of a
+published release. Keep publication tag-only. Without it, the first tag is the
+first run of that path.
 
 ## Required
 

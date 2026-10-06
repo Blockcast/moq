@@ -91,7 +91,7 @@ blocks. The quests that gated m0 lines moved under them.
 - [Generated bindings end with a newline](/quest/m1/cpp-generated-newline.md) - the generator fork release lands, so the macOS OBS job builds again
 - [Client settings parity](/quest/m1/obs-client-config.md) - moq-ffi offers moq-c's client knobs, and the OBS Advanced settings get back the ones the C++ migration dropped
 - [Session report parity](/quest/m1/obs-session-report.md) - a session reports its negotiated draft and reconnect failures, so the OBS dock shows them again
-- [First C++ package release](/quest/m1/cpp-release.md) - the first `cpp-v*` tag publishes the C++ archives and the first OBS plugin built on them
+- [First C++ package release](/quest/m1/cpp-release.md) - the OBS release path is dry-run nightly, then the first `cpp-v*` tag publishes the C++ archives and the first OBS plugin built on them
 - [Catalog switch](/quest/m1/obs-catalog-switch.md) - a catalog update keeps OBS playback running until the replacement track is decoding
 - [OBS stats race test](/quest/m1/obs-stats-race.md) - a test against the generated bindings proves a retired session's stats are refused
 - [OBS publishes under epochs](/quest/m1/obs-epoch.md) - each OBS Start Streaming is a fresh epoch, through the generated C++
