@@ -90,7 +90,9 @@ These land with the next breaking release, not the 2026-09-23 train.
   `listen::Config::export_max_age`, and `DEFAULT_MAX_AGE` are `with_max_delay`,
   `with_export_max_delay`, `export_max_delay`, and `DEFAULT_MAX_DELAY`. In
   TypeScript, `Track.Subscription`'s `maxAge` is `maxDelay`, as are
-  `Container.Consumer`'s `maxAge` prop and `@moq/watch`'s `Sync.out.maxAge`.
+  `Container.Consumer`'s `maxAge` prop and `@moq/watch`'s `Sync.out.maxAge`;
+  JavaScript ignores an unknown `maxAge` key at runtime, so untyped callers
+  must rename it or get a zero budget.
   moq-ffi's `MoqSubscription`, `MoqAudioDecoderOutput`, and
   `MoqVideoDecoderOutput` take `max_delay_us` (each binding in its own casing),
   and so do C's `moq_subscription`, `moq_audio_decoder_output`,
@@ -98,6 +100,11 @@ These land with the next breaking release, not the 2026-09-23 train.
   `moq export fmp4`, `mkv`, `flv`, `h264`, `h265`, and `rtmp` take
   `--max-delay`, and refuse `--max-age`. `track::Info::max_age`,
   `MoqTrackInfo.max_age_us`, `moq import --max-age`, and `moq export ts --max-age` are unchanged, as is the wire.
+- **Opus mapping family lives only on `mapping`.**
+  `moq_mux::codec::opus::Config::mapping_family` is gone. Family 0 is
+  `mapping: None`; any other family is the mapping's own (`mapping.family()`).
+  Set `mapping` alone when building a surround head. The OpusHead bytes are
+  unchanged.
 
 ## Wire
 

@@ -937,7 +937,7 @@ pub struct Stdout {
 	pub mux_rate: Option<u64>,
 }
 
-/// Options shared by every stdout container sink.
+/// Options shared by the stdout container sinks other than `ts`.
 #[derive(usage::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct Container {
@@ -945,9 +945,9 @@ pub struct Container {
 	#[usage(long, default = "500ms")]
 	pub max_delay: crate::duration::Duration,
 
-	/// How long to wait for the broadcast to come back once it ends (e.g. `10s`).
-	/// `ts` only; the output stops while it is gone and resumes flagged as a break.
-	#[usage(long, default = "0s")]
+	/// Accepted only to refuse a nonzero value with a pointer to `ts`, the one format
+	/// that can mark where a returned broadcast restarts.
+	#[usage(long, default = "0s", hide = true)]
 	pub linger: crate::duration::Duration,
 
 	/// The released spelling of [`Self::max_delay`].
@@ -2117,8 +2117,12 @@ mod tests {
 			let Command::Play(play) = &cli.stages[0] else {
 				panic!("expected play")
 			};
-			let err = play.validate().unwrap_err().to_string();
-			assert!(err.contains(codec), "{err}");
+			if cfg!(feature = "vpx") {
+				play.validate().unwrap();
+			} else {
+				let err = play.validate().unwrap_err().to_string();
+				assert!(err.contains(codec), "{err}");
+			}
 		}
 
 		let cli = Invocation::try_parse_from([
