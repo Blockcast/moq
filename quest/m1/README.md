@@ -61,7 +61,6 @@ blocks. The quests that gated m0 lines moved under them.
 - [Untimed lite-07](/quest/m1/lite-untimed.md) - lite-07 carries an untimed track in both languages; lite-05/06 write send time
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Late lower groups](/quest/m1/lite-late-lower-group.md) - a moq-lite subscriber with a floor receives a group created below the first served one, as moq-transport does
-- [JSON stream budget](/quest/m1/json-stream-budget.md) - an oversized JSON stream record is refused without ending the log, and a JS subscribe to a gone track answers NotFound
 - [A watch and publish release ships assets()](/quest/m1/assets-release.md) - the release that lets the sites host the worklets
 - [Dogfood hosted worklets](/quest/m1/dogfood-assets.md) - moq.dev and the moq.pro dashboard host the worklets and call `assets()` after the release
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the second round of load-only failures, one quest per flake, fixed at the cause
