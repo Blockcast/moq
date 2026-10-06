@@ -1907,7 +1907,7 @@ impl Controller for Bbr3 {
     }
 
     /// The draft specifies no ECN response of its own, but CE marks MUST be treated as
-    /// congestion; see [`Self::handle_ce`]. Persistent congestion collapses the window to the
+    /// congestion; `handle_ce` responds to them. Persistent congestion collapses the window to the
     /// minimum, here BBR.MinPipeCwnd.
     /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-3.7>
     /// <https://datatracker.ietf.org/doc/html/rfc9002#section-7.6.2>
