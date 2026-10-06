@@ -202,20 +202,24 @@ function configured(): Promise<AudioEncoderConfig> {
 	});
 }
 
-// An Encoder wired to a fake capture feed, recording each written frame as [timestamp, payload bytes].
-async function setup(baseline = new Baseline(), codec?: Codec) {
+// An Encoder wired to a fake capture feed, recording each written frame as [timestamp, payload bytes]
+// and how many frames each group carries.
+async function setup(baseline = new Baseline(), codec?: Codec, groupDuration?: Time.Milli) {
 	const configuring = configured();
 
 	const track = new Moq.Track.Producer("audio").accept();
 	const written: [number, number][] = [];
+	const groups: number[] = [];
 	const writes = { onWrite: undefined as (() => void) | undefined };
 	const appendGroup = track.appendGroup.bind(track);
 	track.appendGroup = () => {
 		const group = appendGroup();
+		const index = groups.push(0) - 1;
 		const writeFrame = group.writeFrame.bind(group);
 		group.writeFrame = (frame) => {
 			const [timestamp, payload] = Moq.Varint.decode(frame.payload);
 			written.push([timestamp, payload.byteLength]);
+			groups[index]++;
 			writeFrame(frame);
 			writes.onWrite?.();
 		};
@@ -245,6 +249,7 @@ async function setup(baseline = new Baseline(), codec?: Codec) {
 		capture: capture as never,
 		enabled,
 		codec,
+		groupDuration,
 	});
 
 	const config = await configuring;
@@ -257,6 +262,7 @@ async function setup(baseline = new Baseline(), codec?: Codec) {
 		rendition,
 		feed,
 		written,
+		groups,
 		writes,
 		[Symbol.dispose]() {
 			encoder.close();
@@ -383,6 +389,43 @@ test("a push completing several frames keeps the encoder running", async () => {
 		[58_700, 1],
 		[78_700, 1],
 	]);
+});
+
+// The frame that reaches the minimum ends its group, and a timeline break closes the group early,
+// so the first frame after it opens the next one.
+test("a group duration packs frames until the minimum and restarts after a break", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	using env = await setup(new Baseline(), undefined, Time.Milli(100));
+	const { enabled, feed, written, groups, writes } = env;
+
+	let index = 0;
+	const push = async (count: number) => {
+		for (let i = 0; i < count; i++, index++) {
+			await feed.push({ timestamp: Time.Micro(20_000 + index * 20_000), channels: [new Float32Array(960)] });
+		}
+		await feed.drain();
+	};
+
+	await push(9); // seven written, two held
+
+	const marked = new Promise<void>((resolve) => {
+		writes.onWrite = resolve;
+	});
+	enabled.set(false);
+	await marked;
+	writes.onWrite = undefined;
+
+	const resumed = configured();
+	enabled.set(true);
+	await resumed;
+	await push(4); // a fresh AudioEncoder, so two written and two held
+
+	expect(written.map(([timestamp]) => timestamp)).toEqual([
+		20_000, 40_000, 60_000, 80_000, 100_000, 120_000, 140_000, 200_000, 200_000, 220_000,
+	]);
+	// 20-100 reaches 100ms on its fifth frame. The break ends 120-140 short of it, so the resumed
+	// frames start over after the marker rather than joining a group that is already closed.
+	expect(groups).toEqual([5, 2, 1, 2]);
 });
 
 test("passes an explicit Opus DTX request to the encoder", async () => {

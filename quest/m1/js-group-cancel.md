@@ -24,7 +24,3 @@ stopping one mid-stream still cancels with the code.
 ## Closes
 
 - [#4779](https://github.com/moq-dev/moq/issues/4779) - close this issue when the quest finishes
-
-## Related
-
-- [Audio group duration](/quest/m1/audio-group-duration.md) - fewer groups per audio track

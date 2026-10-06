@@ -61,6 +61,15 @@ Disabling a rendition (`muted` on the element) ends the audio timeline with
 a marker, so a viewer that stays subscribed, or joins during the pause, never
 plays the audio before it as live.
 
+Each audio frame is its own group by default, so a relay pays a stream and a
+group's bookkeeping per 20ms frame. `el.audio.groupDuration` sets a minimum
+per group instead, such as `Time.Milli(100)`: the frame that reaches it ends
+the group. Frames still forward as they are encoded, so this adds no latency,
+but loss gets coarser: a viewer that falls behind skips a whole group, and a
+lost frame holds back the rest of its group until it is retransmitted. A 60ms
+Opus `frameDuration` also cuts the group rate, without code, at the cost of
+encoder latency.
+
 `el.video.cut()` asks for a keyframe on top of the `keyframeInterval` cadence,
 for a resume, a recording cut, or a known tune-in moment. Requests coalesce into
 the next keyframe, and forced keyframes land at least 500ms apart.

@@ -79,6 +79,15 @@ and no platform encoder is wired in yet, so `Codec::Aac` is refused at
 construction on every host for now. Linux has no OS encoder, so it will stay
 that way there.
 
+Each packet is its own group by default, so a relay pays a stream and a
+group's bookkeeping per 20 ms Opus frame. `encode::Options::group_duration`
+sets a minimum per group instead, for every codec: the packet that reaches it
+closes the group. Packets still forward as they are encoded, so this adds no
+latency, but loss gets coarser: a subscriber that falls behind skips a whole
+group, and a lost packet holds back the rest of its group until it is
+retransmitted. A 60 ms Opus `Settings::frame_duration` also cuts the group
+rate, without code, at the cost of encoder latency.
+
 Highlights:
 
 - **`encode::Control`** advertises the track and opens the microphone only while someone listens. Stop, swap devices, and restart without changing the track subscribers know; read a level meter for the UI.
