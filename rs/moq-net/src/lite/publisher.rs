@@ -760,9 +760,6 @@ impl AnnounceRun {
 					let (update, active) = match event {
 						announce::Event::Start(update) | announce::Event::Update(update) => (update, true),
 						announce::Event::End(update) => (update, false),
-						// The marker only says the origin caught up; the peer learns the
-						// initial set's end from the version's own framing.
-						announce::Event::Live => continue,
 					};
 					let absolute = origin.absolute(&update.prefix);
 					let suffix = update.prefix;
@@ -798,9 +795,6 @@ impl AnnounceRun {
 					let (update, active) = match event {
 						announce::Event::Start(update) | announce::Event::Update(update) => (update, true),
 						announce::Event::End(update) => (update, false),
-						// The marker only says the origin caught up; the peer learns the
-						// initial set's end from the version's own framing.
-						announce::Event::Live => continue,
 					};
 					let absolute = origin.absolute(&update.prefix);
 					let suffix = update.prefix;
@@ -897,7 +891,6 @@ impl AnnounceRun {
 			let (update, active) = match next {
 				Some(announce::Event::Start(update) | announce::Event::Update(update)) => (update, true),
 				Some(announce::Event::End(update)) => (update, false),
-				Some(announce::Event::Live) => continue,
 				None => {
 					// The buffer is empty (flushed at the loop top), so FIN now and
 					// wait for the acknowledgement.
