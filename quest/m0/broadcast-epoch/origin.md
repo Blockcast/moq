@@ -49,5 +49,3 @@ Wire: none.
 ## Related
 
 - [Catalog track alias](/quest/m1/catalog-track-alias.md) - cross-broadcast catalog references, which must pick an epoch
-
-- [#2991](/quest/m1/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - a new epoch starts each track at sequence 0
