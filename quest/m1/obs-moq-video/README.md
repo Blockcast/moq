@@ -23,12 +23,11 @@ Decided in the 2026-09-30 audit: the Windows and Linux GPU decode paths and the 
 - [Video source replacement](/quest/m1/obs-moq-video/source.md) - remove the FFmpeg video decode and attempt macOS GPU delivery immediately, with a working CPU fallback on other platforms
 - [Audio playback](/quest/m1/obs-moq-video/audio-playback.md) - replace the FFmpeg audio decode with moq-audio
 - [Linux bundle](/quest/m1/obs-moq-video/linux-bundle.md) - attach a portable Linux x86_64 tarball to every obs-moq release once FFmpeg is gone
-- [Encoder presets](/quest/m1/obs-moq-video/presets.md) - define and measure shared low-latency, balanced, and quality policies
 - [Preset parity](/quest/m1/obs-moq-video/preset-parity.md) - audio stores and reports its preset like video, defaults to Balanced, and the preset claims hold
 - [Audio publishing](/quest/m1/obs-moq-video/audio-publish.md) - back an internal OBS Opus encoder with moq-audio
 - [Video publishing](/quest/m1/obs-moq-video/adapter.md) - back an internal OBS video encoder with moq-video and expose the combined opt-in mode
 - [Rate control](/quest/m1/obs-moq-video/rate-control.md) - the plugin reserves its bitrate and retunes the OBS encoder to the grant
-- [VP8/VP9 decoding](/quest/m1/obs-moq-video/vpx.md) - restore those playback codecs without an FFmpeg ABI dependency
+- [VP8/VP9 in OBS](/quest/m1/obs-moq-video/vpx-obs.md) - play VP8 and VP9 through moq-video's libvpx backend on every OBS platform
 
 ## Related
 
