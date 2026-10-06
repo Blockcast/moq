@@ -46,9 +46,13 @@ import {
 } from "./harness";
 import {
 	type CaptureState,
+	countedElapsed,
 	FAULTS,
+	gradedSamples,
+	jointStalls,
 	lateJoinStartsLive,
 	leakedPlayerStarted,
+	rateElapsed,
 	SAMPLE_MS,
 	SAMPLE_RATE,
 } from "./src/contract";
@@ -121,14 +125,29 @@ const percentile = (values: number[], p: number) => {
 	return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * p))];
 };
 
-/** Collect distinct samples from the player for `ms`, so a window can be measured after the fact. */
-async function collect(page: Page, errors: BrowserErrors, ms: number): Promise<PlayerState[]> {
-	const samples: PlayerState[] = [];
+/** A player sample, plus the publisher frame read beside it when the fixture page was sampled. */
+type Reading = PlayerState & { publisherFrame?: number };
+
+/**
+ * Collect distinct samples from the player for `ms`, so a window can be measured after the fact.
+ *
+ * `publisher`, when passed, is read on each new player sample. That frame clock is what separates
+ * a runner stall from playback that froze while the source kept painting.
+ */
+async function collect(page: Page, errors: BrowserErrors, ms: number, publisher?: Page): Promise<Reading[]> {
+	const samples: Reading[] = [];
 	const deadline = Date.now() + ms;
 	while (Date.now() < deadline) {
 		throwPageErrors(errors);
 		const sample = await readPlayerState(page).catch(() => undefined);
-		if (sample && sample.seq !== samples[samples.length - 1]?.seq) samples.push(sample);
+		if (sample && sample.seq !== samples[samples.length - 1]?.seq) {
+			const publisherFrame = publisher
+				? await readFixtureState(publisher)
+						.then((state) => state.frameId)
+						.catch(() => undefined)
+				: undefined;
+			samples.push(publisherFrame === undefined ? sample : { ...sample, publisherFrame });
+		}
 		await sleep(SAMPLE_MS / 2);
 	}
 	throwPageErrors(errors);
@@ -169,13 +188,14 @@ async function waitFrozen(page: Page, errors: BrowserErrors, assertion: string, 
 // One sample as a line: elapsed time, the frame on the canvas, the tone step heard against the one
 // that frame belongs to, how far the tone stood above the noise floor, and whether audio was
 // arriving at all, which separates a silent player from a publisher that stopped sending.
-function traceLine(sample: PlayerState, start: number): string {
+function traceLine(sample: Reading, start: number): string {
 	const step = sample.frameId === undefined ? "?" : Pattern.expectedStep(sample.frameId);
 	const margin = sample.toneDb !== undefined && sample.noiseDb !== undefined ? sample.toneDb - sample.noiseDb : 0;
+	const pub = sample.publisherFrame === undefined ? "" : ` pub=${sample.publisherFrame}`;
 	return (
 		`    +${((sample.at - start) / 1000).toFixed(2)}s frame=${sample.frameId ?? "-"} ` +
 		`step=${sample.toneStep ?? "-"}/${step} tone=${margin.toFixed(0)}dB ${sample.toneHz?.toFixed(0) ?? "-"}Hz ` +
-		`paused=${sample.paused} delay=${sample.delay}ms audio=${sample.audioBytes}B${sample.audioStalled ? " stalled" : ""}`
+		`paused=${sample.paused} delay=${sample.delay}ms audio=${sample.audioBytes}B${sample.audioStalled ? " stalled" : ""}${pub}`
 	);
 }
 
@@ -186,7 +206,7 @@ function traceLine(sample: PlayerState, start: number): string {
  * the tone off the graph root that feeds the speakers. A failure prints every reading in the window,
  * so the summary can be traced back to the readings behind it.
  */
-function assertMedia(samples: PlayerState[], label: string): void {
+function assertMedia(samples: Reading[], label: string): void {
 	try {
 		measure(samples, label);
 	} catch (err) {
@@ -197,7 +217,7 @@ function assertMedia(samples: PlayerState[], label: string): void {
 	}
 }
 
-function measure(samples: PlayerState[], label: string): void {
+function measure(samples: Reading[], label: string): void {
 	check(samples.length >= 10, "sampling", () => `${label}: only ${samples.length} samples in the window`);
 
 	const readable = samples.filter((s) => s.frameId !== undefined);
@@ -207,9 +227,29 @@ function measure(samples: PlayerState[], label: string): void {
 		() => `${label}: ${readable.length}/${samples.length} presented frames carried a readable fixture pattern`,
 	);
 
+	const stalls = jointStalls(samples);
+	const runnerMs = stalls
+		.filter((stall) => stall.kind === "runner")
+		.reduce((sum, stall) => sum + (stall.to - stall.from), 0);
+	const pathMs = stalls
+		.filter((stall) => stall.kind === "path")
+		.reduce((sum, stall) => sum + (stall.to - stall.from), 0);
+	// The summary line is what a passing nightly keeps. The trace itself is only printed on failure.
+	const runnerNote = runnerMs > 0 ? `, runner stall ${(runnerMs / 1000).toFixed(2)}s` : "";
+	const excused = runnerMs > 0 ? `; runner stall ${(runnerMs / 1000).toFixed(2)}s` : "";
+
+	check(
+		pathMs === 0,
+		"video progress",
+		() =>
+			`${label}: both tracks sat still for ${(pathMs / 1000).toFixed(2)}s while the publisher clock moved${excused}`,
+	);
+
 	const first = readable[0];
 	const last = readable[readable.length - 1];
-	const elapsed = (last.at - first.at) / 1000;
+	// A runner stall is the machine, not the picture. A window that is mostly stalled keeps the raw clock and fails.
+	const elapsedMs = rateElapsed(last.at - first.at, countedElapsed(first.at, last.at, stalls));
+	const elapsed = elapsedMs / 1000;
 	const advance = (last.frameId ?? 0) - (first.frameId ?? 0);
 	const rate = advance / elapsed;
 	const want = Pattern.FPS * MIN_RATE;
@@ -217,7 +257,7 @@ function measure(samples: PlayerState[], label: string): void {
 		rate >= want,
 		"video progress",
 		() =>
-			`${label}: presented ${advance} frames in ${elapsed.toFixed(1)}s, ${rate.toFixed(1)}fps against a ${want.toFixed(1)}fps floor`,
+			`${label}: presented ${advance} frames in ${elapsed.toFixed(1)}s, ${rate.toFixed(1)}fps against a ${want.toFixed(1)}fps floor${excused}`,
 	);
 
 	const back = readable.findIndex((s, i) => i > 0 && (s.frameId ?? 0) < (readable[i - 1].frameId ?? 0));
@@ -228,14 +268,16 @@ function measure(samples: PlayerState[], label: string): void {
 			`${label}: presented frame went backwards, ${readable[back - 1]?.frameId} then ${readable[back]?.frameId}`,
 	);
 
-	const toned = samples.filter((s) => s.toneStep !== undefined);
+	const graded = gradedSamples(samples, stalls);
+	const toned = graded.filter((s) => s.toneStep !== undefined);
 	check(
-		toned.length >= samples.length * AGREEMENT,
+		toned.length >= graded.length * AGREEMENT,
 		"audio tone",
-		() => `${label}: ${toned.length}/${samples.length} samples carried the fixture tone above the noise floor`,
+		() =>
+			`${label}: ${toned.length}/${graded.length} samples carried the fixture tone above the noise floor${excused}`,
 	);
 
-	const skews = samples
+	const skews = graded
 		.filter((s) => s.frameId !== undefined && s.toneStep !== undefined)
 		.map((s) => Pattern.stepSkew(s.toneStep as number, Pattern.expectedStep(s.frameId as number)));
 	check(skews.length > 0, "audio/video sync", () => `${label}: no sample carried both a frame and a tone`);
@@ -259,7 +301,7 @@ function measure(samples: PlayerState[], label: string): void {
 	);
 	console.error(
 		`  ${label}: ${rate.toFixed(1)}fps presented over ${advance} frames, tone ${margin.toFixed(0)}dB above the floor, ` +
-			`skew median ${median.toFixed(0)}ms p95 ${p95.toFixed(0)}ms (browser output, not a speaker)`,
+			`skew median ${median.toFixed(0)}ms p95 ${p95.toFixed(0)}ms${runnerNote} (browser output, not a speaker)`,
 	);
 }
 
@@ -519,7 +561,7 @@ try {
 		predicate: (state) => state.audioContext === "running",
 	});
 
-	assertMedia(await collect(player, playerErrors, WINDOW_MS), "cold start");
+	assertMedia(await collect(player, playerErrors, WINDOW_MS, publisher), "cold start");
 
 	// ── pause and resume ─────────────────────────────────────────────────────
 	if (wants("pause")) {
@@ -562,7 +604,7 @@ try {
 			predicate: (state) => !state.paused && (state.frameId ?? 0) > paused,
 		});
 		console.error(`  resumed ${(resumed.frameId ?? 0) - paused} frames past the pause`);
-		assertMedia(await collect(player, playerErrors, WINDOW_MS), "after resume");
+		assertMedia(await collect(player, playerErrors, WINDOW_MS, publisher), "after resume");
 	}
 
 	// ── unsubscribe and rejoin ───────────────────────────────────────────────
@@ -583,7 +625,7 @@ try {
 			description: `the presented frame to move past the ${left} it stopped on`,
 			predicate: (state) => (state.frameId ?? 0) > left,
 		});
-		assertMedia(await collect(player, playerErrors, WINDOW_MS), "after rejoin");
+		assertMedia(await collect(player, playerErrors, WINDOW_MS, publisher), "after rejoin");
 	}
 
 	// ── detach and reattach ──────────────────────────────────────────────────
@@ -624,7 +666,7 @@ try {
 			description: `the presented frame to move past the ${busy.frameId} showing before the detach`,
 			predicate: (state) => (state.frameId ?? 0) > (busy.frameId ?? 0),
 		});
-		assertMedia(await collect(player, playerErrors, WINDOW_MS), "after reattach");
+		assertMedia(await collect(player, playerErrors, WINDOW_MS, publisher), "after reattach");
 	}
 
 	// ── publisher stop and same-path republish ───────────────────────────────
@@ -649,7 +691,7 @@ try {
 			predicate: (state) => state.frameId !== undefined && state.frameId < (before.frameId ?? 0),
 		});
 		console.error(`  recovered at frame ${recovered.frameId}, restarted from ${before.frameId}`);
-		assertMedia(await collect(player, playerErrors, WINDOW_MS), "after republish");
+		assertMedia(await collect(player, playerErrors, WINDOW_MS, publisher), "after republish");
 	}
 
 	// ── late join ────────────────────────────────────────────────────────────
@@ -676,8 +718,10 @@ try {
 			() =>
 				`joined at frame ${joined.frameId}, timestamp ${joined.videoTimestamp}ms before the current GOP's ${live.timestamp}ms keyframe`,
 		);
-		console.error(`  joined at frame ${joined.frameId}, timestamp ${joined.videoTimestamp}ms, current GOP began at ${live.timestamp}ms`);
-		assertMedia(await collect(player, playerErrors, WINDOW_MS), "late join");
+		console.error(
+			`  joined at frame ${joined.frameId}, timestamp ${joined.videoTimestamp}ms, current GOP began at ${live.timestamp}ms`,
+		);
+		assertMedia(await collect(player, playerErrors, WINDOW_MS, publisher), "late join");
 	}
 
 	if (wants("capture-denial")) await captureDenial(`${broadcast}-capture.hang`);

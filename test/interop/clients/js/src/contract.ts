@@ -183,6 +183,129 @@ export type Sample = {
 	resources: Resources;
 };
 
+/**
+ * Both tracks sitting still this long is a freeze.
+ *
+ * Shorter than the one-second pause check, and long enough that a slow sample
+ * is not one. A 0.4s hole is the freeze the nightly traces were being read for.
+ */
+export const JOINT_STALL_MS = 400;
+
+/** One player reading, plus the publisher's own frame clock when it was sampled. */
+export type JointSample = {
+	/** `performance.now()` when the player sample was taken, in milliseconds. */
+	at: number;
+	/** Presented fixture frame. Absent when the canvas is not the fixture. */
+	frameId?: number;
+	/** Encoded audio bytes the player has received. */
+	audioBytes: number;
+	/** Frame the publisher had painted. Absent when that page was not read. */
+	publisherFrame?: number;
+};
+
+/** A stretch where the presented frame and the received audio both sat still. */
+export type JointStall = {
+	/** `runner` when the page or the publisher clock stopped. `path` when only playback did. */
+	kind: "runner" | "path";
+	/** `at` of the first sample in the stretch, in milliseconds. */
+	from: number;
+	/** `at` of the last sample in the stretch, in milliseconds. */
+	to: number;
+};
+
+/**
+ * Stretches where one presented frame and one audio byte count both sit still.
+ *
+ * `runner` when the sample clock jumped, because the page was not scheduled, or
+ * when the publisher's own frame clock sat still with the tracks. `path` when
+ * that clock kept moving: the relay or the player. An unread publisher clock is
+ * `path` too. The freeze is not excused without evidence the source stopped.
+ */
+export function jointStalls(samples: readonly JointSample[], minMs = JOINT_STALL_MS): JointStall[] {
+	const stalls: JointStall[] = [];
+	let i = 0;
+	while (i < samples.length) {
+		const start = samples[i];
+		if (start.frameId === undefined) {
+			i++;
+			continue;
+		}
+		let j = i;
+		while (
+			j + 1 < samples.length &&
+			samples[j + 1].frameId === start.frameId &&
+			samples[j + 1].audioBytes === start.audioBytes
+		) {
+			j++;
+		}
+		const end = samples[j];
+		if (j > i && end.at - start.at >= minMs) {
+			// A hole this long means the page was not scheduled. That names the runner
+			// even when the publisher frame moved across the hole.
+			let samplerGap = false;
+			for (let k = i; k < j; k++) {
+				if (samples[k + 1].at - samples[k].at >= minMs) samplerGap = true;
+			}
+			const pubStart = start.publisherFrame;
+			const pubEnd = end.publisherFrame;
+			// One frame of publisher motion is the gap between the two reads, not a clock that kept running.
+			const publisherStopped =
+				pubStart !== undefined && pubEnd !== undefined && pubEnd >= pubStart && pubEnd - pubStart <= 1;
+			stalls.push({
+				kind: samplerGap || publisherStopped ? "runner" : "path",
+				from: start.at,
+				to: end.at,
+			});
+		}
+		i = j + 1;
+	}
+	return stalls;
+}
+
+/**
+ * Wall time minus runner stalls, in milliseconds.
+ *
+ * A path stall stays in the elapsed time. The picture sitting still while the
+ * source moved is a playback failure.
+ */
+export function countedElapsed(firstAt: number, lastAt: number, stalls: readonly JointStall[]): number {
+	let elapsed = lastAt - firstAt;
+	for (const stall of stalls) {
+		if (stall.kind !== "runner") continue;
+		const from = Math.max(stall.from, firstAt);
+		const to = Math.min(stall.to, lastAt);
+		if (to > from) elapsed -= to - from;
+	}
+	return elapsed;
+}
+
+/**
+ * Elapsed time the frame rate uses.
+ *
+ * Runner stalls come out once a second of the window is left. Below that the
+ * stall ate the measurement, and the raw clock has to fail it.
+ */
+export function rateElapsed(rawMs: number, countedMs: number, minMs = 1000): number {
+	return countedMs >= minMs ? countedMs : rawMs;
+}
+
+/**
+ * Samples a tone or sync agreement counts.
+ *
+ * A runner stall's interior is the machine, not the player. Too little left is
+ * a window that never played, so the whole set is graded and the silence still fails.
+ */
+export function gradedSamples<T extends { at: number }>(
+	samples: readonly T[],
+	stalls: readonly JointStall[],
+	min = 10,
+): readonly T[] {
+	const kept = samples.filter(
+		(sample) => !stalls.some((stall) => stall.kind === "runner" && sample.at > stall.from && sample.at < stall.to),
+	);
+	return kept.length >= min ? kept : samples;
+}
+
 // ── the refused session ─────────────────────────────────────────────────────
 
 /** How a refused session ended, as `WebTransport.closed` reported it to the page. */

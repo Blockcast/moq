@@ -146,6 +146,14 @@ median, and audio/video skew must stay within one 200ms tone step for 90% of
 samples. One step is the floor set by the analyser window straddling a step
 boundary and the canvas holding a frame up to one frame old.
 
+A freeze of both tracks is not one failure. When the player's sample clock
+jumps by 400ms or more and both the presented frame and the received audio sit
+still across that jump, or the publisher's own frame clock sits still with
+them, the window names a runner stall and leaves it out of the playback rate
+and tone. The picture and the tone staying still while the publisher clock
+keeps moving still fails as playback: that is the relay or the player, and the
+trace's `pub=` column is what separates them.
+
 The run ends with negative controls. Each injects a defect in the fixture and
 names the assertion that has to catch it, and passes only by failing there:
 
