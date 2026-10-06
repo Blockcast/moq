@@ -345,6 +345,12 @@ impl Subscriber {
 		self.reader().raise_start_to(start)
 	}
 
+	/// Move the local read floor to `start`, including downward.
+	/// See [`track::Subscriber::start_at`].
+	pub(crate) fn start_at(&mut self, start: u64) {
+		self.reader().start_at(start)
+	}
+
 	/// Cap local reads at `end`; see [`track::Subscriber::set_groups`].
 	pub(crate) fn end_at(&mut self, end: Cap) {
 		self.reader().end_at(end)
@@ -746,6 +752,18 @@ impl Reader {
 		for copy in &mut self.copies {
 			if let Sub::Ready(sub) = &mut copy.sub {
 				sub.raise_start_to(start);
+			}
+		}
+	}
+
+	/// Assign the local floor. A copy still waiting on its info takes the floor
+	/// from the mirrored subscription when it resolves; one already reading has
+	/// to be moved, or a group it skipped stays skipped.
+	fn start_at(&mut self, start: u64) {
+		self.groups.0 = start;
+		for copy in &mut self.copies {
+			if let Sub::Ready(sub) = &mut copy.sub {
+				sub.start_at(start);
 			}
 		}
 	}
