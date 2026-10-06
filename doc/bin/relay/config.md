@@ -29,6 +29,7 @@ root = ["peer-ca.pem"]               # Optional: CAs for client certs (mTLS), re
 
 [listen.tcp]                         # Plaintext qmux over TCP for trusted local workers.
 bind = "127.0.0.1:4444"
+# tls = true                         # Or: qmux over TLS (tls://) with the listen certificate, no client certs.
 
 [listen.unix]                        # Plaintext qmux over a Unix socket, gated by peer credentials.
 bind = "/run/moq/internal.sock"
@@ -151,7 +152,7 @@ See [Authentication](/bin/relay/auth).
 
 ```toml
 [cluster]
-connect = ["https://us-east.example.com/?cost=10"]   # Peers to dial. ?cost prices the link, or use {url, cost, egress, token} objects.
+connect = ["https://us-east.example.com/?cost=10"]   # Peers to dial. ?cost prices the link, or use {url, cost, egress, token, upstream} objects.
 node = "https://us-west.example.com/"                 # This relay's own URL.
 connect_api = "https://api.example.com/peers"        # Or fetch the peer list (JSON array of URLs and/or objects) live.
 token = "cluster.jwt"                                 # JWT for dials without an inline ?jwt=.
@@ -220,7 +221,7 @@ the task running for as long as you hold it.
 ```toml
 [stats]
 enabled = true
-prefix = ".stats"                    # Broadcasts appear under <prefix>/node/<node>/@<epoch>.
+prefix = ".stats"                    # Broadcasts appear under <prefix>/node/<node>.
 interval = 1                         # Seconds between snapshots.
 node = "sjc/1"                       # Disambiguates relays sharing a cluster.
 depth = 1                            # Also bucket by the first N path segments (per tenant).
@@ -231,8 +232,9 @@ Each node publishes `publisher.json`, `subscriber.json`, and `sessions.json`
 tracks (plus compressed `.json.z` twins) of cumulative counters per broadcast
 and auth root, split by a **tier** label chosen by the auth server's grant or
 `--cluster-tier`, which is what makes billing per customer or per region
-possible. Each run, and each group returning after its linger, announces a
-fresh `@<epoch>`, so a restart never reuses a broadcast name.
+possible. Each run, and each group returning after its linger, announces under
+a fresh [epoch](/concept/moq-lite#publisher-epochs) on its route, so a restart
+is a new broadcast at the same path.
 [Stats](/concept/stats) describes the paths, tracks, and encodings;
 read them with the [`moq-stats`](https://docs.rs/moq-stats) crate.
 

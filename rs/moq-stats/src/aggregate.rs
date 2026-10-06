@@ -1,7 +1,7 @@
 //! The aggregating half: fold a group's per-node stats broadcasts into one view.
 //!
 //! A single-broadcast [`Consumer`](crate::Consumer) reads one
-//! `<prefix>/<group>/node/<node>/@<epoch>` broadcast. This reader watches an origin's
+//! `<prefix>/<group>/node/<node>` broadcast. This reader watches an origin's
 //! announce stream for *every* node broadcast in a group and folds their
 //! cumulative counters into one merged frame per `(tier, role)`, so a downstream
 //! sees a project's whole live traffic as if it came from a single node.
@@ -14,7 +14,7 @@ use std::time::Duration;
 use moq_net::kio::{self, Pending, Waiter};
 use moq_net::stats::{Presence, Role, Tier, Traffic};
 use moq_net::track::Subscribing;
-use moq_net::{PathOwned, origin};
+use moq_net::{Epoch, PathOwned, origin};
 use web_async::time::Instant;
 
 use crate::{Result, SessionsFrame, TrafficFrame, parse_node_path, sessions_track, traffic_track};
@@ -42,8 +42,9 @@ pub struct Config {
 	pub compression: bool,
 	/// How long a departed node's traffic waits for its path to return before
 	/// folding into the retired total (default 10 minutes). A return within it
-	/// resumes the node's own counters; a return after it with counters intact
-	/// counts its earlier traffic twice, so size this above reconnect times.
+	/// under the same epoch (or again without one) resumes the node's own
+	/// counters; a return after it with counters intact counts its earlier
+	/// traffic twice, so size this above reconnect times.
 	pub grace: Duration,
 }
 
@@ -102,12 +103,14 @@ impl Default for Config {
 /// boot-lifetime counters intact never looks like new traffic. After the grace,
 /// a departed node's contribution folds into one retired total and the node is
 /// forgotten, so memory follows live nodes and the keys ever reported, not
-/// every node ever seen. Each epoch is its own node: a restarted producer, or a
-/// group returning from idle, announces a new epoch whose counters add to the
-/// old epoch's kept contribution instead of regressing it. Only a producer that
-/// predates epochs and returns within the grace with a lower counter regresses
-/// the merged counter. Presence is not sticky: a departed node stops counting
-/// sessions immediately.
+/// every node ever seen. Each route epoch is its own node: a restarted
+/// producer, or a group returning from idle, announces a new epoch whose
+/// counters add to the old epoch's kept contribution instead of regressing it.
+/// Only a route without an epoch (an older producer, or a session older than
+/// moq-lite 07) returning within the grace with a lower counter regresses the
+/// merged counter, the same reset contract a single node's own restart
+/// follows. Presence is not sticky: a departed node stops counting sessions
+/// immediately.
 pub struct Consumer {
 	origin: origin::Consumer,
 	config: Config,
@@ -300,8 +303,8 @@ struct Merged<V: Mergeable> {
 	name: String,
 	config: moq_json::snapshot::consumer::Config,
 	/// One entry per live or recently departed node broadcast, keyed by
-	/// absolute announced path, so each epoch is its own entry.
-	nodes: HashMap<PathOwned, Node<V>>,
+	/// absolute announced path and route epoch, so each epoch is its own entry.
+	nodes: HashMap<(PathOwned, Option<Epoch>), Node<V>>,
 	/// How long a departed node waits before folding into `retired`.
 	grace: Duration,
 	/// The summed last frames of every node whose grace elapsed.
@@ -393,6 +396,12 @@ impl<V: Mergeable> Merged<V> {
 		if parse_node_path(&self.prefix, self.depth, &absolute).is_none() {
 			return false;
 		}
+		// A newer epoch replaces the old one with an end then a start, so an
+		// epoch never changes under a live entry. That end stops the old entry's
+		// reader before a frame of the new epoch can reach it: the origin queues
+		// the announce change before it ends the old subscription, and announces
+		// drain ahead of the readers.
+		let key = (absolute, update.route.epoch);
 
 		if active {
 			// A route update on a node already tracked (a reprice, or a takeover
@@ -402,7 +411,7 @@ impl<V: Mergeable> Merged<V> {
 			// node re-arms here, since a fresh route is new evidence that a
 			// re-resolve could succeed. A sticky contribution carries across the
 			// re-arm, holding the total until a fresh frame replaces it.
-			match self.nodes.entry(absolute) {
+			match self.nodes.entry(key) {
 				Entry::Occupied(mut entry) => {
 					let node = entry.get_mut();
 					// A return after the grace starts over, even when this announce
@@ -428,7 +437,7 @@ impl<V: Mergeable> Merged<V> {
 			// Unannounce: keep the cumulative totals, retire the live gauges, and
 			// stop reading. The entry stays so a reannounce within the grace
 			// re-arms it.
-			match self.nodes.get_mut(&absolute) {
+			match self.nodes.get_mut(&key) {
 				Some(node) => {
 					node.departed = Some(Instant::now());
 					node.depart()
@@ -438,7 +447,7 @@ impl<V: Mergeable> Merged<V> {
 		} else {
 			// A gauge drops its contribution, and its entry, so a departed node
 			// stops counting and its path is not retained.
-			self.nodes.remove(&absolute).is_some_and(|old| old.last.is_some())
+			self.nodes.remove(&key).is_some_and(|old| old.last.is_some())
 		}
 	}
 
@@ -583,7 +592,7 @@ mod tests {
 
 	/// A stats producer publishing one node's broadcasts on `origin`, grouped at
 	/// depth 1 (so feeding a broadcast under `<group>/...` announces
-	/// `.stats/<group>/node/<node>/@<epoch>`).
+	/// `.stats/<group>/node/<node>`).
 	fn node_producer(origin: &origin::Producer, node: &str) -> Producer {
 		Producer::new(
 			produce::Config::new()
@@ -673,8 +682,8 @@ mod tests {
 	/// A hand-published node broadcast at `.stats/<group>/node/<node>` with a
 	/// plain default-tier traffic track, so a test controls the exact frames and
 	/// can fail one node's reader alone (the registry-driven producer only
-	/// publishes whole broadcasts). Dropping it unannounces the node, and a new
-	/// one at the same path is that node reconnecting with its epoch intact.
+	/// publishes whole broadcasts). Its route carries no epoch, so a new one at
+	/// the same path is that node returning. Dropping it unannounces the node.
 	#[allow(dead_code)]
 	struct NodeBroadcast {
 		source: broadcast::Producer,
@@ -812,10 +821,45 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn legacy_restart_regresses_the_total() {
-		// A producer that predates epochs returns at the same path with a fresh
-		// counter: it replaces its contribution wholesale, and the total
-		// regresses once, the fresh-segment contract.
+	async fn replaced_epoch_keeps_its_own_counters() {
+		// A node restarts while its old instance is still announced. The newer
+		// epoch replaces the old one at the same path; the old entry keeps its
+		// last contribution and never reads the new epoch, so nothing counts
+		// twice while the old instance keeps publishing.
+		let origin = produce_origin();
+		let old_a = node_producer(&origin, "a");
+		let node_b = node_producer(&origin, "b");
+
+		let _old_fa = feed(&old_a, Tier::default(), "acme", "acme/room", 100).await;
+		let _fb = feed(&node_b, Tier::default(), "acme", "acme/room", 40).await;
+		drive_tick().await;
+
+		let agg = Consumer::new(origin.consume(), Config::new().with_depth(1).with_grace(GRACE));
+		let mut traffic = agg.traffic(&Tier::default(), Role::Publisher);
+		read_until_bytes(&mut traffic, "acme/room", 140).await;
+
+		let new_a = node_producer(&origin, "a");
+		let _new_fa = feed(&new_a, Tier::default(), "acme", "acme/room", 30).await;
+		drive_tick().await;
+
+		let frame = read_monotonic_until(&mut traffic, "acme/room", 140, 170).await;
+		assert_eq!(frame.get("acme/room").expect("entry").bytes, 170, "100 + 30 + 40");
+
+		for _ in 0..3 {
+			drive_tick().await;
+			if let Some(frame) = settle(&mut traffic).await {
+				assert_eq!(frame.get("acme/room").expect("entry").bytes, 170, "counted once");
+			}
+		}
+		assert_eq!(traffic.inner.nodes.len(), 3, "one entry per epoch");
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn unversioned_restart_regresses_the_total() {
+		// A node whose route carries no epoch (an older producer, or a session
+		// older than moq-lite 07) returns at the same path with a fresh counter:
+		// it replaces its contribution wholesale, and the total regresses once,
+		// the fresh-segment contract.
 		let origin = produce_origin();
 		let mut node_a = NodeBroadcast::new(&origin, "acme", "a");
 		let mut node_b = NodeBroadcast::new(&origin, "acme", "b");
@@ -831,6 +875,7 @@ mod tests {
 		let mut node_a = NodeBroadcast::new(&origin, "acme", "a");
 		node_a.publish("acme/room", 30);
 
+		// An earlier frame may retire A's live gauges first.
 		loop {
 			let frame = traffic.next().await.expect("read").expect("frame");
 			if frame.get("acme/room").map(|t| t.bytes) == Some(70) {

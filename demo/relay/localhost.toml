@@ -28,10 +28,10 @@ public = "**"
 
 # Publish a single per-node stats broadcast on the cluster origin:
 #
-#   .stats/node/local/host/@<epoch>
+#   .stats/node/local/host
 #
-# under a fresh epoch each run, carrying publisher.json, subscriber.json, and
-# sessions.json tracks. See doc/bin/relay/config.md for the field semantics.
+# carrying publisher.json, subscriber.json, and sessions.json tracks. See
+# doc/bin/relay/config.md for the field semantics.
 [stats]
 enabled = true
 

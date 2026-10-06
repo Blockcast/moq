@@ -14,9 +14,9 @@ use serde::{Deserialize, Serialize};
 ///
 /// Set `enabled = true` to attach a [`moq_stats::Producer`] to every session
 /// the relay accepts (and every cluster dial). The producer publishes a single
-/// `<prefix>/node/<node>/@<epoch>` broadcast (or `<prefix>/node/@<epoch>` when
-/// [`Self::node`] is unset) on the cluster origin, under a fresh epoch each run.
-/// Each broadcast carries plain `.json` tracks
+/// `<prefix>/node/<node>` broadcast (or `<prefix>/node` when [`Self::node`] is
+/// unset) on the cluster origin, under a fresh epoch each run. Each broadcast
+/// carries plain `.json` tracks
 /// (a JSON map of broadcast path to a cumulative counter snapshot per frame)
 /// plus compressed `.json.z` siblings; see `moq_stats` for the wire format and
 /// per-field semantics.
@@ -56,8 +56,8 @@ pub struct Config {
 
 	/// Node identifier appended to the advertised stats path to disambiguate
 	/// broadcasts when multiple relays share a cluster origin. Without this,
-	/// peer relays publish under `<prefix>/node/@<epoch>` and a reader can't
-	/// tell which epoch belongs to which relay.
+	/// peer relays would publish to the same `<prefix>/node` path and the
+	/// origin's single-source delivery would drop all but one.
 	///
 	/// May be multi-segment (e.g. `sjc/1`, `sjc/2`) when a region has multiple
 	/// hosts; the segments nest under a shared region key on the advertised
@@ -66,12 +66,11 @@ pub struct Config {
 	pub node: Option<String>,
 
 	/// Number of leading broadcast-path segments to bucket stats by, one
-	/// broadcast per bucket at `<prefix>/<group>/node/<node>/@<epoch>`. Defaults
-	/// to 0: a single `<prefix>/node/<node>/@<epoch>` broadcast for the whole
-	/// node. Set to 1 to publish a per-first-segment broadcast (e.g. per
-	/// tenant), so a consumer can announce-scope to just that group rather than
-	/// slurping every node's full stats. See
-	/// [`moq_stats::produce::Config::depth`].
+	/// broadcast per bucket at `<prefix>/<group>/node/<node>`. Defaults to 0: a
+	/// single `<prefix>/node/<node>` broadcast for the whole node. Set to 1 to
+	/// publish a per-first-segment broadcast (e.g. per tenant), so a consumer can
+	/// announce-scope to just that group rather than slurping every node's full
+	/// stats. See [`moq_stats::produce::Config::depth`].
 	#[usage(
 		long = "stats-depth",
 		env = "MOQ_STATS_DEPTH",

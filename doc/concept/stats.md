@@ -20,23 +20,25 @@ it. Traffic under the prefix is never counted, so serving stats doesn't
 generate more stats.
 
 ```text
-<prefix>/node/<node>/@<epoch>              depth 0: one broadcast per node
-<prefix>/<group>/node/<node>/@<epoch>      depth N: one broadcast per group per node
+<prefix>/node/<node>               depth 0: one broadcast per node
+<prefix>/<group>/node/<node>       depth N: one broadcast per group per node
 ```
 
 - `<node>` tells relays sharing a cluster apart. It may span several segments
-  (`sjc/1`), and is omitted along with its slash when unset:
-  `<prefix>/node/@<epoch>`.
-- `@<epoch>` is a [publisher epoch](/concept/moq-lite#publisher-epochs), minted
-  each time the broadcast is announced. A restarted node or a group returning
-  from idle publishes under a new name, so no relay serves it groups cached
-  under the old one. A reader treats each epoch as its own set of counters.
+  (`sjc/1`), and is omitted along with its slash when unset: `<prefix>/node`.
 - `<group>` is the first `depth` segments of each broadcast path (for traffic)
   or auth root (for sessions), so a consumer can scope an announce to one
   tenant. A path shorter than `depth` groups under all of its segments.
 - The literal `node` segment leaves room for sibling categories under the same
   prefix, so a consumer skips any path without `node` where it expects one. A
   group segment literally named `node` is ambiguous; don't use one.
+
+Each announcement carries a fresh [publisher epoch](/concept/moq-lite#publisher-epochs)
+on its route, so a restarted node or a group returning from idle is a new
+broadcast at the same path: it replaces the old one, and no relay serves it
+groups cached under the old epoch. A reader treats each epoch as its own set of
+counters. The epoch rides moq-lite 07 announcements; over older versions and
+moq-transport a reader sees the same change as an end and a start at the path.
 
 At depth 0 the broadcast stays announced for the producer's life. At depth
 1 or more, a group's broadcast is announced while that group has entries, and
@@ -141,9 +143,9 @@ count is started minus ended. A frame never shows ended above started.
 A new epoch starts every counter from zero, so a reader summing a node over
 time adds each epoch's counters rather than diffing across them. Within one
 epoch, a counter going **down** means the entry was dropped and re-created.
-Treat it as the start of a fresh segment rather than a negative rate. A relay
-that predates epochs publishes without the `@<epoch>` segment, and a counter
-going down there also means it restarted.
+Treat it as the start of a fresh segment rather than a negative rate. On a
+route without an epoch (an older relay, or a session older than moq-lite 07),
+a counter going down also means the node restarted.
 
 A reader ignores unknown fields, so a newer relay can add counters, and
 defaults a missing field to zero, so it can read an older relay.
