@@ -119,7 +119,5 @@ pub use version::*;
 // Re-export the bytes crate
 pub use bytes;
 
-// Re-export the transport trait, since it bounds the Client/Server entry points.
-
 // Re-export the kio crate, since it appears in the public API (e.g. poll_* waiters).
 pub use kio;
