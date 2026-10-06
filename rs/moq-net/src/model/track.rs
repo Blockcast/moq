@@ -1351,7 +1351,11 @@ impl TrackState {
 
 	/// The newest live group the cache holds, and the number of frames it has so far.
 	fn newest(&self) -> Option<(u64, u64)> {
-		let (sequence, slot) = self.lookup.iter().rev().find(|(_, slot)| slot.visible && !slot.pending)?;
+		let (sequence, slot) = self
+			.lookup
+			.iter()
+			.rev()
+			.find(|(_, slot)| slot.visible && !slot.pending)?;
 		Some((*sequence, slot.group.frame_count() as u64))
 	}
 
