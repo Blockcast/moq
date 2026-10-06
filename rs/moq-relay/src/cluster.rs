@@ -2007,6 +2007,18 @@ mod tests {
 		}
 	}
 
+	/// The path, epoch included, that the stats broadcast of node `test` is announced under.
+	async fn stats_path(consumer: &origin::Consumer) -> moq_net::PathOwned {
+		let mut announced = consumer.consume().with_hidden(true).announced();
+		loop {
+			let (update, active) = next_update(&mut announced).await.expect("origin closed");
+			let (name, epoch) = update.prefix.split_epoch();
+			if active && name.as_str() == ".stats/node/test" && epoch.is_some() {
+				return update.prefix.to_owned();
+			}
+		}
+	}
+
 	/// The next announcement without blocking, skipping the caught-up marker.
 	fn try_next_announced(announced: &mut moq_net::announce::Consumer) -> Option<moq_net::announce::Announce> {
 		loop {
@@ -2096,12 +2108,10 @@ mod tests {
 		let stats = config.build(cluster.origin.clone());
 		let cluster = cluster.with_stats(stats);
 
-		let path = moq_net::Path::new(".stats").join("node").join("test");
 		let consumer = cluster.origin.consume();
-		tokio::time::timeout(std::time::Duration::from_secs(5), consumer.routed(&path))
+		let path = tokio::time::timeout(std::time::Duration::from_secs(5), stats_path(&consumer))
 			.await
-			.expect("stats broadcast announced within 5s")
-			.expect("stats broadcast present");
+			.expect("stats broadcast announced within 5s");
 		let broadcast = consumer
 			.request_broadcast(&path)
 			.await
@@ -2665,11 +2675,9 @@ mod tests {
 			.expect("broadcast resolves")
 			.expect("broadcast present");
 
-		let stats_path = moq_net::Path::new(".stats").join("node").join("test");
-		tokio::time::timeout(Duration::from_secs(5), consumer.routed(&stats_path))
+		tokio::time::timeout(Duration::from_secs(5), stats_path(&consumer))
 			.await
-			.expect("stats announced")
-			.expect("stats present");
+			.expect("stats announced");
 	}
 
 	/// A reserved (0) or out-of-range (>= 2^62) `cluster.id` is rejected rather

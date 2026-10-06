@@ -8,7 +8,7 @@ use std::time::Duration;
 use std::task::Poll;
 
 use moq_net::stats::{Presence, Registry, Report, Role, Tier, Traffic};
-use moq_net::{Path, PathOwned, broadcast, kio, origin, track};
+use moq_net::{Epoch, Path, PathOwned, broadcast, kio, origin, track};
 use serde::Serialize;
 use web_async::spawn;
 use web_async::time::Instant;
@@ -30,9 +30,10 @@ pub struct Config {
 	/// When `None`, [`Producer::new`] spawns no task and publishes nothing.
 	pub origin: Option<origin::Producer>,
 	/// Top-level path stats are published under (default `.stats`). The full
-	/// advertised path is `<prefix>/node/<node>` (or `<prefix>/node` when
-	/// `node` is unset). Also the registry's exclude prefix, so serving a
-	/// stats broadcast doesn't generate more stats.
+	/// advertised path is `<prefix>/node/<node>/@<epoch>` (or
+	/// `<prefix>/node/@<epoch>` when `node` is unset), with a fresh epoch per
+	/// announcement. Also the registry's exclude prefix, so serving a stats
+	/// broadcast doesn't generate more stats.
 	pub prefix: PathOwned,
 	/// Node suffix that disambiguates broadcasts from different relays sharing a
 	/// cluster origin. Set this on every node in multi-relay deployments. May be
@@ -44,12 +45,13 @@ pub struct Config {
 	pub interval: Duration,
 	/// How many leading broadcast-path segments to use as a grouping key.
 	///
-	/// Default `0` publishes one `<prefix>/node/<node>` broadcast carrying every
-	/// path. `1` publishes one broadcast per first segment at
-	/// `<prefix>/<group>/node/<node>`, and larger values include more leading
-	/// segments. Group broadcasts are announced while their group has live traffic,
-	/// plus the [`Self::linger`]; at depth `0`, the single broadcast stays
-	/// announced for the producer's life.
+	/// Default `0` publishes one `<prefix>/node/<node>/@<epoch>` broadcast
+	/// carrying every path. `1` publishes one broadcast per first segment at
+	/// `<prefix>/<group>/node/<node>/@<epoch>`, and larger values include more
+	/// leading segments. Group broadcasts are announced while their group has
+	/// live traffic, plus the [`Self::linger`], and a group returning after that
+	/// announces under a new epoch counted from zero. At depth `0`, the single
+	/// broadcast and its epoch last for the producer's life.
 	pub depth: usize,
 	/// How long a group broadcast stays announced after its group's last entry
 	/// leaves. Default 5 minutes.
@@ -205,7 +207,6 @@ impl Producer {
 			depth,
 			linger,
 			interval,
-			sequence: Arc::new(AtomicU64::new(0)),
 		};
 		spawn(task.run(Arc::downgrade(&keepalive)));
 
@@ -232,7 +233,6 @@ struct Task {
 	depth: usize,
 	linger: Duration,
 	interval: Duration,
-	sequence: Arc<AtomicU64>,
 }
 
 impl Task {
@@ -407,10 +407,11 @@ impl<V: Serialize> Serialize for Frame<V> {
 	}
 }
 
-/// Writes encoded snapshots with group numbers from the producer-wide
-/// allocator. The allocator outlives on-demand tracks and group broadcasts, so
-/// a recreated track resumes past any group a subscriber has cached, without
-/// retaining a tombstone per requested name.
+/// Writes encoded snapshots with group numbers from its group broadcast's
+/// allocator. The allocator outlives on-demand tracks, so a recreated track
+/// resumes past any group a subscriber has cached, without retaining a
+/// tombstone per requested name. A new group broadcast is a new epoch, so its
+/// allocator starts over.
 struct Snapshot<V> {
 	track: track::Producer,
 	encoder: moq_json::snapshot::Encoder<Frame<V>>,
@@ -793,7 +794,7 @@ impl TierNames {
 
 impl GroupPublisher {
 	fn create(task: &Task, group: &Path) -> Option<Self> {
-		let advertised = advertised_path(&task.prefix, group, task.node());
+		let advertised = advertised_path(&task.prefix, group, task.node(), &Epoch::mint());
 		let broadcast = match task.origin.publish(&advertised, origin::Route::default()) {
 			Ok(broadcast) => broadcast,
 			Err(err) => {
@@ -803,14 +804,15 @@ impl GroupPublisher {
 		};
 		tracing::debug!(advertised = %advertised, "stats: publishing broadcast");
 
-		let mut traffic = TrackFamily::new(task.sequence.clone());
-		let mut sessions = TrackFamily::new(task.sequence.clone());
+		let sequence = Arc::new(AtomicU64::new(0));
+		let mut traffic = TrackFamily::new(sequence.clone());
+		let mut sessions = TrackFamily::new(sequence.clone());
 
 		// The default tier's tracks always exist, even while idle.
 		let tier = Tier::default();
 		for role in [Role::Publisher, Role::Subscriber] {
 			let name = traffic_track(&tier, role, false);
-			match TrackPair::create(&broadcast, &name, task.sequence.clone()) {
+			match TrackPair::create(&broadcast, &name, sequence.clone()) {
 				Ok(pair) => {
 					traffic.tracks.insert(name, pair);
 				}
@@ -821,7 +823,7 @@ impl GroupPublisher {
 			}
 		}
 		let name = sessions_track(&tier, false);
-		match TrackPair::create(&broadcast, &name, task.sequence.clone()) {
+		match TrackPair::create(&broadcast, &name, sequence) {
 			Ok(pair) => {
 				sessions.tracks.insert(name, pair);
 			}
@@ -1083,8 +1085,8 @@ fn group_key(path: &str, depth: usize) -> &str {
 	}
 }
 
-fn advertised_path(prefix: &Path, group: &Path, node: Option<&str>) -> PathOwned {
-	// `<prefix>/<group>/node/<node>`. The group segment is empty at depth 0.
+fn advertised_path(prefix: &Path, group: &Path, node: Option<&str>, epoch: &Epoch) -> PathOwned {
+	// `<prefix>/<group>/node/<node>/@<epoch>`. The group segment is empty at depth 0.
 	// The fixed `node` category leaves room for sibling categories (e.g.
 	// `<top-prefix>/<group>/cluster` for relay-mesh stats) under the same prefix.
 	let mut out = prefix.as_str().to_string();
@@ -1097,6 +1099,8 @@ fn advertised_path(prefix: &Path, group: &Path, node: Option<&str>) -> PathOwned
 		out.push('/');
 		out.push_str(node);
 	}
+	out.push_str("/@");
+	out.push_str(epoch.as_str());
 	PathOwned::from(out)
 }
 
@@ -1273,6 +1277,14 @@ mod tests {
 		(update.prefix.as_str().to_string(), broadcast)
 	}
 
+	/// `path` without its trailing epoch, which every stats broadcast carries.
+	fn name(path: &str) -> String {
+		let path = moq_net::Path::new(path);
+		let (name, epoch) = path.split_epoch();
+		assert!(epoch.is_some(), "{path} has no epoch");
+		name.as_str().to_string()
+	}
+
 	/// Advance past one publish interval so the task drains and writes frames.
 	async fn drive_tick() {
 		tokio::time::advance(Duration::from_millis(1100)).await;
@@ -1351,10 +1363,24 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn new_normalizes_and_drops_empty_node() {
 		let (_producer, origin) = test_producer(Some("/sjc//1/"));
-		assert_eq!(announced(&origin).await.0, ".stats/node/sjc/1");
+		assert_eq!(name(&announced(&origin).await.0), ".stats/node/sjc/1");
 
 		let (_producer, origin) = test_producer(Some("///"));
-		assert_eq!(announced(&origin).await.0, ".stats/node");
+		assert_eq!(name(&announced(&origin).await.0), ".stats/node");
+	}
+
+	/// A restarted producer announces under a new epoch, so a relay never serves
+	/// it groups cached under its previous run.
+	#[tokio::test(start_paused = true)]
+	async fn restarted_producer_announces_a_new_epoch() {
+		let (first, origin) = test_producer(Some("sjc"));
+		let before = announced(&origin).await.0;
+		drop(first);
+
+		let (_second, origin) = test_producer(Some("sjc"));
+		let after = announced(&origin).await.0;
+		assert_eq!(name(&before), name(&after));
+		assert_ne!(before, after);
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1366,14 +1392,14 @@ mod tests {
 		let _f1 = feed(producer.registry(), Tier::default(), "foo/bar", true, 1, 8).await;
 		let _f2 = feed(producer.registry(), Tier::default(), "baz/qux", true, 1, 8).await;
 
-		assert_eq!(announced(&origin).await.0, ".stats/node/sjc/1");
+		assert_eq!(name(&announced(&origin).await.0), ".stats/node/sjc/1");
 	}
 
 	#[tokio::test(start_paused = true)]
 	async fn task_announces_without_node_suffix() {
 		let (producer, origin) = test_producer(None);
 		let _f = feed(producer.registry(), Tier::default(), "foo/bar", true, 1, 8).await;
-		assert_eq!(announced(&origin).await.0, ".stats/node");
+		assert_eq!(name(&announced(&origin).await.0), ".stats/node");
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1535,14 +1561,20 @@ mod tests {
 		(producer, origin, events)
 	}
 
-	/// The announce events buffered so far, as `(path, active)`.
+	/// The announce events buffered so far, as `(path, active)` sorted by path.
 	fn take_events(events: &mut announce::Consumer) -> Vec<(String, bool)> {
 		use futures::FutureExt;
 		let mut out = Vec::new();
 		while let Some(Some((route, active))) = next_update(events).now_or_never() {
 			out.push((route.prefix.as_str().to_string(), active));
 		}
+		out.sort();
 		out
+	}
+
+	/// `events` with each path's epoch stripped.
+	fn names(events: &[(String, bool)]) -> Vec<(String, bool)> {
+		events.iter().map(|(path, active)| (name(path), *active)).collect()
 	}
 
 	const ACME: &str = ".stats/acme/node/sjc";
@@ -1557,11 +1589,21 @@ mod tests {
 		// session rooted at `feed` (group `feed`).
 		let first = feed(registry, Tier::default(), "acme/live", true, 1, 100).await;
 		drive_tick().await;
-		let mut started = take_events(&mut events);
-		started.sort();
-		assert_eq!(started, [(ACME.to_string(), true), (FEED.to_string(), true)]);
-		let acme = origin.consume().request_broadcast(ACME).await.expect("resolve");
-		let sessions = origin.consume().request_broadcast(FEED).await.expect("resolve");
+		let started = take_events(&mut events);
+		assert_eq!(names(&started), [(ACME.to_string(), true), (FEED.to_string(), true)]);
+		let [(acme_path, _), (feed_path, _)] = &started[..] else {
+			unreachable!()
+		};
+		let acme = origin
+			.consume()
+			.request_broadcast(acme_path.as_str())
+			.await
+			.expect("resolve");
+		let sessions = origin
+			.consume()
+			.request_broadcast(feed_path.as_str())
+			.await
+			.expect("resolve");
 		assert_eq!(read_last_frame(&acme, "publisher.json").await["acme/live"].bytes, 100);
 
 		// The viewer leaves: both groups empty but stay announced, reading zero.
@@ -1586,6 +1628,8 @@ mod tests {
 			"a return within the linger re-announces nothing"
 		);
 		assert_eq!(read_last_frame(&acme, "publisher.json").await["acme/live"].bytes, 50);
+		let mut track = subscribe(&acme, "publisher.json").await;
+		let old_sequence = track.next_group().await.expect("ok").expect("group").sequence;
 
 		// The return re-armed the linger: it unannounces only once it elapses
 		// again with the group still empty.
@@ -1597,18 +1641,29 @@ mod tests {
 		for _ in 0..4 {
 			drive_tick().await;
 		}
-		let mut ended = take_events(&mut events);
-		ended.sort();
-		assert_eq!(ended, [(ACME.to_string(), false), (FEED.to_string(), false)]);
+		let ended: Vec<_> = started.iter().map(|(path, _)| (path.clone(), false)).collect();
+		assert_eq!(take_events(&mut events), ended);
 
-		// A return after the linger is a new broadcast counted from zero.
+		// A return after the linger is a new epoch counted from zero, with
+		// group numbers starting over.
 		let _third = feed(registry, Tier::default(), "acme/live", true, 1, 25).await;
 		drive_tick().await;
-		let mut restarted = take_events(&mut events);
-		restarted.sort();
-		assert_eq!(restarted, [(ACME.to_string(), true), (FEED.to_string(), true)]);
-		let acme = origin.consume().request_broadcast(ACME).await.expect("resolve");
+		let restarted = take_events(&mut events);
+		assert_eq!(names(&restarted), [(ACME.to_string(), true), (FEED.to_string(), true)]);
+		assert_ne!(restarted[0].0, *acme_path, "a returning group mints a new epoch");
+		assert_ne!(restarted[1].0, *feed_path, "a returning group mints a new epoch");
+		let acme = origin
+			.consume()
+			.request_broadcast(restarted[0].0.as_str())
+			.await
+			.expect("resolve");
 		assert_eq!(read_last_frame(&acme, "publisher.json").await["acme/live"].bytes, 25);
+		let mut track = subscribe(&acme, "publisher.json").await;
+		let group = track.next_group().await.expect("ok").expect("group");
+		assert!(
+			group.sequence < old_sequence,
+			"a new epoch numbers its groups from zero"
+		);
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1623,9 +1678,10 @@ mod tests {
 		drive_tick().await;
 		assert_eq!(take_events(&mut events), []);
 		drive_tick().await;
-		let mut ended = take_events(&mut events);
-		ended.sort();
-		assert_eq!(ended, [(ACME.to_string(), false), (FEED.to_string(), false)]);
+		assert_eq!(
+			names(&take_events(&mut events)),
+			[(ACME.to_string(), false), (FEED.to_string(), false)]
+		);
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1704,27 +1760,19 @@ mod tests {
 
 	#[test]
 	fn advertised_path_with_and_without_node() {
-		let prefix = Path::new(".stats");
-		let empty = Path::empty();
-		assert_eq!(
-			advertised_path(&prefix, &empty, Some("sjc")).as_str(),
-			".stats/node/sjc"
-		);
-		assert_eq!(
-			advertised_path(&prefix, &empty, Some("sjc/1")).as_str(),
-			".stats/node/sjc/1"
-		);
-		assert_eq!(advertised_path(&prefix, &empty, None).as_str(), ".stats/node");
-		assert_eq!(
-			advertised_path(&prefix, &Path::new("acme"), Some("sjc")).as_str(),
-			".stats/acme/node/sjc"
-		);
-
-		let prefix = Path::new("metrics");
-		assert_eq!(
-			advertised_path(&prefix, &Path::new("demo/room"), Some("lon")).as_str(),
-			"metrics/demo/room/node/lon"
-		);
+		let epoch = Epoch::mint();
+		let path = |prefix: &str, group: &str, node| {
+			let path = advertised_path(&Path::new(prefix), &Path::new(group), node, &epoch);
+			path.as_str()
+				.strip_suffix(&format!("/@{epoch}"))
+				.expect("epoch")
+				.to_string()
+		};
+		assert_eq!(path(".stats", "", Some("sjc")), ".stats/node/sjc");
+		assert_eq!(path(".stats", "", Some("sjc/1")), ".stats/node/sjc/1");
+		assert_eq!(path(".stats", "", None), ".stats/node");
+		assert_eq!(path(".stats", "acme", Some("sjc")), ".stats/acme/node/sjc");
+		assert_eq!(path("metrics", "demo/room", Some("lon")), "metrics/demo/room/node/lon");
 	}
 
 	#[test]
@@ -2027,7 +2075,6 @@ mod tests {
 					origin: produce_origin(),
 					prefix: PathOwned::from(".stats"),
 					node: None,
-					sequence: Arc::new(AtomicU64::new(0)),
 					depth,
 					linger: DEFAULT_LINGER,
 					interval: Duration::from_secs(1),

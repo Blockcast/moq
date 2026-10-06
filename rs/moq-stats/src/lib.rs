@@ -14,10 +14,12 @@
 //!
 //! # Wire format
 //!
-//! A [`Producer`] publishes one broadcast per node at `<prefix>/node/<node>`
-//! (default prefix `.stats`), or one per group of leading broadcast-path
-//! segments at `<prefix>/<group>/node/<node>`; parse announce paths back with
-//! [`parse_node_path`]. Each [`Tier`] carries `publisher.json`,
+//! A [`Producer`] publishes one broadcast per node at
+//! `<prefix>/node/<node>/@<epoch>` (default prefix `.stats`), or one per group
+//! of leading broadcast-path segments at `<prefix>/<group>/node/<node>/@<epoch>`;
+//! parse announce paths back with [`parse_node_path`]. Each announcement mints
+//! a fresh [`Epoch`], so a restarted node or a group returning from idle never
+//! reuses a broadcast name. Each [`Tier`] carries `publisher.json`,
 //! `subscriber.json`, and `sessions.json` tracks of cumulative [`Traffic`] and
 //! [`Presence`] counters, plus `.json.z` siblings encoded with
 //! [`moq_json::snapshot`]; compute names with [`traffic_track`] /
@@ -37,7 +39,7 @@ use std::collections::BTreeMap;
 /// can depend on this crate alone.
 pub use moq_net::stats::{Handle, Presence, Registry, Role, Tier, Traffic};
 
-use moq_net::{AsPath, Path, PathOwned};
+use moq_net::{AsPath, Epoch, Path, PathOwned};
 
 /// One frame off a traffic track: cumulative counters keyed by broadcast path.
 pub type TrafficFrame = BTreeMap<String, Traffic>;
@@ -70,7 +72,7 @@ pub fn sessions_track(tier: &Tier, compressed: bool) -> String {
 	name
 }
 
-/// A parsed stats broadcast path: `<prefix>[/<group>]/node[/<node>]`.
+/// A parsed stats broadcast path: `<prefix>[/<group>]/node[/<node>][/@<epoch>]`.
 /// See [`parse_node_path`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -80,10 +82,13 @@ pub struct NodePath {
 	pub group: PathOwned,
 	/// The node suffix, empty when the producer has no node configured.
 	pub node: PathOwned,
+	/// The announcement this broadcast belongs to; a new epoch is a new set of
+	/// counters. `None` from a producer that predates epochs.
+	pub epoch: Option<Epoch>,
 }
 
 /// Parse a stats broadcast announce path published under `prefix` with the
-/// given grouping `depth`, splitting it into its group and node parts.
+/// given grouping `depth`, splitting it into its group, node, and epoch parts.
 ///
 /// Returns `None` when the path is not under `prefix` or has no `node`
 /// category segment where one is expected (which also filters out sibling
@@ -116,9 +121,12 @@ pub fn parse_node_path(prefix: impl AsPath, depth: usize, path: impl AsPath) -> 
 	}
 
 	let node = segments.collect::<Vec<_>>().join("/");
+	let node = Path::new(&node);
+	let (node, epoch) = node.split_epoch();
 	Some(NodePath {
 		group: Path::new(&group.join("/")).to_owned(),
-		node: Path::new(&node).to_owned(),
+		node: node.to_owned(),
+		epoch,
 	})
 }
 
@@ -144,40 +152,51 @@ mod tests {
 
 	#[test]
 	fn parse_node_path_variants() {
-		let parse = |depth, path| parse_node_path(".stats", depth, path);
+		let parse = |depth, path: &str| parse_node_path(".stats", depth, path);
+		let epoch = Epoch::mint();
+		let node = |group: &str, node: &str, epoch: Option<&Epoch>| {
+			Some(NodePath {
+				group: Path::new(group).to_owned(),
+				node: Path::new(node).to_owned(),
+				epoch: epoch.cloned(),
+			})
+		};
 
 		// Depth 0: no group segment.
 		assert_eq!(
-			parse(0, ".stats/node/sjc"),
-			Some(NodePath {
-				group: Path::empty().to_owned(),
-				node: Path::new("sjc").to_owned(),
-			})
+			parse(0, &format!(".stats/node/sjc/@{epoch}")),
+			node("", "sjc", Some(&epoch))
 		);
 		assert_eq!(
-			parse(0, ".stats/node/sjc/1").unwrap().node,
-			Path::new("sjc/1").to_owned(),
+			parse(0, &format!(".stats/node/sjc/1/@{epoch}")),
+			node("", "sjc/1", Some(&epoch)),
 			"multi-segment node"
 		);
 		assert_eq!(
-			parse(0, ".stats/node"),
-			Some(NodePath {
-				group: Path::empty().to_owned(),
-				node: Path::empty().to_owned(),
-			}),
+			parse(0, &format!(".stats/node/@{epoch}")),
+			node("", "", Some(&epoch)),
 			"nodeless path"
 		);
 
 		// Depth 1: one group segment, as published per tenant.
 		assert_eq!(
-			parse(1, ".stats/acme/node/sjc"),
-			Some(NodePath {
-				group: Path::new("acme").to_owned(),
-				node: Path::new("sjc").to_owned(),
-			})
+			parse(1, &format!(".stats/acme/node/sjc/@{epoch}")),
+			node("acme", "sjc", Some(&epoch))
 		);
 		// A shorter broadcast path yields a shorter group; still parses.
-		assert_eq!(parse(1, ".stats/node/sjc").unwrap().group, Path::empty().to_owned());
+		assert_eq!(
+			parse(1, &format!(".stats/node/sjc/@{epoch}")),
+			node("", "sjc", Some(&epoch))
+		);
+
+		// A producer that predates epochs: the node is the whole suffix.
+		assert_eq!(parse(0, ".stats/node/sjc"), node("", "sjc", None));
+		assert_eq!(parse(0, ".stats/node"), node("", "", None));
+		assert_eq!(
+			parse(0, ".stats/node/sjc/@local"),
+			node("", "sjc/@local", None),
+			"not a UUIDv7"
+		);
 
 		// Not ours: wrong prefix, sibling category, group deeper than depth.
 		assert_eq!(parse(0, "other/node/sjc"), None);

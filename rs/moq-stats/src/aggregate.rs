@@ -1,7 +1,7 @@
 //! The aggregating half: fold a group's per-node stats broadcasts into one view.
 //!
 //! A single-broadcast [`Consumer`](crate::Consumer) reads one
-//! `<prefix>/<group>/node/<node>` broadcast. This reader watches an origin's
+//! `<prefix>/<group>/node/<node>/@<epoch>` broadcast. This reader watches an origin's
 //! announce stream for *every* node broadcast in a group and folds their
 //! cumulative counters into one merged frame per `(tier, role)`, so a downstream
 //! sees a project's whole live traffic as if it came from a single node.
@@ -102,10 +102,11 @@ impl Default for Config {
 /// boot-lifetime counters intact never looks like new traffic. After the grace,
 /// a departed node's contribution folds into one retired total and the node is
 /// forgotten, so memory follows live nodes and the keys ever reported, not
-/// every node ever seen. A node
-/// returning within the grace with a lower counter (a restarted relay)
-/// regresses the merged counter, the same reset contract a single node's own
-/// restart follows. Presence is not sticky: a departed node stops counting
+/// every node ever seen. Each epoch is its own node: a restarted producer, or a
+/// group returning from idle, announces a new epoch whose counters add to the
+/// old epoch's kept contribution instead of regressing it. Only a producer that
+/// predates epochs and returns within the grace with a lower counter regresses
+/// the merged counter. Presence is not sticky: a departed node stops counting
 /// sessions immediately.
 pub struct Consumer {
 	origin: origin::Consumer,
@@ -299,7 +300,7 @@ struct Merged<V: Mergeable> {
 	name: String,
 	config: moq_json::snapshot::consumer::Config,
 	/// One entry per live or recently departed node broadcast, keyed by
-	/// absolute announced path.
+	/// absolute announced path, so each epoch is its own entry.
 	nodes: HashMap<PathOwned, Node<V>>,
 	/// How long a departed node waits before folding into `retired`.
 	grace: Duration,
@@ -582,7 +583,7 @@ mod tests {
 
 	/// A stats producer publishing one node's broadcasts on `origin`, grouped at
 	/// depth 1 (so feeding a broadcast under `<group>/...` announces
-	/// `.stats/<group>/node/<node>`).
+	/// `.stats/<group>/node/<node>/@<epoch>`).
 	fn node_producer(origin: &origin::Producer, node: &str) -> Producer {
 		Producer::new(
 			produce::Config::new()
@@ -672,7 +673,8 @@ mod tests {
 	/// A hand-published node broadcast at `.stats/<group>/node/<node>` with a
 	/// plain default-tier traffic track, so a test controls the exact frames and
 	/// can fail one node's reader alone (the registry-driven producer only
-	/// publishes whole broadcasts). Dropping it unannounces the node.
+	/// publishes whole broadcasts). Dropping it unannounces the node, and a new
+	/// one at the same path is that node reconnecting with its epoch intact.
 	#[allow(dead_code)]
 	struct NodeBroadcast {
 		source: broadcast::Producer,
@@ -774,10 +776,11 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn reannounce_with_higher_counter_stays_monotonic() {
-		// A node's stats session reconnects with its cumulative counters intact
-		// and still growing: the total holds through the swap, then advances,
-		// never dipping.
+	async fn restarted_producer_adds_a_new_epoch() {
+		// A restarted node announces a new epoch with fresh counters. The new
+		// epoch adds to the old one's kept contribution instead of regressing
+		// the total, and the old epoch folds into the retired total once the
+		// grace elapses.
 		let origin = produce_origin();
 		let node_a = node_producer(&origin, "a");
 		let node_b = node_producer(&origin, "b");
@@ -786,43 +789,10 @@ mod tests {
 		let _fb = feed(&node_b, Tier::default(), "acme", "acme/room", 40).await;
 		drive_tick().await;
 
-		let agg = Consumer::new(origin.consume(), Config::new().with_depth(1));
+		let agg = Consumer::new(origin.consume(), Config::new().with_depth(1).with_grace(GRACE));
 		let mut traffic = agg.traffic(&Tier::default(), Role::Publisher);
 		read_until_bytes(&mut traffic, "acme/room", 140).await;
 
-		// Node A's broadcast goes away and comes back with a higher counter.
-		drop(fa);
-		drop(node_a);
-		drive_tick().await;
-
-		let node_a = node_producer(&origin, "a");
-		let _fa = feed(&node_a, Tier::default(), "acme", "acme/room", 120).await;
-		drive_tick().await;
-
-		// The kept contribution holds the total at 140 until the new frame
-		// replaces it, landing on 120 + 40.
-		let frame = read_monotonic_until(&mut traffic, "acme/room", 140, 160).await;
-		assert_eq!(frame.get("acme/room").expect("entry").bytes, 160);
-	}
-
-	#[tokio::test(start_paused = true)]
-	async fn restarted_node_regresses_the_total() {
-		// A node that returns with a fresh counter (it restarted) replaces its
-		// contribution wholesale: the total regresses once, the existing
-		// fresh-segment contract.
-		let origin = produce_origin();
-		let node_a = node_producer(&origin, "a");
-		let node_b = node_producer(&origin, "b");
-
-		let fa = feed(&node_a, Tier::default(), "acme", "acme/room", 100).await;
-		let _fb = feed(&node_b, Tier::default(), "acme", "acme/room", 40).await;
-		drive_tick().await;
-
-		let agg = Consumer::new(origin.consume(), Config::new().with_depth(1));
-		let mut traffic = agg.traffic(&Tier::default(), Role::Publisher);
-		read_until_bytes(&mut traffic, "acme/room", 140).await;
-
-		// Node A restarts: its broadcast returns with a lower counter.
 		drop(fa);
 		drop(node_a);
 		drive_tick().await;
@@ -831,9 +801,36 @@ mod tests {
 		let _fa = feed(&node_a, Tier::default(), "acme", "acme/room", 30).await;
 		drive_tick().await;
 
-		// The restarted frame replaces A's contribution, so the total drops to
-		// 30 + 40, a genuine per-node regression downstream treats as a fresh
-		// segment. An earlier frame may retire A's live gauges first.
+		let frame = read_monotonic_until(&mut traffic, "acme/room", 140, 170).await;
+		assert_eq!(frame.get("acme/room").expect("entry").bytes, 170, "100 + 30 + 40");
+		assert_eq!(traffic.inner.nodes.len(), 3, "the old epoch lingers for its grace");
+
+		tokio::time::advance(GRACE).await;
+		settle(&mut traffic).await;
+		assert_eq!(traffic.inner.nodes.len(), 2, "the old epoch folded");
+		assert_eq!(traffic.inner.retired.get("acme/room").map(|t| t.bytes), Some(100));
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn legacy_restart_regresses_the_total() {
+		// A producer that predates epochs returns at the same path with a fresh
+		// counter: it replaces its contribution wholesale, and the total
+		// regresses once, the fresh-segment contract.
+		let origin = produce_origin();
+		let mut node_a = NodeBroadcast::new(&origin, "acme", "a");
+		let mut node_b = NodeBroadcast::new(&origin, "acme", "b");
+		node_a.publish("acme/room", 100);
+		node_b.publish("acme/room", 40);
+
+		let agg = Consumer::new(origin.consume(), Config::new().with_depth(1));
+		let mut traffic = agg.traffic(&Tier::default(), Role::Publisher);
+		read_until_bytes(&mut traffic, "acme/room", 140).await;
+
+		drop(node_a);
+		settle(&mut traffic).await;
+		let mut node_a = NodeBroadcast::new(&origin, "acme", "a");
+		node_a.publish("acme/room", 30);
+
 		loop {
 			let frame = traffic.next().await.expect("read").expect("frame");
 			if frame.get("acme/room").map(|t| t.bytes) == Some(70) {

@@ -20,12 +20,17 @@ it. Traffic under the prefix is never counted, so serving stats doesn't
 generate more stats.
 
 ```text
-<prefix>/node/<node>               depth 0: one broadcast per node
-<prefix>/<group>/node/<node>       depth N: one broadcast per group per node
+<prefix>/node/<node>/@<epoch>              depth 0: one broadcast per node
+<prefix>/<group>/node/<node>/@<epoch>      depth N: one broadcast per group per node
 ```
 
 - `<node>` tells relays sharing a cluster apart. It may span several segments
-  (`sjc/1`), and is omitted along with its slash when unset: `<prefix>/node`.
+  (`sjc/1`), and is omitted along with its slash when unset:
+  `<prefix>/node/@<epoch>`.
+- `@<epoch>` is a [publisher epoch](/concept/moq-lite#publisher-epochs), minted
+  each time the broadcast is announced. A restarted node or a group returning
+  from idle publishes under a new name, so no relay serves it groups cached
+  under the old one. A reader treats each epoch as its own set of counters.
 - `<group>` is the first `depth` segments of each broadcast path (for traffic)
   or auth root (for sessions), so a consumer can scope an announce to one
   tenant. A path shorter than `depth` groups under all of its segments.
@@ -39,10 +44,11 @@ for a linger (five minutes by default) after its last one leaves. A group that
 returns within the linger keeps its broadcast, so viewer churn doesn't
 unannounce and re-announce it across the mesh; while it lingers empty, its
 tracks hold `{}`. Once the linger elapses with the group still empty, the
-broadcast is unannounced. Group numbers keep increasing across recreated
-tracks and group broadcasts for the producer's life; they may have gaps. A
-recreated compressed track starts a new group with a full snapshot, never a
-delta whose compression state belonged to its previous writer.
+broadcast is unannounced and its counters dropped; a group that returns later
+announces a new epoch counted from zero. Within one epoch, group numbers keep
+increasing across recreated tracks; they may have gaps. A recreated compressed
+track starts a new group with a full snapshot, never a delta whose compression
+state belonged to its previous writer.
 
 ## Tracks
 
@@ -132,9 +138,12 @@ Every counter is a cumulative, monotonic unsigned integer. A rate is the
 difference between two frames divided by the time between them, and a live
 count is started minus ended. A frame never shows ended above started.
 
-A counter going **down** means the relay restarted or the entry was dropped
-and re-created. Treat it as the start of a fresh segment rather than a
-negative rate.
+A new epoch starts every counter from zero, so a reader summing a node over
+time adds each epoch's counters rather than diffing across them. Within one
+epoch, a counter going **down** means the entry was dropped and re-created.
+Treat it as the start of a fresh segment rather than a negative rate. A relay
+that predates epochs publishes without the `@<epoch>` segment, and a counter
+going down there also means it restarted.
 
 A reader ignores unknown fields, so a newer relay can add counters, and
 defaults a missing field to zero, so it can read an older relay.

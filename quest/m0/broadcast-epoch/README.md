@@ -51,10 +51,10 @@ Decided:
   bare-name viewer behind one needs a publisher that opts out with the raw
   prefix route. Document this rather than promise it works.
 - Publishers on the default publish path, such as moq-boy and moq-room,
-  inherit the epoch from Origin. moq-stats mints its own through
-  [Stats epochs](/quest/m0/broadcast-epoch/stats-epoch.md), which also gates the release
-  (decided 2026-10-04): a restarted stats node under a reused name stalls its
-  viewers the same way.
+  inherit the epoch from Origin. moq-stats mints its own per
+  [group announcement](/doc/concept/stats.md#broadcasts), which also gates the
+  release (decided 2026-10-04): a restarted stats node under a reused name
+  stalls its viewers the same way.
 - Decided in the 2026-10-05 audit: the m1 quests gating this line (stats
   epochs, the bounded stats aggregate it requires, and retracted demand
   release) moved under it, and the OBS half of GStreamer and OBS moved to m1
@@ -74,6 +74,11 @@ This README owns:
 - A `doc/concept` page on broadcast naming: what an epoch is, publish and
   consume behavior, takeover and fallback, bare-path resolution, and the
   prefix-route opt-out.
+- When the release cut carries stats epochs, drop
+  [#4810](https://github.com/moq-dev/moq/pull/4810)'s wall-clock group seed
+  and its `doc/concept/stats.md` sentence from `release`; release-to-main
+  back-merges keep `main`'s `rs/moq-stats` and `doc/concept/stats.md` until
+  then. MoQ Pro's VOD `storage.json` moves from the same seed to its own epoch.
 
 ## Required
 
@@ -84,5 +89,4 @@ This README owns:
 - [Bindings](/quest/m0/broadcast-epoch/bindings.md) - moq-ffi and every wrapper expose the epoch and inherit the default
 - [GStreamer](/quest/m0/broadcast-epoch/gst.md) - moqsink publishes each run under a fresh epoch
 - [Remove `--hop`](/quest/m0/broadcast-epoch/hop-removal.md) - `moq` takes an optional `--epoch` instead of `--hop`, a plain publisher declares a random Hop ID, and the per-session hop stamp is gone
-- [Stats epochs](/quest/m0/broadcast-epoch/stats-epoch.md) - moq-stats publishes each group announcement under its own epoch, so neither a restarted node nor a returning idle group stalls its viewers
 - [Stats totals and prefix tracks](/quest/m0/broadcast-epoch/stats-split.md) - the same release retires the per-path stats maps for totals and on-demand prefix tracks (decided 2026-10-05)

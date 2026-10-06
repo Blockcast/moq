@@ -69,13 +69,14 @@ Dial the `.stats` path, which the token must cover:
 
 ```bash
 moq --connect http://localhost:4443/.stats announced
-moq --connect http://localhost:4443/.stats --broadcast node/local/host fetch publisher.json | jq
-curl http://localhost:4443/fetch/.stats/node/local/host/publisher.json | jq
+moq --connect http://localhost:4443/.stats --broadcast node/local/host/@<epoch> fetch publisher.json | jq
+curl http://localhost:4443/fetch/.stats/node/local/host/@<epoch>/publisher.json | jq
 ```
 
-The node name (`local/host` here) is `stats.node`. Each fetch returns the
-newest snapshot: a JSON object of cumulative counters keyed by broadcast path.
-`publisher.json` is egress, `subscriber.json` is ingress, and `sessions.json`
+The node name (`local/host` here) is `stats.node`, and `<epoch>` is the
+UUID that `announced` lists after it, new each time the relay starts. Each
+fetch returns the newest snapshot: a JSON object of cumulative counters keyed
+by broadcast path. `publisher.json` is egress, `subscriber.json` is ingress, and `sessions.json`
 counts sessions per auth root. Fetch twice and divide by the interval for a
 rate. The `.json.z` twins carry compressed patches, which these tools print as
 raw bytes. [Stats](/concept/stats) describes every field.

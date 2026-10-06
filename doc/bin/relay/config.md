@@ -220,7 +220,7 @@ the task running for as long as you hold it.
 ```toml
 [stats]
 enabled = true
-prefix = ".stats"                    # Broadcasts appear under <prefix>/node/<node>.
+prefix = ".stats"                    # Broadcasts appear under <prefix>/node/<node>/@<epoch>.
 interval = 1                         # Seconds between snapshots.
 node = "sjc/1"                       # Disambiguates relays sharing a cluster.
 depth = 1                            # Also bucket by the first N path segments (per tenant).
@@ -231,7 +231,9 @@ Each node publishes `publisher.json`, `subscriber.json`, and `sessions.json`
 tracks (plus compressed `.json.z` twins) of cumulative counters per broadcast
 and auth root, split by a **tier** label chosen by the auth server's grant or
 `--cluster-tier`, which is what makes billing per customer or per region
-possible. [Stats](/concept/stats) describes the paths, tracks, and encodings;
+possible. Each run, and each group returning after its linger, announces a
+fresh `@<epoch>`, so a restart never reuses a broadcast name.
+[Stats](/concept/stats) describes the paths, tracks, and encodings;
 read them with the [`moq-stats`](https://docs.rs/moq-stats) crate.
 
 ## \[iroh]

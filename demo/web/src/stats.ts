@@ -2,10 +2,12 @@
  * MoQ relay stats dashboard.
  *
  * Every relay node that enables `[stats]` publishes a broadcast at
- * `.stats/node/<node>` carrying JSON tracks that snapshot current activity. We
- * auto-discover all of those nodes (announcements under `.stats/node`), so this
- * works for a single relay and for a cluster alike, then aggregate each node and
- * let you drill into one.
+ * `.stats/node/<node>/@<epoch>` carrying JSON tracks that snapshot current
+ * activity, under a fresh epoch each run. We auto-discover all of those
+ * broadcasts (announcements under `.stats/node`), so this works for a single
+ * relay and for a cluster alike, then aggregate each node and let you drill into
+ * one. Nodes are keyed by `<node>/@<epoch>`, so a restarted relay is a new
+ * entry rather than a counter reset.
  *
  * Per-node tracks we read:
  *   publisher.json   egress  (relay -> downstream viewers)
@@ -100,7 +102,7 @@ const isSystem = (path: string) => path.startsWith(".");
 
 // ---- State ----------------------------------------------------------------
 
-// Discovered nodes -> their latest stats frames.
+// Discovered `<node>/@<epoch>` keys -> their latest stats frames.
 const nodeStats = new Signals.Signal<Record<string, NodeStats>>({});
 const selectedNode = new Signals.Signal<string | undefined>(undefined);
 
