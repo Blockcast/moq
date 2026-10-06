@@ -1,10 +1,9 @@
-//! A publisher on a wire with no hop ids, reconnecting through a relay, is a new source
-//! downstream.
+//! A publisher on a wire with no hop ids, reconnecting through a relay, is a new first
+//! hop downstream.
 //!
 //! moq-transport without the Cluster extension names no publisher, so the relay it
 //! connects to stamps each connection with a random Hop ID of its own. A reconnect is a
-//! new connection and so a new first hop, which a downstream relay reads as a new
-//! source rather than splicing it onto the old one.
+//! new connection and so a new first hop.
 
 mod support;
 
@@ -18,7 +17,7 @@ const PATH: &str = "room/cam";
 
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
-	tokio::spawn(support::harness::run(driver));
+	support::harness::spawn(driver);
 	producer
 }
 
@@ -46,10 +45,10 @@ async fn next_first_hop(announced: &mut announce::Consumer) -> Hop {
 	}
 }
 
-#[tokio::test]
+#[moq_net_sim::test]
 async fn a_legacy_reconnect_is_a_new_first_hop_downstream() {
 	for mesh in ["moq-lite-06", "moq-transport-17"] {
-		tokio::time::timeout(TEST_TIMEOUT, async {
+		moq_net_sim::timeout(TEST_TIMEOUT, async {
 			let publisher = produce_origin(9);
 			let relay = produce_origin(1);
 			let downstream = produce_origin(2);

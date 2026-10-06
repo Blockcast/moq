@@ -36,6 +36,11 @@ WebCodecs, writes the catalog, and publishes a hang broadcast.
 A nested `<video>` gets the raw capture stream; a `<canvas>` is drawn by the
 element. `<moq-publish-support>` shows what the browser can encode.
 
+File demuxers load when decoding a file whose MIME type is empty or does not
+start with `image/`. Camera, screen, and files identified as images do not
+load them. The file picker opens synchronously, before any decoder module
+is loaded.
+
 Camera and microphone failures are readable through the element's
 `el.sources.video` and `el.sources.audio` signals. When these hold a
 `Publish.Source.Camera` or `Publish.Source.Microphone`, their `out.error` signal
@@ -54,14 +59,30 @@ framerate, and bitrate are tunable through `el.video.config`; the audio
 encoder exposes its codec and volume. For simulcast or several renditions,
 drop the element and register your own encoders on a `Publish.Broadcast`.
 
+Every audio volume change ramps over `el.audio.fade`, 50ms by default, so
+`volume = 0` is silent once the fade passes. A fade of 0 steps at once; a
+negative or non-finite fade drops the rendition until it is fixed.
+Disabling a rendition (`muted` on the element) ends the audio timeline with
+a marker, so a viewer that stays subscribed, or joins during the pause, never
+plays the audio before it as live.
+
 `el.video.cut()` asks for a keyframe on top of the `keyframeInterval` cadence,
 for a resume, a recording cut, or a known tune-in moment. Requests coalesce into
 the next keyframe, and forced keyframes land at least 500ms apart.
+
+A still source, such as a screen share of an unchanging slide, delivers a frame
+only when its picture changes. `Video.Capture` holds the newest frame and opens
+every new reader with a copy stamped at the moment it attaches, so a viewer or
+recorder that subscribes later still gets the current picture as a keyframe.
 
 The video and audio encoders measure how far their output falls behind the media
 clock when they flush frames. Catalog jitter is the spread above each
 rendition's own recent minimum lateness, so a constant encoder delay is not jitter.
 The advertised value only rises; frame duration alone does not set it.
+The first estimate rise publishes immediately. Later rises within a second
+coalesce into one update at the end of that window carrying the latest value.
+Track additions, removals, and configuration edits publish immediately,
+including any pending estimate.
 
 ## Clock
 
@@ -145,3 +166,23 @@ audio rendition stays out of the catalog until samples flow.
 
 Every input and output is a signal from [`@moq/signals`](/lib/js/signals).
 Load from a CDN (`https://esm.sh/@moq/publish/element`) for a no-build embed.
+
+## Strict CSP
+
+The audio worklet and the capture worker load from `blob:` URLs by default, so
+they need no hosted files but a CSP must allow `blob:` in `script-src` and
+`worker-src`. For a CSP that refuses `blob:`, copy
+`node_modules/@moq/publish/assets/*` into a directory your origin serves, and
+point the package at it before capture starts:
+
+```ts
+import * as Publish from "@moq/publish";
+
+Publish.assets("/moq/");
+```
+
+The URL must end with `/`. Copy the files again on every upgrade: they change
+with the package. The capture worker only runs where the main thread lacks
+`MediaStreamTrackProcessor` (Firefox and Safari); if the hosted file fails to
+load, capture errors instead of hiding the broken deploy. `@moq/room`
+publishes through `@moq/publish`, so this one call covers it.

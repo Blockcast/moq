@@ -7,8 +7,10 @@ runs [TSDuck](https://tsduck.io) plus a custom analyzer over it.
 
 This is a diagnostic gate, not just a pass/fail: the exporter
 ([`rs/moq-mux/src/container/ts/export.rs`](../../rs/moq-mux/src/container/ts/export.rs))
-pads to a constant rate only once the catalog carries the source's mux rate, so
-several broadcast-shape checks are expected to flag. The report quantifies exactly where
+pads with null packets to the multiplex rate the source recorded (or `--mux-rate`),
+leaves a source without one unpadded, never delays media to fit the rate, and
+puts a PCR on its own packet every 25 ms of media time, so several
+broadcast-shape checks are expected to flag. The report quantifies exactly where
 and by how much.
 
 Four instruments live here. `compliance.py` (via `run.sh`) grades a captured file
@@ -82,7 +84,7 @@ Severities: **hard** checks fail the run by default; **shape** checks report as
 | `pat` / `pmt` | hard | valid PAT mapping programs to a PMT that lists the elementary streams |
 | `psi-crc` | hard | no section dropped for a bad CRC |
 | `continuity` | hard | no continuity-counter discontinuities |
-| `pcr-presence` | hard | a PCR PID is declared and carries PCR |
+| `pcr-presence` | hard | every program's declared PCR PID carries PCR (0x1FFF declares none) |
 | `pcr-monotonic` | hard | PCR strictly increases (one 33-bit wrap tolerated), except into a PCR that signals `discontinuity_indicator` |
 | `duration-fidelity` | hard | exported PCR span tracks the source's duration (round-trip only) |
 | `service-descriptors` | shape | an SDT naming the service is present |
@@ -153,9 +155,18 @@ carry several, but only the first takes its timestamp, and deriving the rest fro
 the stream's own timing is not modelled, so that layout is refused. Video decode
 times must strictly increase.
 
-One simplification, toward strictness: a packet's bytes reach MB/B when its last
-byte leaves TB, up to one packet's drain time (0.75 ms for audio) later than
-byte-by-byte, so underflow is judged that much stricter.
+Audio bytes enter B as they leave TB, so a frame that ends partway through a packet
+is complete once its own last byte has left, not the packet's, and B is checked
+just before each removal as well as after each packet. Video keeps one
+simplification, toward strictness: a packet's bytes reach MB when its last byte
+leaves TB, at most one packet's drain time later than byte by byte.
+
+Once a stream's last packet is in, every access unit it completed is still graded
+through its decoding time, however long after the capture that falls, so a burst
+that arrives far ahead is held over the delay bound rather than missed. The last
+access unit is usually cut off by the end of the capture; it is counted as
+`truncated_units` and not graded, since its missing bytes were never sent rather
+than late.
 
 ### Controls
 
@@ -173,8 +184,8 @@ changes:
 | as captured | pass |
 | PCRs restamped at the capture's own rate | pass |
 | delivered at 0.7x | EB and B underflow |
-| delivered at 4x | TB and B overflow |
-| delivered at 15x (a burst) | TB and B overflow |
+| delivered at 4x | TB and B overflow, audio held over 1 s |
+| delivered at 15x (a burst) | TB and B overflow, audio held over 1 s |
 
 No restamp can overflow the video MB: it holds the level's whole CPB less the
 declared one, about 3.6 MB, more than the 4 s capture carries.
@@ -189,6 +200,15 @@ a PCR packet between them. Each case fails without the handling it names:
 | two access units in one PES | refused |
 | four adaptation-only packets after an access unit | TB overflow |
 | an access unit's first packet sent twice | pass |
+| the PMT declares a PCR PID that carries no PCR | `pcr-presence` fails |
+
+Synthetic MPEG audio streams pack several 576-byte frames per PES, so frames end
+partway through packets, and the last is cut off by the end of the capture:
+
+| Case | Expected |
+|---|---|
+| four frames per PES, the first decoded 0.3 ms after its last byte leaves TB, before the rest of that packet has | pass |
+| seven frames per PES, the first decoded as B passes its size partway through a packet | B overflow |
 
 The ffmpeg clip `run.sh` generates is not a positive control: its muxer sends
 audio 0.7 s ahead by default (`-muxdelay`), which overflows the 3,584-byte ADTS
@@ -250,7 +270,7 @@ are laid over the PCRs.
 |---|---|---|
 | `sync` | hard | no invalid sync bytes / transport-error packets (`--live` only) |
 | `continuity` | hard | no discontinuities, and a payload-less packet must not advance the counter (ISO 13818-1 2.4.3.3) (`--live` only) |
-| `pcr-value-interval` | hard | no interval above `--repetition-ms` (default 40, TR 101 290), within one time base |
+| `pcr-value-interval` | hard | no interval above `--repetition-ms` (default 100, TR 101 290 V1.4.1), within one time base |
 | `pcr-release-timing` | hard | no more than `--release-pct-max` of intervals arrive further than `--release-ms` from the interval their own values assert, and accumulated drift stays within `--drift-ms`, being the standing lag the sender is allowed to hold; a sample below `--live-min-pcr` PCRs or `--live-cover-pct` of the window is a failure, not a pass (`--live` only) |
 | `pcr-position` | shape | share of PCR packets within `--adjacent-packets` of the previous one |
 | `pcr-schedule` | shape | share of PCR intervals whose bytes are within `--schedule-tolerance-pct` (default 1) or one packet of what `--mux-rate` implies (estimated from the capture if not given); hard, at that share, when `--schedule-pct-min` is given |

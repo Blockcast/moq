@@ -351,7 +351,7 @@ pub(crate) async fn connect(
 			qmux::ws::Client::new()
 				.with_protocols(alpns.iter().map(|&a| (a, qmux_versions_for(a))))
 				.with_connector(connector)
-				.with_keep_alive(qmux::ws::KeepAlive::default()) // 5s ping / 30s deadline, parity with QUIC
+				.with_keep_alive(qmux::ws::KeepAlive::default()) // 5s ping / 30s deadline; TCP backs off retransmits too far for QUIC's 10s
 				.connect(url.as_str())
 				.await
 				.map_err(Error::connect)?
@@ -537,6 +537,14 @@ impl Listener {
 	/// Accept the next connection and retain the WebSocket request URL, the chosen
 	/// sub-protocol, and the peer's address.
 	pub(crate) async fn accept_with_url(&self) -> Option<Result<(qmux::Session, Url, Accepted)>> {
+		Some(self.accept_pending().await.await)
+	}
+
+	/// Accept a socket and return its independently driven WebSocket upgrade, so a
+	/// peer that stalls mid-upgrade holds up only itself.
+	pub(crate) async fn accept_pending(
+		&self,
+	) -> impl Future<Output = Result<(qmux::Session, Url, Accepted)>> + Send + use<> {
 		let (stream, addr) = self.accept_socket().await;
 		tracing::debug!(%addr, "accepted WebSocket TCP connection");
 
@@ -579,11 +587,11 @@ impl Listener {
 			Ok(response)
 		};
 
-		let websocket = tokio_tungstenite::accept_hdr_async_with_config(stream, callback, None)
-			.await
-			.map_err(qmux::Error::from)
-			.map_err(Error::accept);
-		Some(websocket.map(|websocket| {
+		async move {
+			let websocket = tokio_tungstenite::accept_hdr_async_with_config(stream, callback, None)
+				.await
+				.map_err(qmux::Error::from)
+				.map_err(Error::accept)?;
 			let (protocol, url) = accepted
 				.lock()
 				.unwrap()
@@ -594,8 +602,8 @@ impl Listener {
 				Some(protocol) => upgraded.with_alpn(protocol).accept(),
 				None => upgraded.accept(),
 			};
-			(session, url, Accepted { remote: addr, protocol })
-		}))
+			Ok((session, url, Accepted { remote: addr, protocol }))
+		}
 	}
 
 	/// The `accept(2)` half: keep asking until a connection comes back.
@@ -711,7 +719,6 @@ mod tests {
 
 	#[tokio::test]
 	async fn fixed_addresses_keep_tls_name_and_request_host() {
-		tokio::time::pause();
 		check_tls_authority("relay.example", true, None).await;
 	}
 
@@ -722,7 +729,6 @@ mod tests {
 
 	#[tokio::test]
 	async fn ipv6_literal_fixed_addresses() {
-		tokio::time::pause();
 		check_tls_authority("[::1]", true, None).await;
 	}
 
@@ -733,6 +739,9 @@ mod tests {
 
 	/// Dial `wss://{url_host}` on loopback, optionally pinned to fixed addresses, and
 	/// check the TLS name and HTTP `Host` the server sees.
+	///
+	/// Stays on the wall clock. A paused clock auto-advances while the real dial
+	/// waits, so a timer on this path can fire before loopback delivers.
 	async fn check_tls_authority(url_host: &str, fixed: bool, tls_name: Option<&str>) {
 		let ipv6 = url_host.starts_with('[');
 		let name = tls_name.unwrap_or(url_host.trim_start_matches('[').trim_end_matches(']'));

@@ -29,23 +29,31 @@ has usually removed the other stale routes too, and the relay sends one
 retraction instead of advertising each stale path in turn. Requests still
 follow the current best route immediately; only the announcement waits.
 
+A path names one broadcast, whoever publishes it. When the route serving a
+broadcast dies, withdraws, or is beaten by a cheaper route, each subscription
+continues on the new route from the first frame its readers lack, so they see
+every frame once, mid-group included. A route that is still up finishes the
+groups it has open, overlapping the new one. A group neither route delivers is
+dropped once the readers' max age has passed it. A route through the subscribing peer
+itself is never used. A publisher whose groups restart, such as an encoder
+restarting from group 0, must publish under a new broadcast name; resumed under
+the old one, readers wait for its sequence to catch up.
+
 Failover routes must carry copies of the same broadcast. For each track, the
 relay requires matching timescale, retention window, publisher priority, and
-group ordering. A source with different properties is refused before its groups
-are spliced in. If no compatible source remains, the track fails with
+group ordering. A source with different properties is refused before it serves
+the track. If no compatible source remains, the track fails with
 `Unsupported`. New immutable properties require a new track name or broadcast
-identity.
+name.
 
 A route whose original publisher (its first hop) changes is updated in place on
-both wire protocols, so the broadcast never briefly vanishes downstream.
-Subscriptions already in flight keep draining the old publisher until it ends
-and are never spliced onto the new one. New requests resolve through the updated
-route as a fresh broadcast, without the old publisher's track properties.
+both wire protocols, so the broadcast never briefly vanishes downstream, and
+subscriptions in flight carry on through it.
 
 A publisher whose protocol names no hop (moq-transport without the cluster
 extension, moq-lite 01 through 03, or a peer that sends 0) gets a random first
 hop from the relay it connects to, fresh for each connection, followed by a 0.
-Its reconnect is therefore a new publisher downstream, a reprice on the same
+Its reconnect is therefore a new first hop downstream, a reprice on the same
 connection stays in place, and the 0 keeps it ranked as anonymous.
 
 ## Topology
@@ -67,6 +75,58 @@ For a full mesh, list every other relay, or serve the list from `connect_api`.
 A session carries both directions, so one dial per pair is enough; listing a
 pair on both sides opens a redundant second session.
 
+## Upstream links
+
+Mark a link `upstream` and this relay never offers it a route learned on
+another upstream link. Everything else still transits, and clients still see
+every route the relay knows. An edge marks its region's cores upstream, so it
+reaches every core and every core reaches its clients, but it never carries
+traffic from one core to another. A drone marks its CDN uplink upstream, so its
+mesh reaches the CDN and the CDN reaches the mesh, but the drone never carries
+traffic between CDN relays.
+
+```toml
+# edge.toml
+[cluster]
+connect = [
+  { url = "https://core-a.example.com/", upstream = true },
+  { url = "https://core-b.example.com/", upstream = true },
+]
+```
+
+The mark belongs to the link, whichever side dialed. A peer this relay dials
+is upstream when its `connect` or `connect_api` entry says so. A peer that
+dials in is upstream when its [grant](/bin/relay/auth#the-contract) sets
+`"upstream": true` beside `"peer": true`, so an edge whose auth server grants
+that to core certificates treats a core that dials it as upstream too. A
+relay that predates the mark treats every link as transit, so a cluster
+migrates one region at a time.
+
+Which relay dials which is still the peer list's job: there are no roles and
+no topology check, so whatever generates the list applies the layout's rules.
+Hiding a core from clients is admission, not routing: its auth refuses any
+session that is not a cluster peer.
+
+## TLS links
+
+A link inside a region is rarely congested, so it can skip QUIC: a `tls://`
+peer URL dials qmux over TLS on TCP, verified with the same `connect.tls`
+settings as any other dial. The accepting relay serves it from its TCP
+listener with TLS on. That listener asks for no client certificate, so a peer
+on it authenticates with a token (`cluster.token`, `token`, or `?jwt=`), not
+mTLS.
+
+```toml
+# core.toml
+[listen.tcp]
+bind = "[::]:4443"
+tls = true
+
+# edge.toml
+[cluster]
+connect = [{ url = "tls://core-a.internal:4443/", upstream = true }]
+```
+
 ## Link costs
 
 Add `?cost=N` to a peer URL to route by price instead of hop count. An unpriced
@@ -82,10 +142,14 @@ for paths the grant covers.
 
 Routing prefers the longest covering prefix, then a fully identified hop list
 over one that holds a 0 (an anonymous hop) at any depth, then the lowest cost,
-then the shortest hop list, breaking any remaining tie toward the newest
-announcement so a reconnecting publisher isn't outranked by the session it
-replaced. An assigned identity for an anonymous peer is local selection state
-and is never written into the hop list.
+then the shortest hop list, then a hash of the requested path and the hop list,
+breaking any remaining tie toward the newest announcement so a reconnecting
+publisher isn't outranked by the session it replaced. Hashing the requested
+path spreads equal-cost advertisers of one prefix, such as a transcode pool,
+across its paths instead of sending every path to one of them, and every relay
+that holds the same routes picks the same one for a given path. An assigned
+identity for an anonymous peer is local selection state and is never written
+into the hop list.
 
 ```toml
 [cluster]
@@ -93,7 +157,7 @@ connect = ["https://sibling.same-dc/?cost=0", "https://us-east.example.com/?cost
 ```
 
 The same policy reads as an object, which is the only form that accepts
-`egress` and `token`. A bare URL stays valid, and an object whose `url` still
+`egress`, `token`, and [`upstream`](#upstream-links). A bare URL stays valid, and an object whose `url` still
 carries `?cost=` or `?jwt=` alongside those fields is rejected rather than
 given a precedence a migration could silently get wrong.
 
@@ -184,6 +248,20 @@ detection and shortest-path routing. It is random on every start, which is fine
 for loop detection but makes a restarted relay look like a new node. Set
 `cluster.id` to a stable non-zero integer to pin it, below 2^53 if browser
 clients decode it.
+
+## Failure detection
+
+A peer that crashes or drops off the network sends no goodbye, so a relay only
+learns it is gone when the link goes quiet for [`quic.idle_timeout`](/bin/relay/config#quic)
+(10s by default). Until then its routes stay in place and subscribes through
+them go nowhere. Lower it to fail over faster; raise it if a lossy long-haul
+link drops while the peer is still alive, and keep `quic.keep_alive` well under
+it.
+
+QUIC uses the smaller of the two endpoints' idle timeouts
+([RFC 9000 section 10.1](https://www.rfc-editor.org/rfc/rfc9000#section-10.1)),
+so either relay on a link can shorten it for both. iroh links use the same
+timeout; WebSocket links keep their own 30s deadline.
 
 ## Authentication
 

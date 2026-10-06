@@ -1,5 +1,6 @@
 //! Fan-out benchmarks for the origin: its route table, the announce cursors
-//! watching it, request resolution, and the handoff between local sources.
+//! watching it, request resolution, the handoff between local sources, and the
+//! delivery through a front.
 //!
 //! Every shape is swept over both axes, publishers (routes) and subscribers
 //! (cursors), so a cost that grows with the size of the table rather than with
@@ -8,8 +9,12 @@
 //! down to its prefix and beneath it. Competing routes at that prefix are
 //! ranked once per change, then each cursor selects its first visible entry.
 //!
+//! An equal-cost pool is swept the same way, over its members and the paths it
+//! already serves.
+//!
 //! Run with `cargo bench -p moq-net --bench origin`.
 
+use std::task::Poll;
 use std::time::Duration;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
@@ -420,6 +425,96 @@ fn bench_request(c: &mut Criterion) {
 	group.finish();
 }
 
+/// `(members, paths)` shapes for an equal-cost pool: how many advertisers claim
+/// one prefix, against how many paths beneath it are already being served.
+const POOL: [usize; 3] = [4, 32, 256];
+const POOL_PATHS: [usize; 3] = [100, 1_000, 10_000];
+
+/// Hop ids for pool members, clear of the origin's own.
+const POOL_HOP: u64 = 1_000;
+
+/// An origin where `members` equal-cost advertisers claim `pool`, already
+/// serving `paths` requested paths beneath it, spread across the pool by the
+/// hash on each path. Every handle is held so the fronts stay up.
+struct Pool {
+	producer: origin::Producer,
+	driver: origin::Driver,
+	_members: Vec<origin::Dynamic>,
+	_producers: Vec<broadcast::Producer>,
+	_consumers: Vec<broadcast::Consumer>,
+}
+
+fn pool(members: usize, paths: usize) -> Pool {
+	let (producer, mut driver) = origin::Producer::new(origin::Config::new(Hop::new(1).unwrap()));
+	let consumer = producer.consume();
+	let members: Vec<_> = (0..members)
+		.map(|i| producer.dynamic("pool", pool_route(POOL_HOP + i as u64)).unwrap())
+		.collect();
+	let waiter = kio::Waiter::noop();
+
+	let requests: Vec<_> = (0..paths)
+		.map(|i| consumer.request_broadcast(format!("pool/job-{i}")))
+		.collect();
+	driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+	let mut producers = Vec::with_capacity(paths);
+	for member in &members {
+		while let Poll::Ready(request) = member.poll_requested_broadcast(&waiter) {
+			let broadcast = broadcast::Info::new().produce();
+			request.unwrap().accept(&broadcast);
+			producers.push(broadcast);
+		}
+	}
+	assert_eq!(producers.len(), paths, "every path reached a member");
+	driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+	let consumers = requests
+		.into_iter()
+		.map(|request| request.now_or_never().expect("resolved once driven").expect("served"))
+		.collect();
+
+	Pool {
+		producer,
+		driver,
+		_members: members,
+		_producers: producers,
+		_consumers: consumers,
+	}
+}
+
+/// A pool member's claim: one hop, at the same cost as every other member.
+fn pool_route(hop: u64) -> origin::Route {
+	peer_route(hop, 3)
+}
+
+/// A member joining and leaving a pool that already serves `paths` paths.
+///
+/// Every front under the prefix watches the routes covering it, so each one
+/// re-selects on both changes, and each selection scans the pool: the cost is
+/// paths times members by design, which this sweep makes visible. The fronts the
+/// newcomer outranks request through it, and fall back when it leaves before
+/// answering.
+fn bench_pool_churn(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/pool_churn");
+	// The widest shapes take a noticeable fraction of a second per iteration.
+	group.sample_size(10);
+	for members in POOL {
+		for paths in POOL_PATHS {
+			let id = BenchmarkId::from_parameter(format!("{members}m_{paths}p"));
+			group.bench_function(id, |b| {
+				let mut pool = pool(members, paths);
+				let waiter = kio::Waiter::noop();
+				let hop = POOL_HOP + members as u64;
+				b.iter(|| {
+					let joined = pool.producer.dynamic("pool", pool_route(hop)).unwrap();
+					pool.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+					drop(joined);
+					pool.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+				});
+			});
+		}
+	}
+	group.finish();
+}
+
 /// Publisher handoff at one path: a subscriber is reading from one local
 /// source when a second announces at the same path and takes over (newest
 /// wins). Measured from the standby's attach to the subscriber receiving its
@@ -480,6 +575,115 @@ fn bench_handoff(c: &mut Criterion) {
 	group.finish();
 }
 
+/// `(tracks, readers per track)` shapes for [`bench_relay`].
+const RELAY: [(usize, usize); 4] = [(1, 1), (1, 100), (100, 1), (10, 100)];
+
+/// Frames per group in [`bench_relay`].
+const RELAY_FRAMES: usize = 10;
+
+/// Steady-state delivery through a front: one group of [`RELAY_FRAMES`] frames per
+/// track, read in full by every reader of the broadcast the front serves. Readers
+/// drain the serving route's shared group cache directly, so measure both the track
+/// and reader axes.
+fn bench_relay(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/relay");
+	for (tracks, readers) in RELAY {
+		group.throughput(Throughput::Elements((tracks * readers * RELAY_FRAMES) as u64));
+		group.bench_function(BenchmarkId::from_parameter(format!("{tracks}t_{readers}r")), |b| {
+			let runtime = tokio::runtime::Builder::new_current_thread()
+				.enable_all()
+				.build()
+				.unwrap();
+			let (producer, driver) = origin::Producer::new(origin::Config::default());
+			runtime.spawn(moq_net::time::run(driver));
+			let broadcast = producer.publish("room/live", origin::Route::default()).unwrap();
+			let sources: Vec<_> = (0..tracks)
+				.map(|i| broadcast.create_track(format!("{i}"), None).unwrap())
+				.collect();
+			let mut subscriptions = runtime.block_on(async {
+				let resolved = producer.consume().request_broadcast("room/live").await.unwrap();
+				let mut subscriptions = Vec::new();
+				for i in 0..tracks {
+					let track = resolved.track(&format!("{i}")).unwrap();
+					for _ in 0..readers {
+						subscriptions.push(track.subscribe(None).await.unwrap());
+					}
+				}
+				subscriptions
+			});
+
+			b.iter_custom(|iterations| {
+				runtime.block_on(async {
+					let started = std::time::Instant::now();
+					for _ in 0..iterations {
+						for source in &sources {
+							let mut group = source.append_group().unwrap();
+							for _ in 0..RELAY_FRAMES {
+								group.write_frame(Timestamp::ZERO, b"frame".as_ref()).unwrap();
+							}
+							group.finish().unwrap();
+						}
+						for subscription in &mut subscriptions {
+							let mut group = subscription.recv_group().await.unwrap().expect("group");
+							for _ in 0..RELAY_FRAMES {
+								group.read_frame().await.unwrap().expect("frame");
+							}
+						}
+					}
+					started.elapsed()
+				})
+			});
+		});
+	}
+	group.finish();
+}
+
+/// Re-poll stalled groups through a front, including their subscription budget.
+/// Sweep tracks and readers separately to expose unrelated table scans.
+fn bench_parked(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/parked");
+	for tracks in [1, 100] {
+		for readers in [1, 100] {
+			group.throughput(Throughput::Elements((tracks * readers) as u64));
+			group.bench_function(BenchmarkId::from_parameter(format!("{tracks}t_{readers}r")), |b| {
+				let runtime = tokio::runtime::Builder::new_current_thread()
+					.enable_all()
+					.build()
+					.unwrap();
+				let (producer, driver) = origin::Producer::new(origin::Config::default());
+				runtime.spawn(moq_net::time::run(driver));
+				let broadcast = producer.publish("room/live", origin::Route::default()).unwrap();
+				let sources: Vec<_> = (0..tracks)
+					.map(|i| broadcast.create_track(format!("{i}"), None).unwrap())
+					.collect();
+				let _writers: Vec<_> = sources.iter().map(|source| source.append_group().unwrap()).collect();
+				let (subscriptions, mut groups) = runtime.block_on(async {
+					let resolved = producer.consume().request_broadcast("room/live").await.unwrap();
+					let mut subscriptions = Vec::new();
+					let mut groups = Vec::new();
+					for i in 0..tracks {
+						let track = resolved.track(&format!("{i}")).unwrap();
+						for _ in 0..readers {
+							let mut sub = track.subscribe(None).await.unwrap();
+							groups.push(sub.recv_group().await.unwrap().unwrap());
+							subscriptions.push(sub);
+						}
+					}
+					(subscriptions, groups)
+				});
+				let waiter = kio::Waiter::noop();
+				b.iter(|| {
+					for group in &mut groups {
+						assert!(group.poll_read_frame(&waiter).is_pending());
+					}
+				});
+				drop(subscriptions);
+			});
+		}
+	}
+	group.finish();
+}
+
 criterion_group!(
 	benches,
 	bench_announce,
@@ -491,6 +695,9 @@ criterion_group!(
 	bench_serve_idle,
 	bench_subscribe,
 	bench_request,
-	bench_handoff
+	bench_pool_churn,
+	bench_handoff,
+	bench_relay,
+	bench_parked
 );
 criterion_main!(benches);

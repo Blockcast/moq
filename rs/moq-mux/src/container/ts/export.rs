@@ -63,7 +63,7 @@ const PSI_INTERVAL: Duration = Duration::from_millis(500);
 /// table asking for faster repetition than this still gets it.
 const SI_REVISION_INTERVAL: Duration = Duration::from_secs(1);
 /// Emit a PCR on every crossing of this media-time grid ([`Schedule`]).
-/// TR 101 290 flags a gap over 40 ms; broadcast muxes emit every 25-40 ms.
+/// TR 101 290 V1.4.1 flags a gap over 100 ms; broadcast muxes emit every 25-40 ms.
 pub(super) const PCR_INTERVAL: Duration = Duration::from_millis(25);
 /// A null packet: PID 0x1FFF, payload only, all stuffing. Its continuity counter
 /// is don't-care (ISO 13818-1), so one template serves every one.
@@ -89,21 +89,6 @@ fn sanitize_mux_rate(rate: u64) -> Option<u64> {
 	(1..=MAX_MUX_RATE).contains(&rate).then_some(rate)
 }
 
-/// How an [`Export`]'s release clock is keeping up with the source. See [`Export::stats`].
-#[derive(Clone, Debug, Default, PartialEq)]
-#[non_exhaustive]
-pub struct Stats {
-	/// Frames dropped for arriving after their deadline, and the frames a video track then
-	/// dropped waiting for its next keyframe.
-	pub dropped: u64,
-	/// How fast the source's clock runs against ours, in parts per million (positive runs
-	/// fast), as last measured. `None` until there is a measurement.
-	pub drift: Option<f64>,
-	/// How many measurements found the source's clock further off ours than the 30 ppm an
-	/// MPEG-TS system clock may be (ISO/IEC 13818-1 2.4.2.1), which the output cannot follow.
-	pub out_of_tolerance: u64,
-}
-
 /// Subscribe to a broadcast and produce an MPEG-TS byte stream.
 ///
 /// Use [`next`](Self::next) to pull one [`Frame`] per PCR grid slot: its `payload`
@@ -118,7 +103,7 @@ pub struct Export<E: catalog::Catalog = ()> {
 	/// Tracks [`Self::resume`] left on the ended broadcast, resubscribed as the
 	/// returned catalog lists them.
 	stale: HashSet<String>,
-	/// How long after its decode time each frame goes out, and each source's staleness budget.
+	/// How long after its decode time each frame goes out.
 	delay: Duration,
 	/// Holds every track's frames until `delay` past their decode time, keyed by PID.
 	jitter: jitter::Buffer<u16, Queued>,
@@ -161,8 +146,9 @@ pub struct Export<E: catalog::Catalog = ()> {
 	replay: bool,
 	/// Wakes the export when the next grid slot is due on the jitter buffer's clock.
 	slot_timer: Option<std::pin::Pin<Box<web_async::time::Sleep>>>,
-	/// Output frames ready to hand out, one per grid slot.
-	queue: VecDeque<Frame>,
+	/// Output frames ready to hand out, one per grid slot, each with what it tells
+	/// [`Self::stats`] once returned.
+	queue: VecDeque<(Frame, Tally)>,
 	/// The rate to pad the output to with null packets, in bits per second: the
 	/// builder override when set, else the catalog's recorded multiplex rate, else
 	/// none and the output is unpadded ([`Schedule`]).
@@ -180,6 +166,17 @@ pub struct Export<E: catalog::Catalog = ()> {
 	/// up before it ever configures video. `None` until the tables are built, and for
 	/// programs with no video track (nothing to align to).
 	video_start: Option<Timestamp>,
+	/// Each elementary stream's access units and silence on the PCR returned ([`Self::stats`]).
+	liveness: super::import::Liveness,
+}
+
+/// What a queued output frame tells [`Export::stats`], applied only once the frame is
+/// returned: a rewind drops the queue unwritten.
+struct Tally {
+	/// The frame's PCR in 27 MHz ticks, and whether it flags a new time base.
+	pcr: (u64, bool),
+	/// The PID of each access unit whose packets begin in the frame.
+	units: Vec<u16>,
 }
 
 /// A frame read from its source.
@@ -461,6 +458,33 @@ enum Kind {
 	},
 }
 
+impl Kind {
+	/// The track suffix [`Import`](super::Import) gives a PID carrying this kind, so a stream's
+	/// row is named alike at both edges.
+	fn suffix(&self) -> &'static str {
+		match self {
+			Kind::Video(StreamType::H265) => ".hev1",
+			Kind::Video(_) => ".avc3",
+			Kind::Aac(_) => ".aac",
+			Kind::Opus { .. } => ".opus",
+			Kind::Mp2 { .. } => ".mp2",
+			Kind::Ac3 => ".ac3",
+			Kind::Eac3 => ".eac3",
+			Kind::Verbatim { .. } => ".ts",
+		}
+	}
+
+	/// The classification [`Import`](super::Import) would give this PID, so a row is graded
+	/// alike at both edges.
+	fn class(&self) -> super::StreamClass {
+		match self {
+			Kind::Video(_) => super::StreamClass::Video,
+			Kind::Aac(_) | Kind::Opus { .. } | Kind::Mp2 { .. } | Kind::Ac3 | Kind::Eac3 => super::StreamClass::Audio,
+			Kind::Verbatim { .. } => super::StreamClass::Data,
+		}
+	}
+}
+
 /// The program tables plus the resolved PID layout.
 struct Psi {
 	pat: Pat,
@@ -730,6 +754,7 @@ impl<E: catalog::Catalog> Export<E> {
 			slot_timer: None,
 			replay: false,
 			queue: VecDeque::new(),
+			liveness: Default::default(),
 			video_start: None,
 			mux_rate: None,
 			mux_rate_override: None,
@@ -769,8 +794,9 @@ impl<E: catalog::Catalog> Export<E> {
 	/// joiner runs at the delay from its first output. The output then keeps the source's
 	/// pace and muxes every track in `(DTS, PID)` order whatever the arrival skew between
 	/// them. A frame that arrives after its deadline is dropped, and a video track that
-	/// dropped one resumes at its next keyframe. The delay is also each source's staleness
-	/// budget (see [`Consumer`](crate::container::Consumer)).
+	/// dropped one resumes at its next keyframe. A stalled group is skipped once it falls
+	/// half the delay behind the newest content (see [`Consumer`](crate::container::Consumer)),
+	/// so the group after it still arrives with the other half to spare.
 	///
 	/// It is also how far ahead of its decode time a frame may go out, as early as the
 	/// receiver's buffers for its PID admit, so a heavy passage rides the slots before it
@@ -897,8 +923,7 @@ impl<E: catalog::Catalog> Export<E> {
 		// 4. Mux each frame the jitter buffer lets go (the first carries the buffered
 		// PAT/PMT), then lay out every grid slot whose time has come ([`Self::lay_due`]).
 		loop {
-			if let Some(out) = self.queue.pop_front() {
-				self.emitted_epoch = self.epoch;
+			if let Some(out) = self.pop() {
 				return Poll::Ready(Ok(Some(out)));
 			}
 			let ready = match self.held.take() {
@@ -919,6 +944,10 @@ impl<E: catalog::Catalog> Export<E> {
 				self.rewind();
 				self.generation = ready.generation;
 			}
+			debug_assert!(
+				ready.generation >= self.generation,
+				"the jitter buffer released an older generation after a newer one"
+			);
 			let name = self
 				.tracks
 				.iter()
@@ -937,8 +966,7 @@ impl<E: catalog::Catalog> Export<E> {
 			}
 		}
 		self.lay_due(waiter)?;
-		if let Some(out) = self.queue.pop_front() {
-			self.emitted_epoch = self.epoch;
+		if let Some(out) = self.pop() {
 			return Poll::Ready(Ok(Some(out)));
 		}
 
@@ -954,8 +982,7 @@ impl<E: catalog::Catalog> Export<E> {
 			if self.slot_due().is_none() {
 				self.lay(None)?;
 			}
-			if let Some(out) = self.queue.pop_front() {
-				self.emitted_epoch = self.epoch;
+			if let Some(out) = self.pop() {
 				return Poll::Ready(Ok(Some(out)));
 			}
 			if !self.schedule.is_empty() {
@@ -977,6 +1004,21 @@ impl<E: catalog::Catalog> Export<E> {
 		}
 
 		Poll::Pending
+	}
+
+	/// Return the next queued frame, committing what it carries to the output boundary.
+	fn pop(&mut self) -> Option<Frame> {
+		let (out, tally) = self.queue.pop_front()?;
+		self.emitted_epoch = self.epoch;
+		let (pcr, discontinuity) = tally.pcr;
+		if discontinuity {
+			self.liveness.discontinuity();
+		}
+		self.liveness.written_pcr(pcr);
+		for pid in tally.units {
+			self.liveness.delivered(pid, 1);
+		}
+		Some(out)
 	}
 
 	/// The trailing SI frame for end of stream: every entry's current sections,
@@ -1218,7 +1260,7 @@ impl<E: catalog::Catalog> Export<E> {
 			let kind = video_kind(config, name)?;
 			let mut track = match old.remove(name) {
 				Some(track) => track,
-				None => match ExportSource::for_video(&self.source, name, config, self.delay)?
+				None => match ExportSource::for_video(&self.source, name, config, self.budget())?
 					.map(|s| at_edge(s, self.replay))
 				{
 					Some(source) => Track::new(source, kind.clone()),
@@ -1233,7 +1275,7 @@ impl<E: catalog::Catalog> Export<E> {
 			let kind = audio_kind(config, name)?;
 			let mut track = match old.remove(name) {
 				Some(track) => track,
-				None => match ExportSource::for_audio(&self.source, name, config, self.delay)?
+				None => match ExportSource::for_audio(&self.source, name, config, self.budget())?
 					.map(|s| at_edge(s, self.replay))
 				{
 					Some(source) => Track::new(source, kind.clone()),
@@ -1255,13 +1297,29 @@ impl<E: catalog::Catalog> Export<E> {
 			};
 			let mut track = match old.remove(name) {
 				Some(track) => track,
-				None => Track::new(ExportSource::for_stream(&self.source, name, self.delay)?, kind.clone()),
+				None => Track::new(
+					ExportSource::for_stream(&self.source, name, self.budget())?,
+					kind.clone(),
+				),
 			};
 			track.buffer = verbatim_buffer(&kind, &entry.descriptors);
 			track.kind = kind;
 			self.refresh(name, track, pids[name], entry.descriptors.clone());
 		}
-		self.jitter.expect(self.tracks.values().map(|track| track.pid));
+		// The clock anchors on whichever track a source sends latest against its decode time
+		// (audio just in time while video runs most of a second ahead), so it waits to hear
+		// from each. Not from sections: SCTE-35 and the like are sparse, and would hold every
+		// join for the full bound.
+		let continuous = self.tracks.values().filter(|track| {
+			!matches!(
+				track.kind,
+				Kind::Verbatim {
+					framing: catalog::Framing::Section,
+					..
+				}
+			)
+		});
+		self.jitter.expect(continuous.map(|track| track.pid));
 		Ok(())
 	}
 
@@ -1277,16 +1335,17 @@ impl<E: catalog::Catalog> Export<E> {
 	/// The PIDs and PMT stay as announced. A track the returned catalog does not list stays
 	/// finished, silent on its PID.
 	fn resubscribe(&mut self, catalog: &Catalog<E>, mpegts: &catalog::Mpegts) -> anyhow::Result<()> {
+		let budget = self.budget();
 		for (name, track) in self.tracks.iter_mut() {
 			if !self.stale.contains(name) {
 				continue;
 			}
 			let source = if let Some(config) = catalog.video.renditions.get(name) {
-				ExportSource::for_video(&self.source, name, config, self.delay)?.map(|s| at_edge(s, self.replay))
+				ExportSource::for_video(&self.source, name, config, budget)?.map(|s| at_edge(s, self.replay))
 			} else if let Some(config) = catalog.audio.renditions.get(name) {
-				ExportSource::for_audio(&self.source, name, config, self.delay)?.map(|s| at_edge(s, self.replay))
+				ExportSource::for_audio(&self.source, name, config, budget)?.map(|s| at_edge(s, self.replay))
 			} else if mpegts.tracks.get(name).is_some_and(|t| t.verbatim.is_some()) {
-				Some(ExportSource::for_stream(&self.source, name, self.delay)?)
+				Some(ExportSource::for_stream(&self.source, name, budget)?)
 			} else {
 				None
 			};
@@ -1307,13 +1366,35 @@ impl<E: catalog::Catalog> Export<E> {
 		self.jitter.dropped()
 	}
 
-	/// How the release clock is keeping up with the source.
-	pub fn stats(&self) -> Stats {
-		Stats {
+	/// Snapshot the access units each elementary stream has written, how long each has been
+	/// quiet on the PCR the output carries, and how the release clock is keeping up with the
+	/// source.
+	///
+	/// A track stalled upstream stops advancing its row while the PSI and the other PIDs
+	/// keep flowing, which nothing graded on the output bytes alone can see. The rows are
+	/// empty until the program tables are built. Cheap enough to poll per frame.
+	pub fn stats(&self) -> super::stats::Export {
+		let mut stats = super::stats::Export {
 			dropped: self.jitter.dropped(),
 			drift: self.jitter.drift().map(|drift| drift * 1e6),
 			out_of_tolerance: self.jitter.out_of_tolerance(),
+			..Default::default()
+		};
+		if self.psi.is_none() {
+			return stats;
 		}
+		for track in self.tracks.values() {
+			let (units, quiet) = self.liveness.stream(track.pid);
+			let row = super::StreamStats {
+				track: track.kind.suffix(),
+				class: track.kind.class(),
+				units,
+				quiet,
+				..Default::default()
+			};
+			stats.streams.insert(track.pid, row);
+		}
+		stats
 	}
 
 	/// When the next queued frame is due, or the next grid slot while media is queued or
@@ -1560,6 +1641,9 @@ impl<E: catalog::Catalog> Export<E> {
 
 		self.schedule.set_buffer(0, Buffer::SYSTEM);
 		self.schedule.set_buffer(pmt_pid, Buffer::SYSTEM);
+		for track in self.tracks.values() {
+			self.liveness.register(track.pid);
+		}
 		self.psi = Some(Psi {
 			pat,
 			pmt,
@@ -1764,6 +1848,13 @@ impl<E: catalog::Catalog> Export<E> {
 		Some((known, self.jitter.at(settled)?))
 	}
 
+	/// How far a stalled group may fall behind the newest content before each source skips it:
+	/// half the delay. A skip comes once the next group's start is that far behind, and its
+	/// frames are only read then, so with the whole delay they would arrive at their deadline.
+	fn budget(&self) -> Duration {
+		self.delay / 2
+	}
+
 	/// Lay out every grid slot whose time has come, and wake when the next one is due.
 	fn lay_due(&mut self, waiter: &kio::Waiter) -> anyhow::Result<()> {
 		while let Some((known, at)) = self.slot_due() {
@@ -1806,17 +1897,23 @@ impl<E: catalog::Catalog> Export<E> {
 		let (pcr_pid, pmt_pid) = (psi.pcr_pid, psi.pmt_pid);
 		while let Some(slot) = self.schedule.next(known)? {
 			let mut payload = pcr_packet(pcr_pid, slot.pcr)?;
-			if std::mem::take(&mut self.pcr_discontinuity) {
+			let discontinuity = std::mem::take(&mut self.pcr_discontinuity);
+			if discontinuity {
 				payload[5] |= 0x80;
 			}
 			payload.extend_from_slice(&slot.layout(pmt_pid, &NULL_PACKET));
 			self.number(&mut payload);
-			self.queue.push_back(Frame {
+			let frame = Frame {
 				timestamp: slot_stamp(slot.index)?,
 				duration: None,
 				payload: Bytes::from(payload),
 				keyframe: slot.keyframe,
-			});
+			};
+			let tally = Tally {
+				pcr: (slot.pcr, discontinuity),
+				units: slot.units,
+			};
+			self.queue.push_back((frame, tally));
 		}
 		Ok(())
 	}
@@ -2135,7 +2232,7 @@ fn video_kind(config: &VideoConfig, name: &str) -> anyhow::Result<Kind> {
 /// Start a media track's source at the live edge, the newest group, so the export does not
 /// begin on a group up to a delay old and carry that lag ever after; unless `replay`.
 /// Verbatim streams are sparse, and anything of theirs ahead of the first keyframe is
-/// dropped anyway, so they keep the delay's reach.
+/// dropped anyway, so they reach back as far as the skip budget allows.
 fn at_edge(source: ExportSource, replay: bool) -> ExportSource {
 	match replay {
 		true => source,

@@ -14,7 +14,7 @@ Decided 2026-09-29 by the maintainer, after walking through a page-load fix,
 a Live/Offline toggle, and a per-session `live()`:
 
 - The marker answers "has the initial list arrived?" Only one-shot listing
-  (`moq ls`, shell completion) uses it, and no app does: room, watch, and the
+  (`moq ls`, shell completion, both since removed) used it, and no app does: room, watch, and the
   demo skip it. An origin merges many sessions and local publishers, so
   "caught up" there needs aggregation across connections that start, fail,
   and reconnect independently. That produced the page-load race, the special
@@ -31,7 +31,7 @@ a Live/Offline toggle, and a per-session `live()`:
 
 Guidance:
 
-- The marker lives on `dev` only (Rust since #4059, JS since #4261, bindings
+- The marker is unreleased, on `main` only (Rust since #4059, JS since #4261, bindings
   since #4266), so this deletion breaks nothing published.
 - Look for code that only exists to produce the marker, and delete it rather
   than stubbing it: replay/landing counters in the origin, holds taken by the
@@ -44,8 +44,4 @@ Guidance:
 - Run `just test interop --all`.
 
 Public API: removes `AnnounceEvent::Live` / `{ kind: "live" }` /
-`MoqAnnounceEvent::Live` and the binding aliases, on `dev`. Wire: none.
-
-## Required
-
-- [moq announced](/quest/m1/cli-announced.md) - the CLI stops reading the marker first
+`MoqAnnounceEvent::Live` and the binding aliases. Wire: none.

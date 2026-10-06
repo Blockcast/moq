@@ -92,8 +92,8 @@ export const StreamCode = Object.freeze(
 		Evicted: 0x35 as StreamCode,
 		/** A frame declared a payload larger than the receiver accepts. */
 		FrameTooLarge: 0x38 as StreamCode,
-		/** The publisher could serve this request but has no capacity for it now. */
-		NoCapacity: 0x30 as StreamCode,
+		/** The broadcast is neither announced nor served, so there is no route to it. */
+		Unroutable: 0x36 as StreamCode,
 		/** A group grew past its cache budget and was aborted. */
 		GroupTooLarge: 0x32 as StreamCode,
 	} as const),
@@ -243,6 +243,21 @@ export class NotFound extends Stream {
 	constructor(what: string, options?: { cause?: unknown }) {
 		super(StreamCode.NotFound, { ...options, message: `not found: ${what}` });
 		this.name = "NotFound";
+	}
+}
+
+/**
+ * A peer's GOAWAY named a redirect the connection refuses, or one it could not parse.
+ *
+ * Terminal: the peer is leaving, so the connection stops rather than redialing the old
+ * address. Mirrors the Rust `Error::RefusedRedirect`.
+ *
+ * @public
+ */
+export class RefusedRedirect extends Error {
+	constructor(reason: string) {
+		super(`GOAWAY redirect refused: ${reason}`);
+		this.name = "RefusedRedirect";
 	}
 }
 

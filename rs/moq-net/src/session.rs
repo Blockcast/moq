@@ -170,8 +170,7 @@ impl Session {
 	/// is still live never finishes, so finish or abort tracks before closing.
 	///
 	/// Both protocols withdraw this session's announcements and wait for their
-	/// delivery. IETF drafts 14 through 16 send withdrawals without waiting, and
-	/// IETF media streams are not drained yet.
+	/// delivery. IETF drafts 14 through 16 send withdrawals without waiting.
 	pub async fn close(self) -> Result<(), Error> {
 		if let Ok(mut close) = self.close.write()
 			&& close.is_none()
@@ -279,6 +278,7 @@ impl Session {
 		});
 
 		let supervisor = Supervisor {
+			local_close: protocol.local_close(),
 			runtime: runtime.clone(),
 			closed_watch: session.clone(),
 			session,
@@ -319,6 +319,7 @@ impl Session {
 ///
 /// Finishes once the transport reports closed; everything else is moot then.
 pub(crate) struct Supervisor<S> {
+	local_close: Arc<std::sync::atomic::AtomicBool>,
 	runtime: crate::time::Clock,
 	session: S,
 	// A dedicated clone for the close watch, since each pending poll operation
@@ -343,7 +344,7 @@ enum Drain {
 	/// Nobody asked for one.
 	Idle,
 	/// Requested: close once drained, or at the deadline.
-	Waiting(crate::runtime::Deadline<crate::time::Clock>),
+	Waiting(crate::time::Deadline),
 	/// The drain closed the transport, with this outcome.
 	Done(Result<(), Error>),
 }
@@ -352,9 +353,7 @@ enum SamplerMode {
 	/// Nobody wants stats; sampling is paused.
 	Idle,
 	/// Someone does; sample when the deadline elapses.
-	Polling {
-		deadline: crate::runtime::Deadline<crate::time::Clock>,
-	},
+	Polling { deadline: crate::time::Deadline },
 }
 
 impl<S: crate::transport::poll::Session> Supervisor<S> {
@@ -395,9 +394,12 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 			}) {
 				Poll::Ready(Ok(request)) => (request, false),
 				Poll::Ready(Err(last)) => (
-					last.clone().unwrap_or_else(|| Close::Abort {
-						code: SessionError::Cancel.to_code(),
-						reason: "dropped".to_string(),
+					last.clone().unwrap_or_else(|| {
+						self.local_close.store(true, std::sync::atomic::Ordering::Relaxed);
+						Close::Abort {
+							code: SessionError::Cancel.to_code(),
+							reason: "dropped".to_string(),
+						}
 					}),
 					true,
 				),
@@ -411,7 +413,7 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 				}
 				Close::Drain => {
 					if !draining {
-						self.drain = Drain::Waiting(crate::runtime::Deadline::after(&self.runtime, CLOSE_TIMEOUT));
+						self.drain = Drain::Waiting(crate::time::Deadline::after(&self.runtime, CLOSE_TIMEOUT));
 					}
 					// No handle is left to abort.
 					if last {
@@ -443,6 +445,7 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 			false if deadline.poll(waiter).is_ready() => Err(Error::Timeout),
 			false => return false,
 		};
+		self.local_close.store(true, std::sync::atomic::Ordering::Relaxed);
 		self.session.close(SessionError::Cancel.to_code(), "");
 		self.drain = Drain::Done(res);
 		// The transport is closed, so no later request can change anything.
@@ -465,7 +468,7 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 		stats.demanded = false;
 		drop(stats);
 		self.mode = SamplerMode::Polling {
-			deadline: crate::runtime::Deadline::after(&self.runtime, Self::POLL_INTERVAL),
+			deadline: crate::time::Deadline::after(&self.runtime, Self::POLL_INTERVAL),
 		};
 	}
 

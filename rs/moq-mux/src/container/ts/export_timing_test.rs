@@ -18,7 +18,7 @@ use tokio::time::Instant;
 use crate::catalog::hang::Container as HangContainer;
 use crate::container::ts::Export;
 use crate::container::ts::export::PCR_INTERVAL;
-use crate::container::ts::export::Stats;
+use crate::container::ts::stats::Export as Stats;
 use crate::container::{Container as _, Frame, Producer};
 
 const SPS: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xde];

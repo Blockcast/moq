@@ -7,8 +7,9 @@ description: The moq media router, for publishing, playing, converting, and gate
 
 `moq` is a media router. One process connects to a relay (or hosts sessions
 itself) and moves media into MoQ from a source, out of MoQ to a sink, or plays
-it locally. Install it with `cargo install moq-cli`, brew, apt, dnf, winget,
-or Docker; see [Install](/setup/install).
+it locally. On macOS or Linux, install it with
+`curl -fsSL https://moq.sh | sh`, or use cargo, brew, apt, dnf, winget, or
+Docker; see [Install](/setup/install).
 
 ## What it does
 
@@ -18,12 +19,14 @@ or Docker; see [Install](/setup/install).
 | `import` | `capture` | Capture a camera, display, window, or app plus a microphone, and encode natively. |
 | `import` | `hls <url>` | Pull a remote HLS playlist. |
 | `import` | `rtmp`, `srt`, `rtc` | Accept pushes (`--listen`) or pull from a remote (`--connect`). |
+| `import` | `archive <url>` | Replay a recording from an object store. |
 | `export` | `fmp4`, `mkv`, `ts`, `flv`, `h264`, `h265` | Write a container to stdout. |
 | `export` | `hls --listen` | Serve the broadcast as HLS over HTTP. |
 | `export` | `rtmp`, `srt`, `rtc` | Serve plays (`--listen`) or push to a remote (`--connect`). |
+| `export` | `archive <url>` | Record the broadcast into an object store. |
 | `play` | | Decode and play in a native window with sound. |
 | `transcode` | | Publish a just-in-time rendition ladder next to a broadcast. |
-| `ls` | `[prefix]` | List the broadcasts live on a relay. |
+| `announced` | `[prefix]` | Follow the broadcasts announced on a relay. |
 | `fetch` | `<track>` | Write one group of a track to stdout. |
 | `auth` | | Generate, sign, and verify relay JWTs. |
 | `devices` | | List capture sources and their ids. |
@@ -34,7 +37,7 @@ or Docker; see [Install](/setup/install).
 moq <MoQ side> import <source> [options]
 moq <MoQ side> export <sink> [options]
 moq <MoQ side> play [options]
-moq <MoQ side> ls [prefix] [options]
+moq <MoQ side> announced [prefix] [options]
 moq <MoQ side> fetch <track> [options]
 ```
 
@@ -83,6 +86,30 @@ downstream sees it. A sparse stream such as SCTE-35 goes quiet between cues, so
 the line reports rather than alarms; `Import::stats` carries the same counters
 for a caller that sets its own limit.
 
+`import ts` also counts the ETSI TR 101 290 errors of the feed it receives, at
+that standard's fixed limits: `TS_sync_loss`, `Sync_byte_error`, `PAT_error`,
+`Continuity_count_error`, `PMT_error`, `Transport_error`, `CRC_error` (PAT and
+PMT), `PCR_repetition_error`, `PCR_discontinuity_indicator_error` and
+`PTS_error`. They are cumulative, logged with their totals in the sample after
+any of them moves, and carried on `Import::stats` stream-wide and per PID. They
+change nothing that is published. They grade the stream as it reached the
+importer, not the wire a receiver sees downstream, and the PCR checks grade
+consecutive PCR values rather than arrival times, so they speak for the encoder
+and not for the network in front of the importer. Table, PCR and PTS intervals
+run on the program clock, which starts at the first PCR after the PMT.
+`PID_error` is covered, more strictly, by the access-unit counts above.
+`PCR_accuracy_error` is not measured.
+
+A corrupt media packet, malformed PES header, or damaged codec access unit is
+refused whole and counted in the PID's cumulative `damaged` counter, beside
+`resyncs`, `discarded`, and `unconfirmed`. Ingest continues on every other PID.
+Video closes its group at the break and resumes at its next keyframe, as it does
+after a continuity-counter gap: the pictures in between may reference the lost
+one, so they are dropped rather than decoded with artefacts. Each break freezes
+video for up to one GOP. The shared TS stats log reports each counter increase,
+including at the end of input. Publishing, catalog, and clock errors still end
+the import.
+
 MPEG-TS import takes one program. A multi-program stream is refused before
 anything is published, naming its programs, rather than merged onto one clock;
 a PAT that adds a program mid-stream ends the import the same way.
@@ -91,6 +118,11 @@ the first PAT lists as its own broadcast, with its own clock and catalog, keepin
 the catalog suffix last: `--broadcast event.hang` publishes `event/1.hang`,
 `event/2.hang`, and so on. `export ts` writes one program per broadcast.
 `import srt` takes the same `--program`.
+A selected program's SI describes that service alone: its SDT lists only the
+selected service, and other services' EIT is dropped. Network-wide tables (NIT,
+BAT, TDT/TOT, and the SDT and EIT of other transport streams) pass through.
+SI matches the selection by DVB `service_id`, which is assumed to equal the PAT
+`program_number`.
 
 ```bash
 moq --connect https://relay.example.com/anon --broadcast event.hang import ts --program all < mux.ts
@@ -123,30 +155,67 @@ arrive by its decode time at the rate fails the export with an error naming both
 knobs; a broadcast-sized decoder buffer (a CPB of a second or more) needs a delay to
 match. A VBR source records no rate, so export without one stays unpadded.
 
+The `fmp4`, `mkv`, `flv`, `h264`, and `h265` exports select renditions with
+flags before the sink: `--video-name` and `--audio-name` pick a rendition,
+`--video-codec` and `--audio-codec` keep a codec family, and `--no-video` or
+`--no-audio` leaves a role out. `h264` and `h265` refuse `--no-video` and the
+audio selection flags. `ts`, `archive`, and the gateways don't apply selection, so they
+refuse these flags.
+
+```bash
+moq ... export --no-video fmp4 > audio.mp4
+moq ... export --video-name hd --no-audio mkv > hd.mkv
+```
+
 fMP4 export writes one fragment per publisher group on each track. Audio follows
 the publisher's cuts; video normally follows GOPs. Closing a group flushes it
 even when the live publisher pauses. `--fragment-duration 2s` caps
 the fragment span as frames arrive, including audio whose publisher never cuts.
 MKV uses the same flag to cap clusters, which otherwise follow video GOPs.
 
+The fMP4 init segment declares every rendition in the catalog, so it waits until
+each can be described. An Annex-B H.264 or H.265 track, or video whose catalog
+leaves out its dimensions, waits for its first keyframe; the other tracks keep
+reading meanwhile and their fragments follow the init. A track that is still
+waiting once another has queued 30 seconds fails the export. After the init the
+track set is fixed: a rendition that leaves and returns with the same codec
+configuration is written under its original track, while a new rendition, a
+changed configuration, or a return that replays media already written ends the
+export with an error naming it. Restart the export to pick up a new rendition.
+An Opus rendition declared without its OpusHead gets a guessed pre-skip. A
+head that arrives later with the same channel count, decode rate, and gain is
+accepted even if its pre-skip and input rate differ. An init already written
+keeps the guess, and later heads must match the first one.
+
 ## Play
 
 ```bash
 moq --connect https://relay.example.com/anon --broadcast my-stream.hang play
-moq ... play --delay 500ms          # trade latency for a jittery link
+moq ... play --delay 500ms          # fix the delay instead of measuring it
+moq ... play --no-video             # audio only
 ```
 
 Decodes H.264, H.265, and AV1 video using the platform hardware decoder where
 available, and Opus, PCM, and AAC-LC (mono or stereo) audio in software. The
-log names the decoder each track opened. `--video-name` and `--audio-name`
-pick a rendition. HE-AAC signaled only in band (implicit SBR, as over MPEG-TS)
-plays as its half-rate AAC-LC core.
+opt-in `vpx` feature adds software VP8 and VP9 (8-bit 4:2:0) through libvpx,
+which the build host must provide. The log names the decoder each track
+opened. `--video-name` and `--audio-name` pick a rendition, and `--no-video` or
+`--no-audio` leaves a role out. `--no-video` still opens a window, which stays
+blank; closing it stops playback. HE-AAC signaled only in band (implicit SBR, as
+over MPEG-TS) plays as its half-rate AAC-LC core.
 
-Playback runs on a clock it owns. `--delay` (default 100 ms) is how far it
-trails the live edge, which is both the jitter a late frame may absorb and the
-point past which a stalled group is skipped. The speaker holds the delay, with a
-50 ms floor under it, and the picture is scheduled against where the speaker
-actually is. While video owns the clock, a frame arriving earlier than predicted
+Playback runs on a clock it owns. `--delay` is how far it trails the live
+edge: the jitter a late frame may absorb. The default, `auto`, measures how
+unevenly audio arrives and sizes the speaker's buffer to match, using the same
+[algorithm](/concept/audio-jitter) as the browser player, so a publisher that
+flushes 100 ms at a time gets a buffer deep enough to play through the next
+flush. It waits up to 2 s on a stalled group before skipping it, since a budget
+any shorter would hide the very lateness it measures; a broadcast with no audio
+has nothing to measure, so video trails by 100 ms and skips past that. A duration fixes the delay
+instead, and doubles as the point past which a stalled group is skipped. The
+speaker holds the delay, with a 50 ms floor under it: it pads back up to the
+delay after running dry and skips back down onto it after a burst. The picture
+is scheduled against where the speaker actually is. While video owns the clock, a frame arriving earlier than predicted
 pulls playback forward, so a late start catches up to live instead of staying
 behind it. Once the speaker owns the clock, video follows the speaker instead.
 
@@ -193,6 +262,16 @@ id. Requires the `capture` feature; on Linux that needs the ALSA headers for
 the microphone, and `--display` and `pipewire:` cameras also need the
 `pipewire` feature (links libpipewire).
 
+On Windows, display and window capture use Windows.Graphics.Capture and
+require Windows 10 2004 (build 19041) or newer. Cursor capture follows the
+capture configuration. The system capture border stays visible unless the OS
+supports borderless capture and grants access. Frames are converted to NV12
+on the GPU; software encoding reads them back. Windows application capture
+and system audio are separate capabilities, not enabled by this backend.
+Windows `display:N` selectors are enumeration indices; switching from Desktop
+Duplication to WGC can change which monitor a saved selector names. Run
+`moq devices` again and reselect the intended display after upgrading.
+
 ## Transcode
 
 ```bash
@@ -224,28 +303,30 @@ heights and bitrates must then increase strictly together. Duplicate heights or
 bitrates, inverted rankings, and zero-sized or zero-bitrate rungs are rejected
 before connecting.
 
-## List
+## Announced
 
 ```bash
-moq --connect https://relay.example.com/anon ls
-moq ... ls room --follow --json
+moq --connect https://relay.example.com/anon announced
+moq ... announced room --json
 ```
 
-Lists the broadcasts live on a relay over MoQ, with the session's own auth: the
-counterpart of the relay's HTTP `/announced/<prefix>`. It prints one path per
-line, relative to the `--connect` path, and exits once the relay has sent
-everything live under `prefix`. `--follow` keeps running: it prints `+ path`
-for each live broadcast, then `+ path` and `- path` as broadcasts come and go,
-and exits non-zero if the session ends. `--json` prints
-`{"path": "room/alice", "active": true}` per line instead, in either mode.
+Follows the broadcasts announced on a relay over MoQ, with the session's own
+auth: the live counterpart of the relay's HTTP `/announced/<prefix>`. Paths are
+relative to the `--connect` path. On a terminal it shows what is announced
+under `prefix` right now, redrawn as broadcasts start and end, and a list
+taller than the terminal ends in a count of the rest. Piped, it prints
+`+ path` for each broadcast already announced, then `+ path` and `- path` as
+broadcasts come and go. `--json` prints `{"path": "room/alice", "active": true}`
+per line instead, on a terminal or not. It runs until interrupted, and exits
+non-zero if the session ends.
 
-Like `/announced`, it lists announced prefixes, which by convention are
-broadcast paths. A new route to a path already live prints nothing. A name
-starting with `.` stays hidden unless `prefix` names it. `ls` only dials
+Like `/announced`, it follows announced prefixes, which by convention are
+broadcast paths. A new route to a path already announced prints nothing. A name
+starting with `.` stays hidden unless `prefix` names it. `announced` only dials
 `--connect`, and refuses any other MoQ-side flag.
 
-[Inspect a relay](/bin/inspect) walks through `ls` and `fetch` next to their
-`curl` equivalents, including reading the relay's stats.
+[Inspect a relay](/bin/inspect) walks through `announced` and `fetch` next to
+their `curl` equivalents, including reading the relay's stats.
 
 ## Fetch
 
@@ -268,6 +349,41 @@ refuses any listener, cluster, auth, or `--hop` flag. It gives up after 30
 seconds, as `/fetch` does, and exits non-zero when the broadcast or group is not
 found (before writing anything), the relay refuses, or the deadline passes.
 
+## Archive
+
+```bash
+# Record a broadcast until it ends
+moq --connect https://relay.example.com/anon --broadcast event.hang export archive s3://recordings/event
+
+# Replay it under another name
+moq --connect https://relay.example.com/anon --broadcast event-replay.hang import archive s3://recordings/event
+```
+
+`export archive` records one broadcast with
+[moq-archive](https://docs.rs/moq-archive), reading its catalog as it changes.
+Every track gets its own timeline, stored in spans cut at group boundaries
+between 2s and 10s. The catalog and every text, JSON, and binary track are
+sparse data, so each of their groups is stored as soon as it finishes, and a
+group that never closes is stored in pieces as it grows. It refuses a rendition served
+from another broadcast, and one that returns after the catalog dropped it. The
+stage ends once the broadcast does. A store URL that already holds a
+recording is continued: each track resumes after its newest stored span. `--retention 1h` keeps only the last hour (a DVR),
+deleting expired objects, and timeline objects no longer needed to recover it,
+`--retention-grace` (default 30s) after the timeline stops needing them. Every
+track keeps at least its newest span, so a catalog that never changes outlives
+the video it was published with.
+
+`import archive` republishes a recording: each track's timeline replays as a
+live track and every track's groups are served on request, one object GET per
+stored span. By default it replays what is stored and ends the timelines there;
+`--follow 2s` keeps checking for new spans, and newly recorded tracks, of a
+recording still being made.
+
+Store URLs are `file:///absolute/path`, `s3://bucket/prefix`,
+`gs://bucket/prefix`, or `az://container/prefix`. Cloud credentials come from
+the usual `AWS_*`, `GOOGLE_*`, and `AZURE_*` environment variables. The `s3`,
+`gcs`, and `azure` cargo features are on by default.
+
 ## Multiple stages
 
 Separate stages with `--` to bridge several broadcasts, or both directions,
@@ -276,16 +392,17 @@ over one connection:
 ```bash
 moq --connect https://relay.example.com/anon \
     import --broadcast event.hang srt --listen 0.0.0.0:9000 \
-    -- export --broadcast event.hang hls --listen 0.0.0.0:8080
+    -- export --broadcast event.hang hls --listen 0.0.0.0:8080 \
+    -- export --broadcast event.hang archive file:///recordings/event
 ```
 
 ## Redundant publishers
 
-Two publishers that share a Hop ID (`--hop 42`) are treated as
-interchangeable sources: relays hold both routes and fail over at a group
-boundary. They must produce identical tracks with aligned groups. Everywhere
-else leave `--hop` unset: a fresh id per run is what makes a restarted
-encoder take over cleanly instead of splicing mid-stream.
+Two publishers of the same broadcast name are interchangeable sources:
+relays hold both routes and fail over between them mid-group. They must
+produce identical tracks with aligned groups. A restarted encoder is the same
+broadcast too, so one whose groups restart from 0 must publish under a new
+name, or viewers wait for its sequence to catch up.
 
 ## Cluster
 
@@ -365,21 +482,26 @@ stalled group before skipping. Raising the first never delays playback.
 receiver's latency. Every frame is muxed that long after its decode time, on
 a clock that keeps the source's pace and muxes all tracks in decode order
 whatever their arrival skew: two exporters of one broadcast emit them in one
-order. The export joins at the newest group and holds its output until a
-track starts its next group, or one of the frames it holds falls due, then
-starts the clock on the freshest frame it saw. What of the joined group is
-older than the delay is dropped, so a joiner runs at the delay from its first
-output. A frame that arrives later than its deadline is dropped, and video
-then resumes at its next keyframe. The clock follows the source's, measured
-from the frames that arrive least delayed, so a source whose clock runs a
+order. The export joins at the newest group and holds its output until it
+has heard from every audio, video and PES track (two delays at most) and a
+track starts its next group, or one of the frames it holds falls due. It then
+starts the clock on the track the source sends latest against its decode time,
+from that track's freshest frame: a broadcast TS sends video most of a second
+ahead and audio just in time, and the audio must keep the delay too. What of
+the joined group is older than the delay is dropped, so a joiner runs at the
+delay from its first output. A frame that arrives later than its deadline is
+dropped, and video then resumes at its next keyframe. The clock follows the
+source's, measured from the frames that arrive least delayed on the track sent
+latest, so a source whose clock runs a
 little fast or slow neither goes late nor piles up over a long run, and a
 spell of network queueing does not move it. The output's PCR is that clock,
 so it keeps to what ISO/IEC 13818-1 allows a system clock: within 30 ppm of
 the exporter's, its rate changing by at most 0.075 Hz/s. Catching up with a
 source near that limit takes hours; one further off is counted in the
 export's stats, and fails the export once it has used half the delay. Each
-25 ms slice of the output is written when the clock reaches it. The delay is also how
-stale a group may get before it is skipped. `--delay 0` holds nothing and drops
+25 ms slice of the output is written when the clock reaches it. A stalled group
+is skipped once it falls half the delay behind, leaving the group after it the
+other half. `--delay 0` holds nothing and drops
 nothing, writing frames in arrival order as they come.
 
 A stdout export ends with the broadcast. `export ts --linger 10s` waits that
@@ -393,7 +515,7 @@ way. Only `ts` can mark the restart, so the other formats refuse `--linger`.
 ## Debugging
 
 `RUST_LOG=debug` prints the negotiated version and every subscription.
-`moq --connect <url> ls`, or `curl http://relay:4443/announced`, confirms the
+`moq --connect <url> announced`, or `curl http://relay:4443/announced`, confirms the
 relay is reachable and shows what it holds; see [Inspect a relay](/bin/inspect). Connection refused means UDP isn't getting through; certificate
 errors on a dev relay want `--connect-tls-insecure` or the `http://`
 fingerprint flow.

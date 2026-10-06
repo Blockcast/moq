@@ -139,6 +139,8 @@ pub(super) struct Slot {
 	pub nulls: usize,
 	/// Whether a keyframe's first packet rides in the slot.
 	pub keyframe: bool,
+	/// The PID of each access unit whose first packet rides in the slot.
+	pub units: Vec<u16>,
 }
 
 impl Slot {
@@ -400,11 +402,18 @@ impl Schedule {
 
 		let mut packets = Vec::new();
 		let mut keyframe = false;
+		let mut units = Vec::new();
 		for (unit, take) in self.units.iter_mut().zip(take) {
 			if take == 0 {
 				continue;
 			}
-			keyframe |= unit.keyframe && unit.sent == 0;
+			if unit.sent == 0 {
+				keyframe |= unit.keyframe;
+				// Only the tables muxed ahead of a frame that wrote nothing are no access unit.
+				if unit.packets_on(0..unit.count(), unit.pid) > 0 {
+					units.push(unit.pid);
+				}
+			}
 			let from = unit.sent * TsPacket::SIZE;
 			packets.extend_from_slice(&unit.packets[from..from + take * TsPacket::SIZE]);
 			unit.sent += take;
@@ -419,6 +428,7 @@ impl Schedule {
 			packets,
 			nulls,
 			keyframe,
+			units,
 		}))
 	}
 
@@ -451,7 +461,14 @@ impl Schedule {
 			if stopped.contains(&unit.pid) {
 				continue;
 			}
-			let size = self.buffers.get(&unit.pid).and_then(|buffer| buffer.size);
+			// Once every source has ended, a unit past its deadline goes out whatever its decoder
+			// buffer holds: it is late already, and one bigger than the buffer would otherwise
+			// never finish, holding the end of the stream open on clock packets.
+			let size = self
+				.buffers
+				.get(&unit.pid)
+				.and_then(|buffer| buffer.size)
+				.filter(|_| !(self.ended && unit.due < index));
 			let mut n = 0;
 			if self.release(unit) <= index {
 				while n < unit.remaining() && budget > 0 {
@@ -593,6 +610,31 @@ mod tests {
 			.map(|(_, per_pid, _)| per_pid.get(&1).copied().unwrap_or(0))
 			.sum();
 		assert_eq!(sent, 200, "the whole unit goes out");
+	}
+
+	/// Once every source has ended, a last unit bigger than its decoder buffer still goes out,
+	/// late, and the stream ends rather than run on with clock packets.
+	#[test]
+	fn a_last_unit_bigger_than_its_buffer_ends_the_stream() {
+		let mut schedule = Schedule::new(Duration::from_millis(100));
+		schedule.set_rate(Some(RATE));
+		// Room for ten packets.
+		let small = Buffer {
+			rate: 100_000_000,
+			size: Some(10 * PAYLOAD),
+		};
+		schedule.set_buffer(1, small);
+		schedule.push(1, ms(1_000), unit(1, 11), true);
+		schedule.end();
+		let mut sent = 0;
+		for _ in 0..100 {
+			let Some(slot) = schedule.next(None).unwrap() else {
+				break;
+			};
+			sent += slot.packets.len() / TsPacket::SIZE;
+		}
+		assert_eq!(sent, 11, "the whole unit goes out");
+		assert!(schedule.is_empty(), "and the stream ends");
 	}
 
 	/// The unit due first goes first, whatever order the PIDs were pushed in.
