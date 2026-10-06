@@ -13,8 +13,6 @@
 //! its earlier data is read.
 
 use std::{
-	future::Future,
-	pin::Pin,
 	sync::{
 		Arc, Mutex,
 		atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -102,30 +100,37 @@ fn is_set<T>(slot: &kio::Ref<'_, Option<T>>) -> Poll<()> {
 /// wakes; the send side's `poll_closed` reads this without consuming state.
 #[derive(Default)]
 struct ClosedSignal {
-	/// Set once the peer signals stop or drops, with when the sender learns of it.
-	/// Setting it wakes pending `poll_closed` watches.
-	result: kio::Shared<Option<(tokio::time::Instant, Result<(), MockError>)>>,
+	/// Set once the peer signals stop or drops. Setting it wakes pending
+	/// `poll_closed` watches.
+	result: kio::Shared<Option<Result<(), MockError>>>,
 }
 
 impl ClosedSignal {
 	/// Signal the sender once `delay` has passed: a STOP_SENDING crosses the link like data.
-	fn set(&self, delay: Duration, result: Result<(), MockError>) {
+	fn set(self: &Arc<Self>, delay: Duration, result: Result<(), MockError>) {
+		if !delay.is_zero() {
+			// Only a test sets a latency, so the stop lands on the simulated clock.
+			let signal = self.clone();
+			drop(moq_net_sim::spawn(async move {
+				moq_net_sim::sleep(delay).await;
+				signal.set(Duration::ZERO, result);
+			}));
+			return;
+		}
 		let mut slot = self.result.lock();
 		if slot.is_none() {
-			*slot = Some((tokio::time::Instant::now() + delay, result));
+			*slot = Some(result);
 		}
 	}
 }
 
 /// A chunk in flight: readable by the peer once the link latency has passed.
-type Flight = (tokio::time::Instant, StreamChunk);
+type Flight = (std::time::Instant, StreamChunk);
 
 /// A mock send stream backed by a queue to the peer's reader.
 pub struct MockSendStream {
 	tx: Option<kio::Queue<Flight>>,
 	closed: Arc<ClosedSignal>,
-	/// Wakes `poll_closed` when the peer's stop lands.
-	landing: Option<Pin<Box<tokio::time::Sleep>>>,
 	park: kio::Park,
 	/// Acknowledge the FIN as soon as it is sent, for a stream the peer's transport holds
 	/// back from its application (see [`MockSession::hold_unis`]).
@@ -145,7 +150,7 @@ impl MockSendStream {
 			return Err(err);
 		}
 		let tx = self.tx.as_ref().ok_or_else(MockError::closed)?;
-		let arrival = tokio::time::Instant::now() + self.conn.latency();
+		let arrival = super::harness::now() + self.conn.latency();
 		tx.try_push((arrival, chunk)).map_err(|_| MockError::closed())
 	}
 }
@@ -190,17 +195,9 @@ impl poll::SendStream for MockSendStream {
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
 		let waiter = self.park.hold(cx);
 		if !self.conn.hold_fins.load(Ordering::Relaxed)
-			&& let Poll::Ready(slot) = self.closed.result.poll(waiter, is_set)
+			&& let Poll::Ready(result) = self.closed.result.poll(waiter, is_set)
 		{
-			let (arrival, result) = slot.clone().expect("set");
-			drop(slot);
-			let landing = self
-				.landing
-				.get_or_insert_with(|| Box::pin(tokio::time::sleep_until(arrival)));
-			landing.as_mut().reset(arrival);
-			if landing.as_mut().poll(cx).is_ready() {
-				return Poll::Ready(result);
-			}
+			return Poll::Ready(result.clone().expect("set"));
 		}
 		drop(std::task::ready!(self.conn.close_state.poll(waiter, is_set)));
 		Poll::Ready(Err(self.conn.error().expect("closed")))
@@ -224,8 +221,8 @@ pub struct MockRecvStream {
 	rx: kio::Queue<Flight>,
 	/// The next chunk, popped but still crossing the link.
 	flight: Option<Flight>,
-	/// Wakes the reader when `flight` lands.
-	landing: Option<Pin<Box<tokio::time::Sleep>>>,
+	/// The arrival a wake is already scheduled for, so each flight schedules one.
+	landing: Option<std::time::Instant>,
 	/// Buffered bytes from a chunk that was partially consumed.
 	buf: Bytes,
 	/// Whether we hit FIN or reset.
@@ -268,12 +265,18 @@ impl MockRecvStream {
 			}
 		}
 		let (arrival, _) = self.flight.as_ref().expect("flight set above");
-		if *arrival > tokio::time::Instant::now() {
-			let landing = self
-				.landing
-				.get_or_insert_with(|| Box::pin(tokio::time::sleep_until(*arrival)));
-			landing.as_mut().reset(*arrival);
-			std::task::ready!(landing.as_mut().poll(cx));
+		let arrival = *arrival;
+		if arrival > super::harness::now() {
+			// Only a test sets a latency, so the flight lands on the simulated clock.
+			if self.landing != Some(arrival) {
+				self.landing = Some(arrival);
+				let waker = cx.waker().clone();
+				drop(moq_net_sim::spawn(async move {
+					moq_net_sim::sleep_until(arrival).await;
+					waker.wake();
+				}));
+			}
+			return Poll::Pending;
 		}
 		Poll::Ready(self.flight.take().map(|(_, chunk)| chunk))
 	}
@@ -353,7 +356,8 @@ impl poll::RecvStream for MockRecvStream {
 impl Drop for MockRecvStream {
 	fn drop(&mut self) {
 		// Signal the paired SendStream that the receiver is gone (implicit STOP),
-		// and fail its future writes.
+		// and fail its future writes. Unlike QUIC, writes fail at once, a link
+		// latency before `poll_closed` reports the stop.
 		self.closed.set(self.conn.latency(), Ok(()));
 		self.rx.close();
 	}
@@ -369,7 +373,6 @@ fn new_stream_pair(conn: &Arc<ConnectionState>) -> (MockSendStream, MockRecvStre
 	let send = MockSendStream {
 		tx: Some(queue.clone()),
 		closed: closed.clone(),
-		landing: None,
 		park: kio::Park::default(),
 		ack_fin: false,
 		withhold_fin: Arc::default(),
@@ -405,7 +408,7 @@ struct ConnectionState {
 	/// Set once by whichever side closes first.
 	/// Setting it wakes both sides.
 	close_state: kio::Shared<Option<(u32, String)>>,
-	/// One-way delay for stream data in each direction. Zero by default.
+	/// One-way delay for stream data and STOP_SENDING in each direction. Zero by default.
 	latency: Mutex<Duration>,
 }
 
@@ -678,8 +681,8 @@ impl MockSession {
 		*self.side.lossy.lock().unwrap() = true;
 	}
 
-	/// Delay stream data sent from now on by `latency` in each direction, keeping
-	/// each stream in order. Measured on tokio's clock, so paused-time tests advance
+	/// Delay stream data and STOP_SENDING sent from now on by `latency` in each direction,
+	/// keeping each stream in order. Measured on the simulated clock, so tests advance
 	/// through it without sleeping.
 	pub fn set_latency(&self, latency: Duration) {
 		*self.side.conn.latency.lock().unwrap() = latency;
