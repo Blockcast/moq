@@ -32,8 +32,3 @@ Public API: none. Wire: none.
 
 - [Subscription cut by disconnect](/quest/m1/test-flakes-2/subscription-cut.md) - a publisher disconnect never ends a subscription clean
 - [Media late join](/quest/m1/test-flakes-2/media-late-join.md) - `just test media` late join stays within one GOP, or the regression is fixed
-
-## Related
-
-- [Archive enrollment](/quest/m1/archive/enrollment-flake.md) - the same
-  kind of flake on the archive line, where its test lives

@@ -22,11 +22,8 @@ is reserved.
 
 Guidance:
 
-- `step` already holds a pass-wide timeline reservation for the same reason
-  ("a record flushed mid-pass would omit every rendition that hasn't loaded
-  its init segment yet"). A catalog `Reserved` held the same way, at least
-  across the first pass, is the likely shape: taken after `ensure_tracks`
-  and before the first `ingest`, beside the timeline reservation.
+- A catalog `Reserved` held across at least the first pass is the likely
+  shape: taken after `ensure_tracks` and before the first `ingest`.
 - Don't let a hold outlive its pass. A rendition with no segments yet never
   reaches `ensure_map`, and one whose init fetch fails under `OnError::Warn`
   never reserves. Neither may withhold the catalog for the whole import, and a
