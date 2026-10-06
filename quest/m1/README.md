@@ -51,7 +51,6 @@ blocks. The quests that gated m0 lines moved under them.
 - [fMP4 init from the catalog](/quest/m1/fmp4-catalog-init.md) - fMP4 export writes avc3/hev1 entries from the catalog, so an Annex-B H.264 or H.265 init no longer waits for the first keyframe
 - [Delete the live marker](/quest/m1/announce-live-removal.md) - announce streams yield only route events; the `Live` marker and its hold machinery are gone
 - [Browser close code](/quest/m1/browser-close-code.md) - a playwright case proves the page reads a relay's close code and reason, on every web-transport backend
-- [Audio publish hygiene](/quest/m1/audio-publish-hygiene.md) - JS audio uses the shared container producer, so any stop ends its epoch, and volume ramps over a configurable `fade`
 - [Enabled flag](/quest/m1/catalog-enabled.md) - one `enabled` rendition flag replaces `stalled` and pausing, and the flapping encoder-lag detector is deleted
 - [DTX timestamps](/quest/m1/opus-dtx-timestamps.md) - Opus DTX keeps the capture timeline, so voice enables it by default again
 - [Spent capture budget errors](/quest/m1/capture-exhausted-error.md) - a camera or microphone that runs out of retries sets `out.error` instead of failing silently
