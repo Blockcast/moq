@@ -41,6 +41,8 @@ export type FixtureState = {
 	audioActive: boolean;
 	/** Frames the encoder has produced. */
 	encodedFrames: number;
+	/** Whether the video rendition is published as enabled; false while {@link InteropControl.disableVideo} holds. */
+	videoEnabled: boolean;
 };
 
 /** The camera publisher state mirrored onto its element for Playwright. */
@@ -180,6 +182,10 @@ export type InteropControl = {
 	reattach(): void;
 	/** Connect a second player and leave it behind for the leaked-session negative control. */
 	startLeak(): void;
+	/** Keep the fixture's video rendition in the catalog with `enabled: false`, stopping its frames. */
+	disableVideo(): void;
+	/** Re-enable the fixture's video rendition. */
+	enableVideo(): void;
 };
 
 /** The `window` property the commands are published on. */

@@ -50,6 +50,7 @@ export class Fixture {
 	readonly #audio: AudioContext;
 	readonly #frameId = new Signal(-1);
 	readonly #audioState = new Signal<AudioContextState>("suspended");
+	readonly #videoEnabled = new Signal(true);
 	#timer: number | undefined;
 
 	constructor(host: HTMLElement, url: string, name: string, fault: Fault) {
@@ -98,7 +99,7 @@ export class Fixture {
 		const video = new Publish.Video.Encoder("video", {
 			broadcast,
 			capture,
-			enabled: true,
+			enabled: this.#videoEnabled,
 			config: { frameRate: Pattern.FPS, keyframeInterval: KEYFRAME_INTERVAL, maxBitrate: MAX_BITRATE },
 		});
 		this.#signals.cleanup(() => video.close());
@@ -160,6 +161,7 @@ export class Fixture {
 				videoActive: effect.get(video.out.active),
 				audioActive: effect.get(audio.out.active),
 				encodedFrames: effect.get(video.out.stats).frames,
+				videoEnabled: effect.get(video.out.catalog)?.enabled !== false,
 			};
 			host.dataset.interopFixture = JSON.stringify(state);
 		});
@@ -208,6 +210,11 @@ export class Fixture {
 			if (this.#timer !== undefined) self.clearInterval(this.#timer);
 			this.#timer = undefined;
 		});
+	}
+
+	/** Enable or disable the video rendition, which stays in the catalog either way. */
+	setVideo(enabled: boolean): void {
+		this.#videoEnabled.set(enabled);
 	}
 
 	/** Stop publishing and release the capture, audio graph, and session. */
