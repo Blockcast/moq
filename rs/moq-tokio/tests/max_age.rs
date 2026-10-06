@@ -65,7 +65,6 @@ async fn relay(version: moq_net::Version, javascript: Option<bool>) -> anyhow::R
 	let mut child = if let Some(publish) = javascript {
 		let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test/max-age/client.ts");
 		let mut child = tokio::process::Command::new("bun")
-			.env("NODE_ENV", "production")
 			.arg(script)
 			.arg(url.as_str())
 			.arg(version.alpn())
@@ -76,11 +75,16 @@ async fn relay(version: moq_net::Version, javascript: Option<bool>) -> anyhow::R
 			.kill_on_drop(true)
 			.spawn()?;
 		if publish {
-			let mut line = String::new();
-			BufReader::new(child.stdout.take().unwrap())
-				.read_line(&mut line)
-				.await?;
-			anyhow::ensure!(line.trim() == "ready", "JS publisher did not become ready: {line}");
+			// @moq/net's connection logs share stdout with the readiness line, before and after it.
+			let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+			loop {
+				let line = lines.next_line().await?;
+				anyhow::ensure!(line.is_some(), "JS publisher exited before ready");
+				if line.as_deref() == Some("ready") {
+					break;
+				}
+			}
+			tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
 		}
 		Some(child)
 	} else {
