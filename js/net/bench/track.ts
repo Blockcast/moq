@@ -46,7 +46,7 @@ async function measure(
 	// Held groups would age out too, so those rows keep everything instead.
 	const window = Milli(held > 0 ? 3_600_000 : retained);
 	const producer = new Producer("bench").accept({ maxAge: window });
-	const subscribers = Array.from({ length: subscriberCount }, () => producer.subscribe({ maxAge: window }));
+	const subscribers = Array.from({ length: subscriberCount }, () => producer.subscribe({ maxDelay: window }));
 	let sequence = 0;
 	// Inserted by sequence, the way the wire hands a subscribed track its groups.
 	const publish = (close: boolean) => {

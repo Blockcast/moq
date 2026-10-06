@@ -97,7 +97,7 @@ impl Topology {
 		let consumer = subscriber.consume();
 		consumer.routed("live").await.unwrap();
 		let remote = consumer.request_broadcast("live").await.unwrap();
-		let prefs = track::Subscription::default().with_max_age(Duration::from_secs(60));
+		let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(60));
 		let sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
 
 		let topology = Self {
@@ -356,7 +356,7 @@ async fn lagging_route_dies(version: Version) -> mpsc::UnboundedReceiver<(u64, m
 		let consumer = origin.consume();
 		consumer.routed("live").await.unwrap();
 		let remote = consumer.request_broadcast("live").await.unwrap();
-		let preferences = track::Subscription::default().with_max_age(Duration::from_secs(60));
+		let preferences = track::Subscription::default().with_max_delay(Duration::from_secs(60));
 		remote.track("video").unwrap().subscribe(preferences).await.unwrap()
 	}
 	fn write(group: &mut moq_net::group::Producer, sequence: u64, frame: u64) {

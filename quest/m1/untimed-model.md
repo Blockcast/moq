@@ -34,8 +34,8 @@ timestamp draft mandates, and on lite-05 and later a relay forwards those
 stamps as if they were real. Any route failover then changes
 them, so the timeline jumps, and the "one clock per broadcast" property
 breaks. Rejected: first-hop arrival (the failover jump stays), 0 as a
-sentinel (collides with a real pts of 0), and `max_age` on max(wall, pts)
-(`max_age` stays media-time staleness, so a congestion stall can't age
+sentinel (collides with a real pts of 0), and `max_delay` on max(wall, pts)
+(`max_delay` stays media-time staleness, so a congestion stall can't age
 content out, and the pool's wall-clock expiry is the bound).
 
 Decided (2026-10-02, planning this split):

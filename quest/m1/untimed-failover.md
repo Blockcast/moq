@@ -11,7 +11,7 @@ the track ends.
 
 Found in #4822. `Recover::poll` (`rs/moq-net/src/model/resume.rs`, around line
 854 at time of writing) gives up a group the serving route can't continue
-once `poll_stale` reports drift past the reader's `max_age`. `drifted`
+once `poll_stale` reports drift past the reader's `max_delay`. `drifted`
 (`model/track.rs`) needs a timed live edge and a timed successor (`reach`).
 Without both, nothing convicts the group. Only the holder of that
 `group::Consumer` blocks: track cursors keep handing out newer groups. The
@@ -27,7 +27,7 @@ Decided 2026-10-05 11:39 +0200:
   successor is untimed), give up once the serving copy holds a newer group
   and no route or recovery fetch can still fill this one. No clock is
   involved.
-  Rejected: a wall-clock deadline of `max_age` after the stall, which stands
+  Rejected: a wall-clock deadline of `max_delay` after the stall, which stands
   wall time in for media time, the substitution the untimed model removed.
   Also rejected: leaving it and documenting it.
 

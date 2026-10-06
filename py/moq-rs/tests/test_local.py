@@ -749,7 +749,7 @@ async def test_raw_multiple_frames():
 
     async for announcement in routes(consumer.announced()):
         broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
-        raw_consumer = await broadcast_consumer.subscribe_track("commands", moq.Subscription(max_age_us=1_000_000))
+        raw_consumer = await broadcast_consumer.subscribe_track("commands", moq.Subscription(max_delay_us=1_000_000))
 
         messages = [
             b'{"cmd": "led", "arm": "left", "led": "THUMB", "state": 1}',
@@ -774,7 +774,7 @@ async def test_raw_producer_consume_direct():
     """Consume a raw track directly from the producer, no origin/broadcast plumbing."""
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("direct")
-    consumer = track.consume(moq.Subscription(max_age_us=1_000_000))
+    consumer = track.consume(moq.Subscription(max_delay_us=1_000_000))
 
     track.write_frame(b"hello", 0)
     track.write_frame(b"world", 0)
@@ -831,7 +831,7 @@ async def test_raw_group_sequence():
 
     async for announcement in routes(consumer.announced()):
         broadcast_consumer = await consumer.request_broadcast(announcement.prefix)
-        raw_consumer = await broadcast_consumer.subscribe_track("seq", moq.Subscription(max_age_us=1_000_000))
+        raw_consumer = await broadcast_consumer.subscribe_track("seq", moq.Subscription(max_delay_us=1_000_000))
 
         sent_sequences = []
         for i in range(3):
@@ -862,7 +862,7 @@ async def test_default_iteration_is_sequence_order():
     broadcast = create_announced(origin, "track/ordering")
     raw = broadcast.publish_track("ordering")
 
-    subscription = moq.Subscription(max_age_us=1_000_000)
+    subscription = moq.Subscription(max_delay_us=1_000_000)
     seq_consumer = raw.consume(subscription)
     arr_consumer = raw.consume(subscription)
 
@@ -918,7 +918,7 @@ async def test_read_frame_one_per_group():
     """read_frame() returns the first frame of each successive group."""
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("status")
-    consumer = track.consume(moq.Subscription(max_age_us=1_000_000))
+    consumer = track.consume(moq.Subscription(max_delay_us=1_000_000))
 
     track.write_frame(b"ready", 0)
     track.write_frame(b"running", 0)
@@ -962,7 +962,7 @@ async def test_read_frame_skips_remaining_frames_in_group():
     """read_frame() only returns the first frame of a multi-frame group."""
     broadcast = moq.BroadcastProducer()
     track = broadcast.publish_track("mixed")
-    consumer = track.consume(moq.Subscription(max_age_us=1_000_000))
+    consumer = track.consume(moq.Subscription(max_delay_us=1_000_000))
 
     group = track.append_group()
     group.write_frame(b"first", 0)
@@ -1076,7 +1076,7 @@ def test_optional_binding_records_use_none_defaults():
     decoder = moq.AudioDecoderOutput(format=moq.AudioSampleFormat.F32)
     assert decoder.sample_rate is None
     assert decoder.channels is None
-    assert decoder.max_age_us is None
+    assert decoder.max_delay_us is None
 
 
 def test_encode_audio_with_opus_object():

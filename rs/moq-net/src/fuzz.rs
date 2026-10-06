@@ -321,7 +321,7 @@ impl LiteSample {
 				broadcast: Path::new("room/alice"),
 				track: "video".into(),
 				priority: 2,
-				max_age: std::time::Duration::from_secs(10),
+				max_delay: std::time::Duration::from_secs(10),
 				start_group: None,
 				end_group: None,
 				start_frame: 0,
