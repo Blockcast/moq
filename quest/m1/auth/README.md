@@ -117,7 +117,5 @@ published version in place, so AUTH and its stream code land in
 
 ## Related
 
-- [Expiring media grants](/quest/m3/processor/grant-lease.md) - a worker's
-  lease renewal is a new in-band token
 - [Peer grants](/quest/m3/p2p/peer-grant.md) - P2P's hop-bound credential,
   built on this line's relay tokens
