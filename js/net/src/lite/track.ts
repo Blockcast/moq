@@ -1,6 +1,8 @@
+import type * as Epoch from "../epoch.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
+import * as EpochWire from "./epoch.ts";
 import * as Message from "./message.ts";
 import { hasGroupOrder, Version } from "./version.ts";
 
@@ -22,33 +24,37 @@ function guardTrack(version: Version) {
  * Asks for a track's immutable publisher properties without subscribing or fetching.
  */
 export class Track {
+	/** The selected publisher instance, when negotiated. */
+	epoch?: Epoch.Valid;
 	broadcast: Path.Valid;
 	track: string;
 
-	constructor(broadcast: Path.Valid, track: string) {
+	constructor(broadcast: Path.Valid, track: string, epoch?: Epoch.Valid) {
+		this.epoch = epoch;
 		this.broadcast = broadcast;
 		this.track = track;
 	}
 
-	async #encode(w: Writer) {
+	async #encode(w: Writer, version: Version) {
 		await w.string(Path.encode(this.broadcast));
 		await w.string(this.track);
+		await EpochWire.encode(w, version, this.epoch);
 	}
 
-	static async #decode(r: Reader): Promise<Track> {
+	static async #decode(r: Reader, version: Version): Promise<Track> {
 		const broadcast = Path.decode(await r.string());
 		const track = await r.string();
-		return new Track(broadcast, track);
+		return new Track(broadcast, track, await EpochWire.decode(r, version));
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
 		guardTrack(version);
-		return Message.encode(w, (w) => this.#encode(w));
+		return Message.encode(w, (w) => this.#encode(w, version));
 	}
 
 	static async decode(r: Reader, version: Version): Promise<Track> {
 		guardTrack(version);
-		return Message.decode(r, (r) => Track.#decode(r));
+		return Message.decode(r, (r) => Track.#decode(r, version));
 	}
 }
 

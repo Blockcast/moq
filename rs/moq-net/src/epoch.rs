@@ -19,7 +19,7 @@ impl Epoch {
 		Self(uuid::Uuid::now_v7().hyphenated().to_string().into())
 	}
 
-	/// The UUID text, without the path segment's `@` marker.
+	/// The canonical UUID text.
 	pub fn as_str(&self) -> &str {
 		&self.0
 	}

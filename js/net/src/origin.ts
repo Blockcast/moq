@@ -13,6 +13,7 @@
 import { Derived, type Dispose, type GetPromise, type Getter, getter, Once, Signal } from "@moq/signals";
 import * as announce from "./announced.ts";
 import * as broadcast from "./broadcast.ts";
+import * as Epoch from "./epoch.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import { isAnonymous, Route, routesEqual } from "./hop.ts";
 import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps, spreadHash } from "./internal.ts";
@@ -34,10 +35,9 @@ class Scope {
 		this.allowed = allowed;
 	}
 
-	/** A pattern that admits a name also admits its epochs (`name/@<uuidv7>`). */
 	narrow(root: Path.Valid, patterns: Path.Patterns): Scope {
 		const joined = Path.encode(Path.join(this.root, root));
-		const rooted = withEpochs(patterns.rooted(joined));
+		const rooted = patterns.rooted(joined);
 		const allowed = this.allowed?.intersect(rooted) ?? rooted;
 		if (allowed.size === 0) throw new Error("origin scopes do not overlap");
 		return new Scope(joined, allowed);
@@ -121,35 +121,6 @@ class Scope {
 		}
 		return out;
 	}
-}
-
-const EPOCH_SEGMENT: Path.Segment = { kind: "partial", prefix: "@", suffix: "" };
-
-/** Throw when an epoch (`@<uuidv7>`) sits anywhere but the end of `path`; an epoch only ever ends a path. */
-function refuseMisplacedEpoch(path: Path.Valid) {
-	const parts = path === "" ? [] : path.split("/");
-	if (parts.slice(0, -1).some((part) => Path.splitEpoch(part as Path.Valid).epoch !== undefined)) {
-		throw new Error(`misplaced epoch: an epoch must be the last path segment: ${path}`);
-	}
-}
-
-/**
- * `patterns` with each name they admit also admitting its epochs: a member not ending in
- * `**` gains a `/@*` sibling. A grant on one epoch names that epoch, so it never widens to
- * the bare name or its siblings. Mirrors Rust's `with_epochs`.
- */
-function withEpochs(patterns: Path.Patterns): Path.Patterns {
-	const widened = new Path.Patterns(patterns);
-	for (const member of patterns) {
-		const last = member.segments.at(-1);
-		if (last?.kind === "globstar" || (last?.kind === "partial" && last.prefix === "@" && last.suffix === "")) {
-			continue;
-		}
-		// A member at the depth limit names nothing with room for an epoch.
-		if (member.segments.length >= Path.Pattern.MAX_SEGMENTS) continue;
-		widened.insert(Path.Pattern.from([...member.segments, EPOCH_SEGMENT]));
-	}
-	return widened;
 }
 
 /** Whether the route advertised at `prefix` may serve any path `pattern` admits. */
@@ -522,13 +493,6 @@ class OriginState {
 	 * the answer for a single path.
 	 */
 	refresh(path: Path.Valid): void {
-		this.#refreshSlot(path);
-		// A bare name follows the epochs below it.
-		const { name, epoch } = Path.splitEpoch(path);
-		if (epoch !== undefined) this.#refreshSlot(name);
-	}
-
-	#refreshSlot(path: Path.Valid): void {
 		const slot = this.requests.peek()?.get(path);
 		if (!slot) return;
 		slot.route.set(this.route(path, slot));
@@ -552,18 +516,11 @@ class OriginState {
 	 * per candidate.
 	 */
 	refuse(path: Path.Valid, entry: RouteEntry, err: Error): void {
-		this.#refuseSlot(path, path, entry, err);
-		// A bare name following this epoch was asking through the same route.
-		const { name, epoch } = Path.splitEpoch(path);
-		if (epoch !== undefined && this.target(name) === path) this.#refuseSlot(name, path, entry, err);
-	}
-
-	#refuseSlot(path: Path.Valid, target: Path.Valid, entry: RouteEntry, err: Error): void {
 		const slot = this.requests.peek()?.get(path);
 		if (!slot) return;
 		// Only the route the request is waiting on speaks for it; one superseded by another
 		// route or a local broadcast has a moot answer.
-		if (this.bestEntry(target) !== entry || this.localWins(target, entry)) return;
+		if (this.bestEntry(path) !== entry || this.localWins(path, entry)) return;
 
 		this.requests.mutate((map) => {
 			if (map?.get(path) === slot) map.delete(path);
@@ -583,12 +540,8 @@ class OriginState {
 	 * releases a retracted route's session subscription even when nothing reads it again.
 	 */
 	refreshPrefix(prefix: Path.Valid): void {
-		// A route at an epoch also moves the bare name above it.
-		const { name, epoch } = Path.splitEpoch(prefix);
 		for (const [path, slot] of this.requests.peek() ?? []) {
-			if (Path.hasPrefix(prefix, path) || (epoch !== undefined && path === name)) {
-				slot.route.set(this.route(path, slot));
-			}
+			if (Path.hasPrefix(prefix, path)) slot.route.set(this.route(path, slot));
 		}
 	}
 
@@ -615,7 +568,7 @@ class OriginState {
 	}
 
 	/** The preferred entry on the most specific route covering `path`, ignoring skipped entries, if any. */
-	bestEntry(path: Path.Valid, skip?: (entry: RouteEntry) => boolean): RouteEntry | undefined {
+	bestEntry(path: Path.Valid, skip?: (entry: RouteEntry) => boolean, epoch?: Epoch.Valid): RouteEntry | undefined {
 		let bestPrefix: Path.Valid | undefined;
 		let best: RouteEntry | undefined;
 		for (const [prefix, entries] of this.routes.peek() ?? []) {
@@ -623,7 +576,10 @@ class OriginState {
 			const entry = preferredEntry(
 				path,
 				entries,
-				(candidate) => !candidate.scope.matches(path) || (skip?.(candidate) ?? false),
+				(candidate) =>
+					!candidate.scope.matches(path) ||
+					(epoch !== undefined && candidate.route.peek().epoch !== epoch) ||
+					(skip?.(candidate) ?? false),
 			);
 			if (!entry) continue;
 			if (bestPrefix === undefined || prefix.length > bestPrefix.length) {
@@ -650,8 +606,7 @@ class OriginState {
 
 	/**
 	 * What `path` resolves to: an announced local publish, a broadcast materialized from
-	 * the best covering route, or the blind answer. A bare name resolves through its
-	 * {@link target} epoch, so a newer epoch swaps in a different broadcast.
+	 * the best covering route, or the blind answer.
 	 *
 	 * Materialization is lazy and cached per path: the first request under a route opens
 	 * the providing session's subscription and repeats share it. A better route is made
@@ -659,10 +614,9 @@ class OriginState {
 	 * answers (then swaps) or refuses (then the request ends). A retracted route swaps at once.
 	 */
 	route(path: Path.Valid, slot: Pick<RequestSlot, "answer">): broadcast.Consumer | undefined {
-		const target = this.target(path);
-		const entry = this.bestEntry(target);
-		const local = this.local.peek()?.get(target);
-		if (local && this.localWins(target, entry)) {
+		const entry = this.bestEntry(path);
+		const local = this.local.peek()?.get(path);
+		if (local && this.localWins(path, entry)) {
 			// Nothing reads a remote front the local broadcast replaced, so close its session subscription.
 			this.releaseMaterialized(path);
 			return local;
@@ -679,40 +633,15 @@ class OriginState {
 			return slot.answer;
 		}
 
-		const served = entry.server.served.get(target);
+		const served = entry.server.served.get(path);
 		if (served && served.closed.peek() === undefined) {
 			cached?.front.close();
-			// A bare name shares its epoch's broadcast with the epoch's own requests, so it
-			// caches a handle of its own: releasing one must not close the other.
-			const front = target === path ? served : served.clone();
-			this.materialized.set(path, { entry, front });
-			return front;
+			this.materialized.set(path, { entry, front: served });
+			return served;
 		}
 
-		entry.server.enqueue(target);
+		entry.server.enqueue(path);
 		return cached?.front;
-	}
-
-	/**
-	 * The path a request for `path` is served from: the newest epoch below a bare `path`
-	 * that something routes, ahead of any route covering the name, otherwise `path` itself.
-	 * A path naming an epoch pins it. Mirrors Rust's resolution; a request re-reads it, so
-	 * a bare name's `active` swaps to a newer epoch as a new broadcast, never a continuation.
-	 */
-	target(path: Path.Valid): Path.Valid {
-		if (Path.splitEpoch(path).epoch !== undefined) return path;
-		let newest: Path.Valid | undefined;
-		const consider = (candidate: Path.Valid) => {
-			const { name, epoch } = Path.splitEpoch(candidate);
-			// Same name, so the text orders by epoch, which orders by mint time.
-			if (epoch !== undefined && name === path && (newest === undefined || candidate > newest))
-				newest = candidate;
-		};
-		for (const candidate of this.local.peek()?.keys() ?? []) consider(candidate);
-		for (const [prefix, entries] of this.routes.peek() ?? []) {
-			if (entries.some((entry) => entry.scope.matches(prefix))) consider(prefix);
-		}
-		return newest ?? path;
 	}
 }
 
@@ -733,7 +662,7 @@ export interface Table {
 	readonly discovery: Getter<boolean | undefined>;
 
 	/** Create an unannounced broadcast at `path`; see {@link Producer.createBroadcast}. */
-	createBroadcast(path: Path.Valid): broadcast.Producer;
+	createBroadcast(id: Path.Valid | broadcast.Id): broadcast.Producer;
 
 	/** Resolve `path`, optionally waiting for an announcement; see {@link Consumer.request}. */
 	request(path: Path.Valid, options?: RequestOptions): Requesting;
@@ -745,7 +674,10 @@ export interface Table {
 	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer;
 
 	/** Advertise a prefix and serve requests under it; see {@link Producer.dynamic}. */
-	dynamic(prefix: Path.Valid, route?: Route | { hops?: Route["hops"]; cost?: Route["cost"] | bigint }): Dynamic;
+	dynamic(
+		prefix: Path.Valid,
+		route?: Route | { hops?: Route["hops"]; cost?: Route["cost"] | bigint; epoch?: Epoch.Valid },
+	): Dynamic;
 }
 
 /** Options for resolving a broadcast path. */
@@ -835,13 +767,14 @@ export class Producer implements Table {
 	 * application still holds a consumer clone. An announced local broadcast competes with
 	 * a remote route at the same path on cost, winning ties.
 	 */
-	createBroadcast(path: Path.Valid): broadcast.Producer {
+	createBroadcast(id: Path.Valid | broadcast.Id): broadcast.Producer {
+		const epoch = typeof id === "string" ? undefined : id.epoch;
+		let path = typeof id === "string" ? id : id.path;
 		path = this.#scope.path(path);
-		refuseMisplacedEpoch(path);
 		const created = this.#state.created;
 		if (!created) throw new Error("origin is closed");
 
-		const producer = new broadcast.Producer();
+		const producer = new broadcast.Producer(epoch ?? Epoch.mint());
 		hooks.stampPath(producer, path);
 		const front = producer.consume();
 
@@ -906,7 +839,7 @@ export class Producer implements Table {
 	 */
 	dynamic(
 		prefix: Path.Valid,
-		route: Route | { hops?: Route["hops"]; cost?: Route["cost"] | bigint } = Route.default,
+		route: Route | { hops?: Route["hops"]; cost?: Route["cost"] | bigint; epoch?: Epoch.Valid } = Route.default,
 	): Dynamic {
 		return this.#insertRoute(prefix, Route.normalize(route), true);
 	}
@@ -919,15 +852,13 @@ export class Producer implements Table {
 	 */
 	#receive(
 		prefix: Path.Valid,
-		route: Route | { hops?: Route["hops"]; cost?: Route["cost"] | bigint } = Route.default,
+		route: Route | { hops?: Route["hops"]; cost?: Route["cost"] | bigint; epoch?: Epoch.Valid } = Route.default,
 	): Dynamic {
 		return this.#insertRoute(prefix, Route.normalize(route), false);
 	}
 
 	#insertRoute(prefix: Path.Valid, route: Route, originated: boolean): Dynamic {
 		prefix = this.#scope.prefix(prefix);
-		// A peer's announcements are its own; only refuse what this origin originates.
-		if (originated) refuseMisplacedEpoch(prefix);
 		const server = new ServeState(this.#scope.root);
 		server.onChange = (path) => this.#state.refresh(path);
 		const entry: RouteEntry = {
@@ -1192,9 +1123,7 @@ export class Requesting {
 	 * The resolved broadcast, or undefined while nothing provides the path.
 	 *
 	 * The table's route when it has one: a local publish (no round trip) or an announced
-	 * broadcast, swapping when a republish takes the path. A bare name nothing routes
-	 * follows its newest epoch (`name/@<uuidv7>`), swapping to a new broadcast when a newer
-	 * epoch appears or falling back when the newest goes away. Otherwise a session's blind
+	 * broadcast, swapping when a republish takes the path. Otherwise a session's blind
 	 * answer, which is assumed present rather than known live: a missing broadcast
 	 * surfaces as a reset on the first track subscription, not here. Drops back to
 	 * undefined when the providing route dies and resolves again when another appears.
@@ -1284,8 +1213,8 @@ export class Consumer {
 				scope === Scope.all
 					? state.originated
 					: new Derived([state.originated], (routes) => scope.projectRoutes(routes)),
-			local: (path) => this.#local(scope.path(path)),
-			demand: (path) => this.#demand(scope.path(path)),
+			local: (path, epoch) => this.#local(scope.path(path), epoch),
+			demand: (path, epoch) => this.#demand(scope.path(path), epoch),
 		});
 	}
 
@@ -1326,9 +1255,8 @@ export class Consumer {
 	 * @internal
 	 */
 	#routes(path: Path.Valid): boolean {
-		const target = this.#state.target(path);
-		if (this.#state.local.peek()?.has(target)) return true;
-		return this.#state.bestEntry(target) !== undefined;
+		if (this.#state.local.peek()?.has(path)) return true;
+		return this.#state.bestEntry(path) !== undefined;
 	}
 
 	/**
@@ -1625,9 +1553,14 @@ export class Consumer {
 	 * The announced local broadcast at `path`, when it beats the originated routes there.
 	 * Resolves through what rebuildOriginated advertised: a peer never sees received routes.
 	 */
-	#local(path: Path.Valid): broadcast.Consumer | undefined {
+	#local(path: Path.Valid, epoch?: Epoch.Valid): broadcast.Consumer | undefined {
 		const local = this.#state.local.peek()?.get(path);
-		if (local && this.#state.localWins(path, this.#state.bestEntry(path, received))) return local;
+		if (
+			local &&
+			(epoch === undefined || local.epoch === epoch) &&
+			this.#state.localWins(path, this.#state.bestEntry(path, received, epoch))
+		)
+			return local;
 		return undefined;
 	}
 
@@ -1637,10 +1570,10 @@ export class Consumer {
 	 *
 	 * @internal
 	 */
-	async #demand(path: Path.Valid): Promise<broadcast.Consumer | undefined> {
-		const local = this.#local(path);
+	async #demand(path: Path.Valid, epoch?: Epoch.Valid): Promise<broadcast.Consumer | undefined> {
+		const local = this.#local(path, epoch);
 		if (local) return local;
-		const entry = this.#state.bestEntry(path, received);
+		const entry = this.#state.bestEntry(path, received, epoch);
 		if (!entry?.server) return undefined;
 
 		const server = entry.server;
@@ -1704,9 +1637,11 @@ export class Dynamic {
 	}
 
 	/** Re-price the route in place. The prefix is fixed at announce time. */
-	update(route: Route | { hops?: Route["hops"]; cost?: Route["cost"] | bigint }): void {
+	update(route: Route | { hops?: Route["hops"]; cost?: Route["cost"] | bigint; epoch?: Epoch.Valid }): void {
 		if (this.#closed) throw new Error("dynamic is closed");
-		this.#entry.route.set(Route.normalize(route));
+		const next = Route.normalize(route);
+		if (next.epoch !== this.#entry.route.peek().epoch) throw new Error("a route cannot change publisher epoch");
+		this.#entry.route.set(next);
 		this.#state.rebuildOriginated();
 		this.#state.refreshPrefix(Path.join(this.#entry.scope.root, this.prefix));
 		this.#state.routes.mutate(() => {});

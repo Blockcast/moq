@@ -33,13 +33,15 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 	})
 	.unwrap();
 	let generation = cred.generation(Epoch::mint());
-	let path = cred.path("meeting.hang").unwrap().with_epoch(generation.epoch());
+	let path = cred.path("meeting.hang").unwrap();
 	let name = generation.name(track).unwrap();
 
 	let publisher = produce_origin(1);
 	let consumer_origin = produce_origin(2);
 
-	let broadcast = publisher.create_broadcast(&path).unwrap();
+	let broadcast = publisher
+		.create_broadcast(moq_net::broadcast::Id::from(&path).with_epoch(generation.epoch().clone()))
+		.unwrap();
 	let net = broadcast.create_track(name.as_str(), None).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
@@ -48,12 +50,10 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 	options.client_subscribe = Some(consumer_origin.clone());
 	let pair = connect_mock(options).await;
 
-	// The subscriber knows the opaque prefix and takes the epoch from the discovered path.
+	// Encryption identity is provided by the authenticated application context here,
+	// including on transports without epoch metadata.
 	let consumer = consumer_origin.consume();
 	consumer.routed(&path).await.unwrap();
-	let (_, epoch) = path.split_epoch();
-	let epoch = epoch.unwrap();
-	let generation = cred.generation(epoch);
 	let remote = consumer.request_broadcast(&path).await.unwrap();
 	let subscriber = remote
 		.track(name.as_str())

@@ -34,7 +34,7 @@ informative:
 
 This document specifies moq-e2ee-00, a versioned profile for end-to-end encryption of MoQ application payloads.
 Authorized publishers and subscribers share a 32-byte broadcast secret out of band.
-Each publisher instance mints an epoch and publishes under an opaque broadcast path ending in it.
+Each publisher instance mints an epoch and publishes at an opaque broadcast path with that epoch as identity metadata.
 HKDF-SHA-256 derives opaque physical track names and per-track AES-128-GCM keys from the secret and the epoch; grouped frames and datagrams use separate key domains.
 Media frames and datagrams carry only ciphertext plus a 16-byte tag.
 The profile binds object identity through derivation and the nonce, not an on-wire header.
@@ -69,7 +69,7 @@ It differs where the models diverge:
 
 - One 32-byte broadcast secret authorizes every track. Per-track keys are derived, not supplied.
 - The Key ID is part of the out-of-band credential. No per-frame header or immutable property carries it.
-- The salt is not derived from the key. The publisher instance's epoch is an input to every derivation and the last segment of the broadcast path ({{epoch}}), so a restarted publisher derives new keys instead of needing a new Key ID.
+- The salt is not derived from the key. The publisher instance's epoch is an input to every derivation and the broadcast's identity metadata ({{epoch}}), so a restarted publisher derives new keys instead of needing a new Key ID.
 - The nonce is the identity counter itself, not a salt XOR. The derived key is already unique per credential, epoch, physical name, and domain.
 - The payload is ciphertext concatenated with the 16-byte tag, with no inner length prefix, encrypted properties, or padding.
 - moq-lite frame indices are implied by position in the group ({{moql}} Section "Frame"), not an on-wire object ID. This profile still uses that index as the 32-bit nonce half, because it is the only canonical end-to-end frame identity on both moq-lite and MoQ Transport.
@@ -132,13 +132,13 @@ Each instance of a broadcast MUST mint an epoch that no other instance under the
 Two instances MUST NOT share an epoch: they would derive the same keys and collide on nonces.
 Its leading 48-bit timestamp makes epochs sort by creation time and its random bits make collisions negligible.
 
-A protected broadcast is published at `<opaque>/@<epoch>`, where `<opaque>` is the 22-character base64url segment derived from the credential and the application's semantic broadcast name according to {{derive}}, and `<epoch>` is the UUID text.
-The `@` marker is part of the path segment only; the HKDF `bytes(epoch)` input remains the UUID text without `@`.
-The opaque derivation does not include the epoch, so every instance of the same semantic broadcast shares a discovery prefix.
-The path carries no format or protection marker; for example, the semantic name `meeting.hang` appears only as an input to the opaque derivation.
-A plaintext consumer that opens the protected broadcast fails because it cannot find the plaintext catalog it expects, not because of a path naming rule.
-Subscribers discover instances by the `<opaque>/` prefix and select the greatest epoch, where greatest is newest.
-A subscriber that already knows the full path parses the epoch from its last segment after removing `@`.
+A protected broadcast is published at `<opaque>`, the 22-character base64url segment derived from the credential and the application's semantic broadcast name according to {{derive}}.
+The publisher conveys its epoch using negotiated MoQ Lite epoch metadata, or through the application's authenticated channel when the transport cannot represent it.
+The HKDF `bytes(epoch)` input is the canonical UUID text.
+The opaque derivation does not include the epoch, so every instance of the same semantic broadcast shares a discovery path.
+The path carries no format or protection marker; the semantic name `meeting.hang` appears only as an input to the opaque derivation.
+A subscriber MUST bind the selected epoch to every track request where the transport supports it, and MUST create a new generation when the epoch changes.
+Legacy intermediaries that cache solely by wire names and positions require application-assigned immutable names; epoch metadata cannot invalidate their caches.
 
 The epoch and the path are not secret and are not authenticated.
 A relay that presents a wrong epoch causes authentication failure; a relay that withholds a newer instance denies service.
@@ -335,7 +335,7 @@ Relays, caches, recorders, and control planes are untrusted for content.
 Authorized endpoints that hold the broadcast secret are trusted.
 Sender authenticity against another endpoint that also holds the secret is not a goal of `moq-e2ee-00`.
 
-A relay can still observe the outer broadcast path including the opaque segment and epoch, opaque physical names, group and frame structure, timestamps, sizes, and traffic patterns.
+A relay can still observe the outer opaque broadcast path and any conveyed epoch metadata, opaque physical names, group and frame structure, timestamps, sizes, and traffic patterns.
 Padding and metadata-flow confidentiality are out of scope.
 
 The opaque segment hides the application's semantic broadcast name from a relay only while the application does not publish or otherwise expose the same name in plaintext.
@@ -364,8 +364,8 @@ This document requests no registrations.
 ## draft-lcurley-moq-e2ee-00
 {:numbered="false"}
 
-- Require canonical UUIDv7 epochs and carry them in `@<epoch>` path segments, leaving HKDF UUID inputs unchanged.
-- Initial `moq-e2ee-00` profile: out-of-band credential, opaque broadcast path with a publisher-minted epoch as its last segment, HKDF physical names and keys, AES-128-GCM payloads, identity bounds, typed failures, and shared primitive vectors.
+- Require canonical UUIDv7 epochs and convey them as identity metadata or through the application channel, leaving HKDF UUID inputs unchanged.
+- Initial `moq-e2ee-00` profile: out-of-band credential, opaque broadcast path with a publisher-minted epoch, HKDF physical names and keys, AES-128-GCM payloads, identity bounds, typed failures, and shared primitive vectors.
 
 
 # Acknowledgments

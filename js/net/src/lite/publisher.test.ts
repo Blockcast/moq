@@ -39,7 +39,7 @@ test.each([Version.DRAFT_01, Version.DRAFT_03, Version.DRAFT_06])(
 	async (version) => {
 		const pair = createMockTransportPair(ALPN_05);
 		const origin = new OriginProducer();
-		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
+		const publisher = new Publisher(pair.server, version, randomHop(), { publish: origin.consume() });
 		const broadcast = publish(origin, Path.from("static"));
 		await Promise.resolve();
 		const failure = new Error("peer stopped receiving announcements");
@@ -90,7 +90,7 @@ test.each([
 ])("a re-price goes out only where the wire carries cost (version %s)", async (version, sent) => {
 	const pair = createMockTransportPair(ALPN_05);
 	const origin = new OriginProducer();
-	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
+	const publisher = new Publisher(pair.server, version, randomHop(), { publish: origin.consume() });
 	const broadcast = origin.createBroadcast(Path.from("cam"));
 	broadcast.announce({ cost: 7n });
 
@@ -128,7 +128,7 @@ test.each([
 async function subscribeEnd(sequences: number[], version: Version = Version.DRAFT_05): Promise<SubscribeEnd> {
 	const pair = createMockTransportPair(version === Version.DRAFT_07 ? ALPN_07_WIP : ALPN_05);
 	const origin = new OriginProducer();
-	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
+	const publisher = new Publisher(pair.server, version, randomHop(), { publish: origin.consume() });
 
 	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video");
@@ -191,7 +191,7 @@ async function groupSendOrders(options: { priority: number; sequences: number[];
 	const groups = sequences.map((sequence) => new GroupProducer(sequence));
 	const pair = createMockTransportPair(ALPN_05);
 	const origin = new OriginProducer();
-	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), { publish: origin.consume() });
 
 	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video");
@@ -275,7 +275,7 @@ test("lite draft-05: a subscribe update re-ranks the whole subscription", async 
 test("lite draft-05: a subscribe update re-ranks a group already on the wire", async () => {
 	const pair = createMockTransportPair(ALPN_05);
 	const origin = new OriginProducer();
-	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), { publish: origin.consume() });
 
 	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video");
@@ -328,7 +328,7 @@ test("lite draft-05: a subscribe update re-ranks a group already on the wire", a
 test("lite draft-05: a subscribe update during the stream open still ranks the group", async () => {
 	const pair = createMockTransportPair(ALPN_05);
 	const origin = new OriginProducer();
-	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), { publish: origin.consume() });
 
 	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video");
@@ -388,7 +388,7 @@ test("lite draft-05: many concurrent groups share one subscription listener", as
 	const count = 120;
 	const pair = createMockTransportPair(ALPN_05);
 	const origin = new OriginProducer();
-	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), { publish: origin.consume() });
 
 	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video");
@@ -442,7 +442,7 @@ test("lite draft-05: many concurrent groups share one subscription listener", as
 test("lite draft-05: the fetch response ranks the publisher's own writes", async () => {
 	const pair = createMockTransportPair(ALPN_05);
 	const origin = new OriginProducer();
-	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), { publish: origin.consume() });
 
 	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video");
@@ -541,7 +541,7 @@ async function servedSubscription(
 	const frames = options.frames ?? ["hello"];
 	const pair = createMockTransportPair(version === Version.DRAFT_06 ? ALPN_06 : ALPN_05);
 	const origin = new OriginProducer();
-	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
+	const publisher = new Publisher(pair.server, version, randomHop(), { publish: origin.consume() });
 
 	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video", { maxAge: options.maxAge });
@@ -1043,7 +1043,7 @@ test("lite draft-07: subscribe end counts zero streams when no groups were produ
 test("lite draft-07: subscribe end waits for groups below a declared finish", async () => {
 	const pair = createMockTransportPair(ALPN_07_WIP);
 	const origin = new OriginProducer();
-	const publisher = new Publisher(pair.server, Version.DRAFT_07, randomHop(), origin.consume());
+	const publisher = new Publisher(pair.server, Version.DRAFT_07, randomHop(), { publish: origin.consume() });
 	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video");
 
@@ -1088,7 +1088,7 @@ test("lite draft-07: subscribe end waits for groups below a declared finish", as
 async function heldOpenEnd() {
 	const pair = createMockTransportPair(ALPN_07_WIP);
 	const origin = new OriginProducer();
-	const publisher = new Publisher(pair.server, Version.DRAFT_07, randomHop(), origin.consume());
+	const publisher = new Publisher(pair.server, Version.DRAFT_07, randomHop(), { publish: origin.consume() });
 	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video");
 
@@ -1174,7 +1174,7 @@ async function serve(
 ): Promise<{ start?: number; end?: number; served: Served[] }> {
 	const pair = createMockTransportPair(ALPN_06);
 	const origin = new OriginProducer();
-	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume());
+	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), { publish: origin.consume() });
 
 	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video");
@@ -1364,7 +1364,7 @@ async function saturatedGroup() {
 	};
 
 	const origin = new OriginProducer();
-	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), { publish: origin.consume() });
 	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video");
 
@@ -1444,7 +1444,7 @@ test("lite draft-05: a blocked group header is reset when the group expires", as
 	pair.server.createUnidirectionalStream = async () => writable;
 
 	const origin = new OriginProducer();
-	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), { publish: origin.consume() });
 	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video");
 	const client = await Stream.open(pair.client, { version: Version.DRAFT_05 });
@@ -1574,7 +1574,7 @@ test("lite draft-05: a group that goes stale while its stream opens writes nothi
 
 	const pair = createMockTransportPair(ALPN_05);
 	const origin = new OriginProducer();
-	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), origin.consume());
+	const publisher = new Publisher(pair.server, Version.DRAFT_05, randomHop(), { publish: origin.consume() });
 	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video");
 
@@ -1647,7 +1647,7 @@ test.each([0, 1])("lite draft-07 reports the cached largest position when starti
 	const version = Version.DRAFT_07;
 	const pair = createMockTransportPair(ALPN_07_WIP);
 	const origin = new OriginProducer();
-	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
+	const publisher = new Publisher(pair.server, version, randomHop(), { publish: origin.consume() });
 	const broadcast = publish(origin, Path.from("quiet"));
 	const track = broadcast.createTrack("video");
 	const group = new GroupProducer(0);

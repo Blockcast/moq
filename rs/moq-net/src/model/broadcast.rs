@@ -18,6 +18,32 @@ use crate::origin::Route;
 use super::origin_impl::Announcer;
 use super::{Requests, WeakCache};
 
+/// A broadcast path and the publisher instance to request, if known.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Id {
+	/// The broadcast's path, relative to the origin handle.
+	pub path: crate::PathOwned,
+	/// The immutable publisher instance; absent requests stay on one serving route.
+	pub epoch: Option<crate::Epoch>,
+}
+
+impl<T: crate::AsPath> From<T> for Id {
+	fn from(path: T) -> Self {
+		Self {
+			path: path.as_path().to_owned(),
+			epoch: None,
+		}
+	}
+}
+
+impl Id {
+	/// Select one publisher instance without changing the path.
+	pub fn with_epoch(mut self, epoch: crate::Epoch) -> Self {
+		self.epoch = Some(epoch);
+		self
+	}
+}
+
 /// A collection of media tracks that can be published and subscribed to.
 ///
 /// Create via [`Info::produce`] to obtain both [`Producer`] and [`Consumer`] pair.
@@ -45,6 +71,8 @@ pub struct Info {
 	/// Empty (the default) for a standalone broadcast with no origin, which is then its own
 	/// root: any `..` reference escapes.
 	pub path: crate::PathOwned,
+	/// The publisher instance selected for this broadcast, if known.
+	pub epoch: Option<crate::Epoch>,
 }
 
 impl Default for Info {
@@ -53,6 +81,7 @@ impl Default for Info {
 			pool: cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY)),
 			cache_duration: std::time::Duration::MAX,
 			path: crate::PathOwned::default(),
+			epoch: None,
 		}
 	}
 }
@@ -210,7 +239,11 @@ impl Producer {
 	/// Fails with [`Error::Closed`] on a standalone broadcast (one not created
 	/// through an origin, so there is nothing to announce into), once the broadcast
 	/// has closed, or once the origin's driver has been dropped.
-	pub fn announce(&self, route: Route) -> Result<(), Error> {
+	pub fn announce(&self, mut route: Route) -> Result<(), Error> {
+		if route.epoch.is_some() && route.epoch != self.info.epoch {
+			return Err(Error::ProtocolViolation);
+		}
+		route.epoch = self.info.epoch.clone();
 		let mut announcer = self.alive.announcer.lock();
 		let announcer = announcer.as_mut().ok_or(Error::Closed)?;
 		announcer.announce(route)

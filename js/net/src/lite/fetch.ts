@@ -1,5 +1,7 @@
+import type * as Epoch from "../epoch.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
+import * as EpochWire from "./epoch.ts";
 import * as Message from "./message.ts";
 import { hasFrameBounds, Version } from "./version.ts";
 
@@ -14,6 +16,8 @@ function guardFetch(version: Version) {
 }
 
 export class Fetch {
+	/** The selected publisher instance, when negotiated. */
+	epoch?: Epoch.Valid;
 	broadcast: Path.Valid;
 	track: string;
 	priority: number;
@@ -29,6 +33,7 @@ export class Fetch {
 	endFrame?: number;
 
 	constructor({
+		epoch,
 		broadcast,
 		track,
 		priority,
@@ -36,6 +41,7 @@ export class Fetch {
 		startFrame = 0,
 		endFrame,
 	}: {
+		epoch?: Epoch.Valid;
 		broadcast: Path.Valid;
 		track: string;
 		priority: number;
@@ -43,6 +49,7 @@ export class Fetch {
 		startFrame?: number;
 		endFrame?: number;
 	}) {
+		this.epoch = epoch;
 		this.broadcast = broadcast;
 		this.track = track;
 		this.priority = priority;
@@ -64,6 +71,7 @@ export class Fetch {
 			// The peer would serve the whole group, including frames we excluded.
 			throw new Error("frame bounds not supported for this version");
 		}
+		await EpochWire.encode(w, version, this.epoch);
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<Fetch> {
@@ -73,7 +81,7 @@ export class Fetch {
 		const group = await r.u53();
 
 		if (!hasFrameBounds(version)) {
-			return new Fetch({ broadcast, track, priority, group });
+			return new Fetch({ broadcast, track, priority, group, epoch: await EpochWire.decode(r, version) });
 		}
 
 		const startFrame = await r.u53();
@@ -83,6 +91,7 @@ export class Fetch {
 		}
 
 		return new Fetch({
+			epoch: await EpochWire.decode(r, version),
 			broadcast,
 			track,
 			priority,

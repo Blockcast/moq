@@ -85,7 +85,7 @@ test("a borrowed table exposes dynamic serving and a live scoped broadcast map",
 
 	local.announce({ cost: 4n });
 	await settle();
-	expect(live.peek().get(localPath)).toEqual(Route.normalize({ cost: 4n }));
+	expect(live.peek().get(localPath)).toEqual(Route.normalize({ cost: 4n, epoch: local.epoch }));
 	expect(changes.some((value) => value.get(localPath)?.cost.warm === 4n)).toBe(true);
 
 	const prefix = Path.from("room");
@@ -161,7 +161,7 @@ test("an announced local path competes with a received route on cost", async () 
 	local.announce({ cost: 9n });
 	expect(live.peek().get(path)).toEqual(Route.normalize({ hops: [PEER], cost: 5n }));
 	local.announce({ cost: 5n });
-	expect(live.peek().get(path)).toEqual(Route.normalize({ cost: 5n }));
+	expect(live.peek().get(path)).toEqual(Route.normalize({ cost: 5n, epoch: local.epoch }));
 
 	local.close();
 	await settle();
@@ -182,7 +182,7 @@ test("a scoped route remains visible when an exact local path is outside the sco
 	const scope = Path.Pattern.parse("room/*");
 	const live = origin.broadcasts(scope);
 
-	expect(origin.broadcasts().peek().get(path)).toEqual(Route.default);
+	expect(origin.broadcasts().peek().get(path)).toEqual({ ...Route.default, epoch: local.epoch });
 	expect(live.peek().get(path)).toEqual(Route.normalize({ cost: 5n }));
 
 	local.close();
@@ -1359,7 +1359,9 @@ test("a peer is offered and served the cheapest originated route", async () => {
 	local.announce({ cost: 5n });
 	expect(wireOf(consumer).advertised.peek()?.get(prefix)?.[0]?.route).toEqual(Route.normalize({ cost: 1n }));
 	local.announce({ cost: 0n });
-	expect(wireOf(consumer).advertised.peek()?.get(prefix)?.[0]?.route).toEqual(Route.normalize({ cost: 0n }));
+	expect(wireOf(consumer).advertised.peek()?.get(prefix)?.[0]?.route).toEqual(
+		Route.normalize({ cost: 0n, epoch: local.epoch }),
+	);
 
 	local.close();
 	upstream.close();
@@ -1927,118 +1929,12 @@ test("broadcast handles carry the path they were created or requested at", async
 	origin.close();
 });
 
-/** Two epochs of `room/alice` in mint order, older first. */
-const OLD = Path.from("room/alice/@0199b7f4-3c2a-7d1e-9f0b-2b6c1a9d8e7f");
-const NEW = Path.from("room/alice/@0199b7f4-3c2b-7d1e-9f0b-2b6c1a9d8e7f");
-
-test("a bare name follows its newest epoch and falls back to an older one", async () => {
+test("reannouncing a broadcast cannot change its epoch", () => {
 	const origin = new Producer();
-	const consumer = origin.consume();
-	const bare = Path.from("room/alice");
-	expect(wireOf(consumer).routes(bare)).toBe(false);
-
-	const old = publish(origin, OLD);
-	expect(wireOf(consumer).routes(bare)).toBe(true);
-	const request = consumer.request(bare, { announced: true });
-	const pinned = consumer.request(OLD);
-	const first = request.active.peek();
-	expect(first).toBeDefined();
-	// Named as asked, so a catalog's relative references resolve against the name.
-	expect(first?.path).toBe(bare);
-
-	// A newer epoch is a new broadcast to the follower; the pinned request stays.
-	const next = publish(origin, NEW);
-	const second = request.active.peek();
-	expect(second).toBeDefined();
-	expect(second).not.toBe(first);
-	expect(second?.path).toBe(bare);
-	expect(pinned.active.peek()?.closed.peek()).toBeUndefined();
-
-	// Retracting the newest falls back to the older epoch still live.
-	next.close();
-	await settle();
-	const third = request.active.peek();
-	expect(third).toBeDefined();
-	expect(third).not.toBe(second);
-
-	old.close();
-	await settle();
-	expect(request.active.peek()).toBeUndefined();
-
-	request.close();
-	pinned.close();
-	origin.close();
-});
-
-test("a received epoch serves a bare request through its session", async () => {
-	const origin = new Producer();
-	const consumer = origin.consume();
-	const upstream = new BroadcastProducer();
-	const asked: Path.Valid[] = [];
-	const handle = wireOf(origin).receive(NEW, Route.default);
-	void (async () => {
-		for await (const request of handle.requested()) {
-			asked.push(request.path);
-			request.accept(upstream.consume());
-		}
-	})();
-
-	const request = consumer.request(Path.from("room/alice"));
-	await settle();
-	expect(request.active.peek()).toBeDefined();
-	// The session is asked for the epoch, never the bare name.
-	expect(asked).toEqual([NEW]);
-
-	request.close();
-	handle.close();
-	upstream.close();
-	origin.close();
-});
-
-test("an epoch beats a route covering the name", async () => {
-	const origin = new Producer();
-	const consumer = origin.consume();
-	const epoch = publish(origin, NEW);
-	const raw = publish(origin, Path.from("room/alice"));
-
-	const request = consumer.request(Path.from("room/alice"));
-	const fromEpoch = request.active.peek();
-	expect(fromEpoch).toBeDefined();
-	// Served from the epoch: once it goes, the bare name falls through to its own route,
-	// as a new broadcast. Had the route won, nothing would change here.
-	epoch.close();
-	await settle();
-	const fromRoute = request.active.peek();
-	expect(fromRoute).toBeDefined();
-	expect(fromRoute).not.toBe(fromEpoch);
-
-	request.close();
-	raw.close();
-	origin.close();
-});
-
-test("a grant on a name admits its epochs and a grant on an epoch only that one", () => {
-	const origin = new Producer();
-	const exact = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.literal("room/alice")]));
-	const broadcast = publish(exact, OLD);
-	expect(() => exact.createBroadcast(Path.from("room/alice/cam"))).toThrow();
-
-	const one = origin.scope(Path.empty(), new Path.Patterns([Path.Pattern.literal(OLD)]));
-	expect(() => one.consume().request(OLD).close()).not.toThrow();
-	expect(() => one.consume().request(Path.from("room/alice"))).toThrow();
-	expect(() => one.consume().request(NEW)).toThrow();
-
-	broadcast.close();
-	origin.close();
-});
-
-test("an epoch only ends a path", () => {
-	const origin = new Producer();
-	for (const path of [Path.join(OLD, Path.from("transcode")), Path.join(OLD, NEW.split("/").at(-1) as Path.Valid)]) {
-		expect(() => origin.createBroadcast(path)).toThrow("misplaced epoch");
-		expect(() => origin.dynamic(path)).toThrow("misplaced epoch");
-	}
-	// A derived broadcast carries the source's epoch at its own end instead.
-	origin.createBroadcast(Path.withEpoch(Path.from("room/alice/transcode"), Path.splitEpoch(OLD).epoch)).close();
+	const source = origin.createBroadcast(Path.from("live"));
+	const other = origin.createBroadcast(Path.from("other"));
+	expect(() => source.announce({ ...Route.default, epoch: other.epoch })).toThrow("epoch");
+	source.close();
+	other.close();
 	origin.close();
 });

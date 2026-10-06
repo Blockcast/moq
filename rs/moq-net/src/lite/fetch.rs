@@ -12,6 +12,8 @@ use super::{Message, Version};
 /// Lite03+ only.
 #[derive(Clone, Debug)]
 pub struct Fetch<'a> {
+	/// The requested publisher instance, only sent after epoch negotiation.
+	pub epoch: Option<crate::Epoch>,
 	pub broadcast: Path<'a>,
 	pub track: Cow<'a, str>,
 	pub priority: u8,
@@ -47,6 +49,7 @@ impl Message for Fetch<'_> {
 		}
 
 		Ok(Self {
+			epoch: super::epoch::decode(r, version)?,
 			broadcast,
 			track,
 			priority,
@@ -77,6 +80,7 @@ impl Message for Fetch<'_> {
 			return Err(EncodeError::Version);
 		}
 
+		super::epoch::encode(w, version, self.epoch.as_ref())?;
 		Ok(())
 	}
 }
@@ -87,6 +91,7 @@ mod test {
 
 	fn fetch_sample() -> Fetch<'static> {
 		Fetch {
+			epoch: None,
 			broadcast: Path::new("room").to_owned(),
 			track: Cow::Borrowed("video"),
 			priority: 3,

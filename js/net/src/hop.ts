@@ -8,6 +8,7 @@
  * @module
  */
 import * as z from "zod/mini";
+import type * as Epoch from "./epoch.ts";
 
 /**
  * One relay's identity in a broadcast's hop chain, encoded as a 62-bit varint on the wire.
@@ -112,6 +113,8 @@ export const Cost = {
  * an announce event carries it so consumers can read it back.
  */
 export interface Route {
+	/** The immutable publisher instance served by this route, if known. */
+	epoch?: Epoch.Valid;
 	/** The chain of hops the route has traversed, oldest first. */
 	hops: Hop[];
 	/** What pulling content via this route costs; lower wins. */
@@ -124,12 +127,12 @@ export const Route = {
 	default: { hops: [], cost: Cost.zero } as Route,
 
 	/** Normalize a partial route, treating a bare bigint cost as both magnitudes alike. */
-	normalize(route: Route | { hops?: readonly Hop[]; cost?: Cost | bigint } = {}): Route {
+	normalize(route: Route | { hops?: readonly Hop[]; cost?: Cost | bigint; epoch?: Epoch.Valid } = {}): Route {
 		const hops = route.hops ? [...route.hops] : [];
 		const cost = route.cost;
-		if (cost === undefined) return { hops, cost: Cost.zero };
-		if (typeof cost === "bigint") return { hops, cost: { warm: cost, cold: cost } };
-		return { hops, cost: { warm: cost.warm, cold: cost.cold } };
+		if (cost === undefined) return { epoch: route.epoch, hops, cost: Cost.zero };
+		if (typeof cost === "bigint") return { epoch: route.epoch, hops, cost: { warm: cost, cold: cost } };
+		return { epoch: route.epoch, hops, cost: { warm: cost.warm, cold: cost.cold } };
 	},
 };
 
@@ -148,6 +151,7 @@ export function routesEqual(a: Route | undefined, b: Route | undefined): boolean
 	if (a === b) return true;
 	if (!a || !b) return false;
 	return (
+		a.epoch === b.epoch &&
 		a.cost.warm === b.cost.warm &&
 		a.cost.cold === b.cost.cold &&
 		a.hops.length === b.hops.length &&

@@ -1,7 +1,9 @@
+import type * as Epoch from "../epoch.ts";
 import { ProtocolViolation } from "../error.ts";
 import { type Cost, type Hop, HopSchema, MAX_HOPS, UNKNOWN_HOP } from "../hop.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
+import * as EpochWire from "./epoch.ts";
 import * as Message from "./message.ts";
 import {
 	hasAnnounceCompression,
@@ -49,7 +51,15 @@ export type AnnounceBroadcast =
 	 * (lite-06+) the route cost. An absent cost encodes as zero; it decodes as
 	 * `undefined` on a wire with no room for one. On lite-07, `suffix` follows the
 	 * segments `pathBase` copies and `hops` precede the ones `hopBase` copies. */
-	| { status: "active"; suffix: Path.Valid; hops: Hop[]; cost?: Cost; pathBase?: Base; hopBase?: Base }
+	| {
+			status: "active";
+			epoch?: Epoch.Valid;
+			suffix: Path.Valid;
+			hops: Hop[];
+			cost?: Cost;
+			pathBase?: Base;
+			hopBase?: Base;
+	  }
 	/** Pre-lite-06: a broadcast is no longer available, retracted by path. */
 	| { status: "ended"; suffix: Path.Valid }
 	/** Lite06+: a broadcast is no longer available, retracted by announce id.
@@ -199,6 +209,7 @@ async function encodeAnnounce06Body(w: Writer, msg: AnnounceBroadcast, version: 
 			await encodePath(w, version, msg.suffix, msg.pathBase);
 			await encodeHopsBlock(w, version, msg.hops, msg.hopBase);
 			await encodeRouteCost(w, version, msg.cost);
+			await EpochWire.encode(w, version, msg.epoch);
 			break;
 		case "endedId":
 			await w.u62(msg.id);
@@ -237,7 +248,13 @@ async function decodeAnnounce06Body(r: Reader, typ: number, version: Version): P
 		case ANNOUNCE_START: {
 			const path = await decodePath(r, version);
 			const hops = await decodeHopsBlock(r, version);
-			return { status: "active", ...path, ...hops, cost: await decodeRouteCost(r, version) };
+			return {
+				status: "active",
+				...path,
+				...hops,
+				cost: await decodeRouteCost(r, version),
+				epoch: await EpochWire.decode(r, version),
+			};
 		}
 		case ANNOUNCE_END:
 			return { status: "endedId", id: await r.u62() };
@@ -262,6 +279,7 @@ async function encodeLegacyBody(w: Writer, msg: AnnounceBroadcast, version: Vers
 			await w.u8(STATUS_ACTIVE);
 			await w.string(Path.encode(msg.suffix));
 			await encodeHops(w, version, msg.hops);
+			await EpochWire.encode(w, version, msg.epoch);
 			break;
 		case "ended":
 			await w.u8(STATUS_ENDED);
@@ -286,7 +304,9 @@ async function decodeLegacyBody(r: Reader, version: Version): Promise<AnnounceBr
 	}
 	const suffix = Path.decode(await r.string());
 	const hops = await decodeHops(r, version);
-	return active ? { status: "active", suffix, hops } : { status: "ended", suffix };
+	return active
+		? { status: "active", suffix, hops, epoch: await EpochWire.decode(r, version) }
+		: { status: "ended", suffix };
 }
 
 /** Encode one announcement, including its type discriminator (lite-06+) and length prefix. */

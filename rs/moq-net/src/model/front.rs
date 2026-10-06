@@ -9,11 +9,9 @@
 //! sources, the tracks, the clock) and executes the actions; see
 //! `origin::run_front`.
 //!
-//! A path naming an epoch names one origin's broadcast, whoever relays it, so any
-//! route serving it may take over from another and its tracks resume where they
-//! stopped. A path without an epoch carries no such promise: the driver keeps it
-//! on the route that first served it (see `origin::run_front`), and the machine
-//! never sees another.
+//! The origin admits replacement routes only for the front's known epoch.
+//! Every admitted source must preserve immutable track metadata and frame positions.
+//! A front without an epoch remains pinned to its first serving route.
 //!
 //! Sources and tracks are named by ids and names, never handles, so a
 //! transition can be checked in a unit test by comparing the actions it emits.
@@ -219,19 +217,18 @@ impl Front {
 		self.excluded.retain(|route| standing(*route));
 	}
 
+	/// Whether a source has ever served this front.
+	pub(super) fn has_served(&self) -> bool {
+		self.resolved
+	}
+	/// The attached route, if any.
+	pub(super) fn serving_route(&self) -> Option<Candidate> {
+		self.serving.map(|(_, route)| route)
+	}
+
 	/// The attached source, if any.
 	pub(super) fn serving(&self) -> Option<u64> {
 		self.serving.map(|(source, _)| source)
-	}
-
-	/// The route the attached source came through, if any.
-	pub(super) fn serving_route(&self) -> Option<Candidate> {
-		self.serving.map(|(_, candidate)| candidate)
-	}
-
-	/// Whether a source ever attached: the front has served bytes.
-	pub(super) fn has_served(&self) -> bool {
-		self.resolved
 	}
 
 	/// Whether the front is over.
@@ -481,7 +478,7 @@ impl Front {
 		let spliced = track.state == (TrackState::Spliced { source });
 		if track.draining == Some(source) {
 			track.draining = None;
-			// A path is one broadcast, so a copy that completed ends the track whoever
+			// An identity is one broadcast, so a copy that completed ends the track whoever
 			// serves it now. One that failed leaves the track to the serving source.
 			if result.is_ok() && !track.ended {
 				track.state = TrackState::Idle;
@@ -1261,7 +1258,7 @@ mod tests {
 	}
 
 	/// A newer publisher at the path takes over, local or not, and closing or not: the
-	/// path is the same broadcast.
+	/// identity is the same broadcast.
 	#[test]
 	fn a_newcomer_takes_over_the_incumbent() {
 		for closing in [false, true] {
@@ -1567,7 +1564,7 @@ mod tests {
 	}
 
 	/// The serving source closed and the front reselected, but the pump still reads the
-	/// closed source's copy. That copy ending cleanly ends the track: a path is one
+	/// closed source's copy. That copy ending cleanly ends the track: an identity is one
 	/// broadcast, whoever serves it.
 	#[test]
 	fn a_closed_sources_clean_end_finishes_the_track() {

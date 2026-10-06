@@ -190,6 +190,7 @@ where
 		peer_setup,
 	} = config;
 
+	our_setup.epoch = true;
 	let recv_bw = bandwidth::Producer::new();
 
 	let recv_bw_consumer = match version {

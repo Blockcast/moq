@@ -123,10 +123,8 @@ only. There is no shared secret.
 **Patterns.** A grant is any pattern union and means exactly what it says:
 `foo/**` is a subtree, a bare `foo` is that one broadcast, `live/*` is every
 broadcast one segment under `live`, and `room/*/chat` is each room's chat and
-nothing beside it. A pattern that admits a name also admits its
-[epochs](/concept/moq-lite#publisher-epochs) (`foo/@<uuidv7>`), while a grant
-on one epoch reaches only that epoch. The relay announces, publishes, and
-resolves only the paths inside the grant. Announcements travel by literal head on the wire, so a
+nothing beside it. The relay announces, publishes, and resolves only the paths
+inside the grant. Announcements travel by literal head on the wire, so a
 non-prefix grant is filtered locally on each side while the announced route
 stays a prefix on every protocol version.
 

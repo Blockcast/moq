@@ -7,7 +7,7 @@ export type Valid = string & { readonly _brand: "epoch" };
 
 const canonical = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
-/** Parse UUID text without the path's `@` marker, refusing noncanonical forms. */
+/** Parse UUID text, refusing noncanonical forms. */
 export function parse(text: string): Valid {
 	if (text.length !== 36 || !canonical.test(text))
 		throw new RangeError("invalid epoch: expected a lowercase hyphenated UUIDv7");

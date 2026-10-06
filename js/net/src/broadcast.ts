@@ -4,6 +4,7 @@
  * @module
  */
 import { type Dispose, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
+import type * as Epoch from "./epoch.ts";
 import { NotFound } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import { Route } from "./hop.ts";
@@ -12,6 +13,14 @@ import * as Path from "./path.ts";
 import * as track from "./track.ts";
 import { untilAborted } from "./util/abort.ts";
 import { registerWire, trackOf, type Broadcast as Wire } from "./wire.ts";
+
+/** A broadcast path and its immutable publisher instance, if known. */
+export interface Id {
+	/** The broadcast path relative to the origin. */
+	path: Path.Valid;
+	/** The publisher instance; absent identities cannot be resumed across routes. */
+	epoch?: Epoch.Valid;
+}
 
 /** The origin callback a created broadcast uses to advertise its exact path. @internal */
 export interface Announcer {
@@ -234,7 +243,10 @@ export class Producer {
 	#announcer?: Announcer;
 	#path = Path.empty();
 
-	constructor() {
+	/** The publisher instance, fixed for this broadcast. */
+	readonly epoch?: Epoch.Valid;
+	constructor(epoch?: Epoch.Valid) {
+		this.epoch = epoch;
 		registerWire(this, this.#wire(false));
 	}
 
@@ -263,7 +275,7 @@ export class Producer {
 
 	/** A read handle for this broadcast, named by the path the origin created it at. */
 	consume(): Consumer {
-		return makeConsumer({ state: this.#state, path: this.#path });
+		return makeConsumer({ state: this.#state, path: this.#path, epoch: this.epoch });
 	}
 
 	async #requested(): Promise<track.Request | undefined> {
@@ -337,7 +349,10 @@ export class Producer {
 			throw new Error("broadcast is closed");
 		}
 		if (!this.#announcer) throw new Error("broadcast is not attached to an origin");
-		this.#announcer.announce(Route.normalize(route));
+		const normalized = Route.normalize(route);
+		if (normalized.epoch !== undefined && normalized.epoch !== this.epoch)
+			throw new Error("an announcement cannot change publisher epoch");
+		this.#announcer.announce({ ...normalized, epoch: this.epoch });
 	}
 
 	/**
@@ -358,6 +373,7 @@ export class Producer {
 
 // What a new consumer handle inherits: the shared broadcast plus the path naming it.
 interface Shared {
+	epoch?: Epoch.Valid;
 	state: BroadcastState;
 	path: Path.Valid;
 }
@@ -375,14 +391,17 @@ let makeConsumer: (shared: Shared) => Consumer;
  * @public
  */
 export class Consumer {
+	/** The publisher instance selected for this broadcast, if known. */
+	readonly epoch?: Epoch.Valid;
 	#state: BroadcastState;
 	#path: Path.Valid;
 
 	// Guards against a double close() on this handle over-decrementing the consumer count.
 	#closed = false;
 
-	protected constructor(shared?: never);
-	protected constructor(shared?: Shared) {
+	protected constructor(shared?: never, epoch?: Epoch.Valid);
+	protected constructor(shared?: Shared, epoch?: Epoch.Valid) {
+		this.epoch = shared?.epoch ?? epoch;
 		this.#state = shared?.state ?? new BroadcastState();
 		this.#path = shared?.path ?? Path.empty();
 		this.#state.consumers++;
@@ -440,7 +459,7 @@ export class Consumer {
 	// Hand this consumer's backing state and path to a clone. Opaque (`never`) so the state type
 	// stays unexported; a subclass passes it straight back into its own `super(...)`.
 	protected shareState(): never {
-		return { state: this.#state, path: this.#path } satisfies Shared as never;
+		return { state: this.#state, path: this.#path, epoch: this.epoch } satisfies Shared as never;
 	}
 
 	/** Get a lazy handle for a track on this broadcast. Repeat subscriptions dedupe onto one upstream subscription. */

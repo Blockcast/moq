@@ -339,18 +339,6 @@ fn datagram_ciphertext(generation: &Generation, name: &Name, sequence: u64, plai
 }
 
 #[test]
-fn path_joins_epoch() {
-	let cred = test_credential();
-	let epoch = Epoch::mint();
-	let path = cred.path("meeting.hang").unwrap();
-	assert_eq!(path.as_str().len(), 22);
-	let full = path.with_epoch(&epoch);
-	let (opaque, parsed) = full.split_epoch();
-	assert_eq!(opaque, path);
-	assert_eq!(parsed.unwrap(), epoch);
-}
-
-#[test]
 fn grouped_roundtrip() {
 	let mut pair = pair("video");
 	let mut group = pair.producer.append_group().unwrap();

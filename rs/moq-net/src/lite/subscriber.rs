@@ -86,7 +86,7 @@ pub(super) struct Subscriber<S: crate::transport::poll::Session> {
 	cost: Option<u64>,
 	/// Sources created by the announce half, drained by the driver into
 	/// [`SourceServe`] machines.
-	sources: kio::Queue<(PathOwned, crate::broadcast::Dynamic)>,
+	sources: kio::Queue<(crate::broadcast::Id, crate::broadcast::Dynamic)>,
 	going_away: crate::goaway::GoingAway,
 	/// What this session may allocate up front for frames still arriving.
 	frames: frame::Budget,
@@ -189,7 +189,12 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		run: &mut PrefixRun,
 	) -> Result<(), Error> {
 		match announce {
-			lite::AnnounceBroadcast::Active { suffix, hops, cost } => {
+			lite::AnnounceBroadcast::Active {
+				suffix,
+				hops,
+				cost,
+				epoch,
+			} => {
 				let (suffix, hops) = match self.version.has_announce_id() {
 					// Every `active` assigns the next ordinal, even ones we drop locally.
 					true => run.decoder.start(suffix, hops)?,
@@ -205,6 +210,13 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 					// atomically replace the broadcast. Lite06+ restarts by announce id, and older
 					// versions never defined restarts, so both fall through to start_announce, which
 					// rejects the duplicate (Error::ProtocolViolation).
+					if run
+						.announced
+						.attached(&path)
+						.is_some_and(|entry| entry.route.epoch != epoch)
+					{
+						return Err(Error::ProtocolViolation);
+					}
 					self.restart_announce(
 						path,
 						hops,
@@ -215,7 +227,10 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 					)?;
 				} else {
 					self.start_announce(
-						path,
+						crate::broadcast::Id {
+							path,
+							epoch: epoch.clone(),
+						},
 						hops,
 						cost,
 						run.link_cost,
@@ -259,7 +274,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 	/// and attached a route, or `Ok(false)` if it was declined locally.
 	fn start_announce(
 		&mut self,
-		path: PathOwned,
+		id: crate::broadcast::Id,
 		mut hops: crate::Hops,
 		// The route cost off the wire, i.e. as the peer advertised it.
 		// [`Cost::UNKNOWN`] before lite-06, leaving the hop chain as the only
@@ -274,6 +289,7 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		responder_origin: Option<crate::Hop>,
 		announced: &mut Announced,
 	) -> Result<bool, Error> {
+		let crate::broadcast::Id { path, epoch } = id;
 		// One current advertisement per prefix per stream. Test what the peer
 		// advertised, not only what we accepted locally.
 		if announced.contains(&path) {
@@ -328,7 +344,8 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		// resolve through this session on demand. An error means the prefix is
 		// outside our scope, so don't serve it. Reflections are already
 		// filtered above.
-		let route = self.announced_route(hops, cost, link_cost, responder_origin);
+		let mut route = self.announced_route(hops, cost, link_cost, responder_origin);
+		route.epoch = epoch;
 		let Ok(dynamic) = self.origin.dynamic(&path, route.clone()) else {
 			return Ok(false);
 		};
@@ -420,7 +437,8 @@ impl<S: crate::transport::poll::Session> Subscriber<S> {
 		}
 
 		tracing::debug!(route = %self.log_path(&path), hops = hops.len(), "restart");
-		let metadata = self.announced_route(hops, cost, link_cost, responder_origin);
+		let mut metadata = self.announced_route(hops, cost, link_cost, responder_origin);
+		metadata.epoch = announced.attached(&path).and_then(|entry| entry.route.epoch.clone());
 
 		// A restart is a metadata update: the route keeps its prefix (and its
 		// served paths) and re-prices in place. In-flight tracks keep flowing.
@@ -1366,7 +1384,7 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 						// an empty chain and an unpriced link. Stats are attributed in the
 						// model when this enters the origin via `create_broadcast`.
 						self.subscriber.start_announce(
-							path,
+							crate::broadcast::Id { path, epoch: None },
 							crate::Hops::new(),
 							crate::origin::Cost::UNKNOWN,
 							0,
@@ -1382,6 +1400,8 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 					self.state = PrefixState::Run { stream, run };
 				}
 				PrefixState::Run { stream, run } => {
+					let epochs = self.subscriber.version.has_setup_stream()
+						&& ready!(self.subscriber.peer_setup.poll_epoch(waiter));
 					// A draining peer usually stops announcing, so react to the
 					// GOAWAY itself; waiting for another message would leave the
 					// route primary until the session finally closed. Idempotent,
@@ -1397,6 +1417,11 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 							Poll::Ready(Ok(Some(announce))) => {
 								// The count is of ANNOUNCE_STARTs, not every message.
 								let start = matches!(announce, lite::AnnounceBroadcast::Active { .. });
+								if matches!(&announce, lite::AnnounceBroadcast::Active { epoch: Some(_), .. })
+									&& !epochs
+								{
+									return Poll::Ready(Err(Error::ProtocolViolation));
+								}
 								self.subscriber.handle_announce(&self.prefix, announce, run)?;
 								match &mut run.landing {
 									Landing::Count(remaining) if start => *remaining = remaining.saturating_sub(1),
@@ -1434,6 +1459,7 @@ impl<S: crate::transport::poll::Session> AnnouncePrefix<S> {
 /// retraction does not disturb subscriptions already in flight); the session
 /// dying drops them.
 struct SourceServe<S: crate::transport::poll::Session> {
+	epoch: Option<crate::Epoch>,
 	subscriber: Subscriber<S>,
 	path: PathOwned,
 	dynamic: crate::broadcast::Dynamic,
@@ -1445,11 +1471,12 @@ struct SourceServe<S: crate::transport::poll::Session> {
 }
 
 impl<S: crate::transport::poll::Session> SourceServe<S> {
-	fn new(subscriber: Subscriber<S>, path: PathOwned, dynamic: crate::broadcast::Dynamic) -> Self {
+	fn new(subscriber: Subscriber<S>, id: crate::broadcast::Id, dynamic: crate::broadcast::Dynamic) -> Self {
 		let closed = subscriber.session.clone();
 		Self {
 			subscriber,
-			path,
+			path: id.path,
+			epoch: id.epoch,
 			dynamic,
 			closed,
 			tracks: kio::Tasks::new(),
@@ -1477,6 +1504,7 @@ impl<S: crate::transport::poll::Session> kio::Task for SourceServe<S> {
 			match self.dynamic.poll_requested_track(waiter) {
 				Poll::Ready(Ok(request)) => {
 					let serve = TrackServe {
+						epoch: self.epoch.clone(),
 						subscriber: self.subscriber.clone(),
 						path: self.path.clone(),
 						name: request.name().to_string(),
@@ -1727,6 +1755,7 @@ mod tests {
 				going_away: Default::default(),
 			});
 			let serve = TrackServe {
+				epoch: None,
 				subscriber,
 				path: Path::new("room").to_owned(),
 				name: "video".to_string(),
@@ -1779,6 +1808,7 @@ mod tests {
 			going_away: Default::default(),
 		});
 		let serve = TrackServe {
+			epoch: None,
 			subscriber,
 			path: Path::new("room").to_owned(),
 			name: "video".to_string(),
@@ -1947,6 +1977,7 @@ mod tests {
 
 		let run = TrackServeRun::new(
 			TrackServe {
+				epoch: None,
 				subscriber: subscriber.clone(),
 				path: Path::new("room").to_owned(),
 				name: "video".to_string(),
@@ -2003,6 +2034,7 @@ mod tests {
 
 			let mut run = TrackServeRun::new(
 				TrackServe {
+					epoch: None,
 					subscriber,
 					path: Path::new("room").to_owned(),
 					name: "video".to_string(),
@@ -2051,6 +2083,7 @@ mod tests {
 		});
 		let subscribes = subscriber.subscribes.clone();
 		let serve = TrackServe {
+			epoch: None,
 			subscriber,
 			path: Path::new("room/host").to_owned(),
 			name: "catalog.json".to_string(),
@@ -2127,6 +2160,7 @@ mod tests {
 
 			Self {
 				serve: TrackServe {
+					epoch: None,
 					subscriber,
 					path: Path::new("room/host").to_owned(),
 					name: "catalog.json".to_string(),
@@ -2556,7 +2590,10 @@ mod tests {
 		assert!(
 			subscriber
 				.start_announce(
-					path.clone(),
+					crate::broadcast::Id {
+						path: path.clone(),
+						epoch: None
+					},
 					crate::Hops::new(),
 					crate::origin::Cost::default(),
 					0,
@@ -2572,7 +2609,10 @@ mod tests {
 		assert!(
 			matches!(
 				subscriber.start_announce(
-					path.clone(),
+					crate::broadcast::Id {
+						path: path.clone(),
+						epoch: None
+					},
 					reflected,
 					crate::origin::Cost::default(),
 					0,
@@ -2608,7 +2648,10 @@ mod tests {
 			assert!(
 				subscriber
 					.start_announce(
-						Path::new(&format!("room/{i}")).to_owned(),
+						crate::broadcast::Id {
+							path: Path::new(&format!("room/{i}")).to_owned(),
+							epoch: None
+						},
 						crate::Hops::new(),
 						crate::origin::Cost::default(),
 						0,
@@ -2667,7 +2710,10 @@ mod tests {
 		assert!(
 			!subscriber
 				.start_announce(
-					path.clone(),
+					crate::broadcast::Id {
+						path: path.clone(),
+						epoch: None
+					},
 					hops,
 					crate::origin::Cost::default(),
 					0,
@@ -2684,7 +2730,10 @@ mod tests {
 		assert!(
 			matches!(
 				subscriber.start_announce(
-					path.clone(),
+					crate::broadcast::Id {
+						path: path.clone(),
+						epoch: None
+					},
 					fresh,
 					crate::origin::Cost::default(),
 					0,
@@ -2722,7 +2771,10 @@ mod tests {
 		assert!(
 			!subscriber
 				.start_announce(
-					path.clone(),
+					crate::broadcast::Id {
+						path: path.clone(),
+						epoch: None
+					},
 					reflected,
 					crate::origin::Cost::default(),
 					0,
@@ -2738,7 +2790,10 @@ mod tests {
 		hops.push(crate::Hop::new(7).unwrap()).unwrap();
 		let err = subscriber
 			.start_announce(
-				path.clone(),
+				crate::broadcast::Id {
+					path: path.clone(),
+					epoch: None,
+				},
 				hops,
 				crate::origin::Cost::default(),
 				0,
@@ -2778,7 +2833,10 @@ mod tests {
 		let mut announced = Announced::default();
 		let accepted = subscriber
 			.start_announce(
-				Path::new("room/host").to_owned(),
+				crate::broadcast::Id {
+					path: Path::new("room/host").to_owned(),
+					epoch: None,
+				},
 				hops,
 				crate::origin::Cost::default(),
 				0,
@@ -2842,7 +2900,10 @@ mod tests {
 		let mut announced = Announced::default();
 		let accepted = subscriber
 			.start_announce(
-				Path::new("room/host").to_owned(),
+				crate::broadcast::Id {
+					path: Path::new("room/host").to_owned(),
+					epoch: None,
+				},
 				hops,
 				crate::origin::Cost::default(),
 				0,
@@ -2900,7 +2961,10 @@ mod tests {
 		let mut announced = Announced::default();
 		let accepted = subscriber
 			.start_announce(
-				Path::new("room/host").to_owned(),
+				crate::broadcast::Id {
+					path: Path::new("room/host").to_owned(),
+					epoch: None,
+				},
 				crate::Hops::new(),
 				crate::origin::Cost::UNKNOWN,
 				0,
@@ -2947,7 +3011,10 @@ mod tests {
 		assert!(
 			subscriber
 				.start_announce(
-					Path::new("room/host").to_owned(),
+					crate::broadcast::Id {
+						path: Path::new("room/host").to_owned(),
+						epoch: None
+					},
 					hops,
 					crate::origin::Cost::UNKNOWN,
 					0,
@@ -2977,7 +3044,10 @@ mod tests {
 		let mut announced = Announced::default();
 		first
 			.start_announce(
-				Path::new("room/host").to_owned(),
+				crate::broadcast::Id {
+					path: Path::new("room/host").to_owned(),
+					epoch: None,
+				},
 				crate::Hops::new(),
 				crate::origin::Cost::UNKNOWN,
 				0,
@@ -3034,7 +3104,10 @@ mod tests {
 		let path = Path::new("room/host").to_owned();
 		subscriber
 			.start_announce(
-				path.clone(),
+				crate::broadcast::Id {
+					path: path.clone(),
+					epoch: None,
+				},
 				crate::Hops::new(),
 				crate::origin::Cost::UNKNOWN,
 				0,
@@ -3089,7 +3162,10 @@ mod tests {
 		let mut announced = Announced::default();
 		subscriber
 			.start_announce(
-				path.clone(),
+				crate::broadcast::Id {
+					path: path.clone(),
+					epoch: None,
+				},
 				hops,
 				crate::origin::Cost::default(),
 				1,
@@ -3110,7 +3186,10 @@ mod tests {
 		let mut announced = Announced::default();
 		subscriber
 			.start_announce(
-				path.clone(),
+				crate::broadcast::Id {
+					path: path.clone(),
+					epoch: None,
+				},
 				hops,
 				crate::origin::Cost::default(),
 				1,
@@ -3132,6 +3211,7 @@ mod tests {
 	async fn the_count_lands_at_the_last_initial_start() {
 		const VERSION: Version = Version::Lite06;
 		let start = |suffix| lite::AnnounceBroadcast::Active {
+			epoch: None,
 			suffix: lite::PathRef::literal(Path::new(suffix)),
 			hops: lite::HopsRef::literal(crate::Hops::new()),
 			cost: crate::origin::Cost::default(),
@@ -3160,7 +3240,11 @@ mod tests {
 			origin,
 			recv_bandwidth: None,
 			version: VERSION,
-			peer_setup: Default::default(),
+			peer_setup: {
+				let setup = lite::PeerSetup::default();
+				setup.set(lite::Setup::default());
+				setup
+			},
 			cost: Some(1),
 			peer_hop: None,
 			going_away: Default::default(),
@@ -3349,8 +3433,12 @@ impl Announced {
 					continue;
 				};
 				let path = path.to_owned();
-				let source = subscriber.origin.create_source(&path);
-				let _ = subscriber.sources.try_push((path.clone(), source.dynamic()));
+				let id = crate::broadcast::Id {
+					path: path.clone(),
+					epoch: entry.route.epoch.clone(),
+				};
+				let source = subscriber.origin.create_source(id.clone());
+				let _ = subscriber.sources.try_push((id, source.dynamic()));
 				request.accept(&source);
 				entry
 					.sources
@@ -3458,6 +3546,7 @@ enum ServeEnd {
 /// the last one leaves) concurrently with any number of one-shot fetches.
 #[derive(Clone)]
 struct TrackServe<S: crate::transport::poll::Session> {
+	epoch: Option<crate::Epoch>,
 	subscriber: Subscriber<S>,
 	path: PathOwned,
 	name: String,
@@ -3770,6 +3859,7 @@ impl<S: crate::transport::poll::Session> Establish<S> {
 
 					let bounds = WireBounds::new(self.subscription.start, self.subscription.end);
 					let msg = lite::Subscribe {
+						epoch: self.serve.epoch.clone(),
 						id: self.id,
 						broadcast: self.serve.path.as_path(),
 						track: self.serve.name.as_str().into(),
@@ -4009,6 +4099,7 @@ impl<S: crate::transport::poll::Session> TrackInfoFetch<S> {
 					let mut stream = ready!(Stream::poll_open(&mut self.session, serve.subscriber.version, &mut cx))?;
 					stream.writer.buffer(&lite::ControlType::Track)?;
 					stream.writer.buffer(&lite::Track {
+						epoch: serve.epoch.clone(),
 						broadcast: serve.path.as_path(),
 						track: serve.name.as_str().into(),
 					})?;
@@ -4503,6 +4594,7 @@ impl<S: crate::transport::poll::Session> kio::Task for FetchServeRun<S> {
 					};
 
 					let msg = lite::Fetch {
+						epoch: self.serve.epoch.clone(),
 						broadcast: self.serve.path.as_path(),
 						track: self.serve.name.as_str().into(),
 						priority: request.priority(),

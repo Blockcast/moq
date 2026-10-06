@@ -1,6 +1,8 @@
+import type * as Epoch from "../epoch.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import type { Location } from "../track.ts";
+import * as EpochWire from "./epoch.ts";
 import * as Message from "./message.ts";
 import { hasFrameBounds, hasGroupOrder, hasLargest, hasStreamCount, resolvesStart, Version } from "./version.ts";
 
@@ -228,6 +230,8 @@ export class SubscribeUpdate {
 }
 
 export class Subscribe {
+	/** The selected publisher instance, when negotiated. */
+	epoch?: Epoch.Valid;
 	id: bigint;
 	broadcast: Path.Valid;
 	track: string;
@@ -252,6 +256,7 @@ export class Subscribe {
 	endFrame?: number;
 
 	constructor(props: {
+		epoch?: Epoch.Valid;
 		id: bigint;
 		broadcast: Path.Valid;
 		track: string;
@@ -262,6 +267,7 @@ export class Subscribe {
 		startFrame?: number;
 		endFrame?: number;
 	}) {
+		this.epoch = props.epoch;
 		this.id = props.id;
 		this.broadcast = props.broadcast;
 		this.track = props.track;
@@ -291,6 +297,7 @@ export class Subscribe {
 				await encodeFrameBounds(w, version, this);
 				break;
 		}
+		await EpochWire.encode(w, version, this.epoch);
 	}
 
 	static async #decode(r: Reader, version: Version): Promise<Subscribe> {
@@ -311,6 +318,7 @@ export class Subscribe {
 				const end = endGroup !== undefined ? endGroup - 1 : undefined;
 				const frames = await decodeFrameBounds(r, version, startGroup, end);
 				return new Subscribe({
+					epoch: await EpochWire.decode(r, version),
 					id,
 					broadcast,
 					track,

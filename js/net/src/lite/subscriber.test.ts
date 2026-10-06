@@ -885,7 +885,7 @@ test.each([
 	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
 
 	let settled = false;
-	const fetch = subscriber.fetchGroup(Path.from("room"), "video", 0).then(
+	const fetch = subscriber.fetchGroup({ path: Path.from("room") }, "video", 0).then(
 		() => {
 			settled = true;
 			return undefined;
@@ -919,7 +919,7 @@ test("a fetch started after the subscriber closes rejects without opening a stre
 	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
 	subscriber.close();
 
-	const err = await subscriber.fetchGroup(Path.from("room"), "video", 0).catch((err: unknown) => err);
+	const err = await subscriber.fetchGroup({ path: Path.from("room") }, "video", 0).catch((err: unknown) => err);
 	expectCut(err, undefined);
 	expect(streams.length).toBe(0);
 });
@@ -930,7 +930,7 @@ test("an already-aborted fetch rejects without opening a stream", async () => {
 	const cause = new Error("gone");
 
 	const err = await subscriber
-		.fetchGroup(Path.from("room"), "video", 0, { signal: AbortSignal.abort(cause) })
+		.fetchGroup({ path: Path.from("room") }, "video", 0, { signal: AbortSignal.abort(cause) })
 		.catch((err: unknown) => err);
 	expect(err).toBe(cause);
 	expect(streams.length).toBe(0);
@@ -943,8 +943,8 @@ test("one of two fetch sharers aborting leaves the other's fetch", async () => {
 	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
 
 	const controller = new AbortController();
-	const a = subscriber.fetchGroup(Path.from("room"), "video", 0, { signal: controller.signal });
-	const b = subscriber.fetchGroup(Path.from("room"), "video", 0);
+	const a = subscriber.fetchGroup({ path: Path.from("room") }, "video", 0, { signal: controller.signal });
+	const b = subscriber.fetchGroup({ path: Path.from("room") }, "video", 0);
 
 	await drainUntil(() => streams.length === 1);
 	await answerTrackInfo(streams[0]);
@@ -977,8 +977,8 @@ test.each([
 
 	const first = new AbortController();
 	const second = new AbortController();
-	const a = subscriber.fetchGroup(Path.from("room"), "video", 0, { signal: first.signal });
-	const b = subscriber.fetchGroup(Path.from("room"), "video", 0, { signal: second.signal });
+	const a = subscriber.fetchGroup({ path: Path.from("room") }, "video", 0, { signal: first.signal });
+	const b = subscriber.fetchGroup({ path: Path.from("room") }, "video", 0, { signal: second.signal });
 
 	await drainUntil(() => streams.length === 1);
 	await streams[0].reading;
@@ -1014,7 +1014,7 @@ test("a fetch after the last sharer left is never failed with the cancelled one"
 		const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
 
 		const controller = new AbortController();
-		const a = subscriber.fetchGroup(Path.from("room"), "video", 0, { signal: controller.signal });
+		const a = subscriber.fetchGroup({ path: Path.from("room") }, "video", 0, { signal: controller.signal });
 		void a.catch(() => undefined);
 		await drainUntil(() => streams.length === 1);
 		await answerTrackInfo(streams[0]);
@@ -1023,7 +1023,7 @@ test("a fetch after the last sharer left is never failed with the cancelled one"
 
 		controller.abort(new Error("gone"));
 		for (let i = 0; i < depth; i++) await Promise.resolve();
-		const b = subscriber.fetchGroup(Path.from("room"), "video", 0).catch((err: unknown) => err);
+		const b = subscriber.fetchGroup({ path: Path.from("room") }, "video", 0).catch((err: unknown) => err);
 		for (let i = 0; i < 64; i++) await Promise.resolve();
 
 		// An empty-group FIN accepts whichever FETCH the late caller is waiting on.
@@ -1051,7 +1051,7 @@ test("the last reader leaving mid-response cancels the fetch", async () => {
 	const { quic, streams } = fakeSession();
 	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
 
-	const fetch = subscriber.fetchGroup(Path.from("room"), "video", 0);
+	const fetch = subscriber.fetchGroup({ path: Path.from("room") }, "video", 0);
 	await drainUntil(() => streams.length === 1);
 	await answerTrackInfo(streams[0]);
 	await drainUntil(() => streams.length === 2);

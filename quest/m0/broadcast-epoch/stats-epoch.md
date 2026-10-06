@@ -3,7 +3,7 @@
 ## Goal
 
 Each stats group broadcast publishes under its own epoch,
-`<prefix>[/<group>]/node/<node>/@<epoch>`, minted each time the group is
+`<prefix>[/<group>]/node/<node>` plus epoch metadata, minted each time the group is
 announced, so neither a restarted node nor a group returning from idle reuses
 a broadcast name or the group numbers a relay cached under it.
 
@@ -16,7 +16,7 @@ a broadcast name or the group numbers a relay cached under it.
   linger and drops its totals; when it returns it announces under a new epoch
   counted from zero. Why: a producer never holds an idle group's state, so its
   memory is bounded by active and lingering groups, and readers see every
-  reset as a new path rather than detecting one. The cost: a reader that
+  reset as a new identity rather than inferring a reset. The cost: a reader that
   misses every frame across the linger loses that epoch's tail; billing
   under-bills by that tail, consistent with the 0-bill baseline.
   At depth 0 the single broadcast never unannounces, so its epoch still lasts
@@ -45,5 +45,6 @@ a broadcast name or the group numbers a relay cached under it.
 - demo/web stats keys include the epoch. Update `doc/concept/stats.md`,
   `doc/bin/relay/config.md`, and the relay stats config docs.
 
-Public API: path shape change for every stats consumer. Wire: stats broadcast
-names gain a trailing epoch segment.
+Public API: stats consumers key by path and epoch. Wire: the negotiated Lite
+epoch metadata carries identity without a suffix; legacy cache compatibility
+needs validation before removing the release seed.

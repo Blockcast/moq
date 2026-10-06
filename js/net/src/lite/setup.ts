@@ -1,3 +1,4 @@
+import { type Getter, race, Signal } from "@moq/signals";
 /**
  * The lite-05+ SETUP message: each endpoint advertises its capabilities once, as the
  * sole message on a unidirectional Setup Stream ({@link DataType.Setup}), then closes it.
@@ -19,6 +20,7 @@ const PARAM_PATH = 0x2n;
 const PARAM_ROLE = 0x3n;
 /** Setup Parameter id for the endpoint's Hop ID. */
 const PARAM_HOP = 0x5n;
+const PARAM_EPOCH = 0x6n;
 
 /** Cap on the number of parameters in a bag, matching the Rust decoder. */
 const MAX_PARAMS = 64;
@@ -167,6 +169,8 @@ class Parameters {
 
 /** The capabilities a {@link Setup} advertises. Each defaults to the wire default, which is the absence of the parameter. */
 export interface SetupProps {
+	/** Whether publisher epoch metadata is supported. */
+	epoch?: boolean;
 	/** See {@link Setup.probe}. Defaults to {@link ProbeLevel.None}. */
 	probe?: ProbeLevel;
 	/** See {@link Setup.path}. Omitted by default. */
@@ -185,6 +189,8 @@ export interface SetupProps {
  * depends on a negotiated capability (e.g. PROBE) must wait for it.
  */
 export class Setup {
+	/** Whether publisher epoch metadata is supported. */
+	epoch: boolean;
 	/** The probe capability this endpoint supports. {@link ProbeLevel.None} when absent. */
 	probe: ProbeLevel;
 
@@ -212,7 +218,8 @@ export class Setup {
 	 */
 	hop?: Hop;
 
-	constructor({ probe, path, role, hop }: SetupProps = {}) {
+	constructor({ probe, path, role, hop, epoch }: SetupProps = {}) {
+		this.epoch = epoch ?? false;
 		this.probe = probe ?? ProbeLevel.None;
 		this.path = path;
 		this.role = role ?? Role.Both;
@@ -227,6 +234,7 @@ export class Setup {
 
 	async #encode(w: Writer, version: Version) {
 		const params = new Parameters();
+		if (this.epoch) params.setVarint(PARAM_EPOCH, 1n, version);
 		// None is the wire default, so omit it to keep the message empty when nothing is set.
 		if (this.probe !== ProbeLevel.None) {
 			params.setVarint(PARAM_PROBE, this.probe, version);
@@ -262,7 +270,9 @@ export class Setup {
 		const hopRaw = await params.getVarint(PARAM_HOP, version);
 		const hop = hopRaw === undefined || hopRaw === 0n ? undefined : HopSchema.parse(hopRaw);
 
-		return new Setup({ probe, path, role, hop });
+		const epoch = await params.getVarint(PARAM_EPOCH, version);
+		if (epoch !== undefined && epoch !== 1n) throw new Error("invalid epoch capability");
+		return new Setup({ probe, path, role, hop, epoch: epoch === 1n });
 	}
 
 	/** Encode the SETUP message with its size prefix. Throws on pre-lite-05 versions. */
@@ -275,5 +285,27 @@ export class Setup {
 	static async decode(r: Reader, version: Version): Promise<Setup> {
 		Setup.#guard(version);
 		return Message.decode(r, (r) => Setup.#decode(r, version), MAX_SETUP_SIZE);
+	}
+}
+
+/** Resolve epoch support after SETUP, or false if the session closes first. */
+export async function supportsEpoch({
+	version,
+	peer,
+	closed,
+}: {
+	version: Version;
+	peer?: Getter<Setup | undefined>;
+	closed: Promise<unknown>;
+}): Promise<boolean> {
+	if (!hasSetupStream(version) || !peer) return false;
+	const ended = closed.then(
+		() => false,
+		() => false,
+	);
+	for (;;) {
+		const setup = peer.peek();
+		if (setup) return setup.epoch;
+		if ((await race([Signal.race(peer), ended])) === false) return false;
 	}
 }

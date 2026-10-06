@@ -12,6 +12,8 @@ use super::{Message, Version};
 /// Objects will use the provided ID instead of the full track name, to save bytes.
 #[derive(Clone, Debug)]
 pub struct Subscribe<'a> {
+	/// The requested publisher instance, only sent after epoch negotiation.
+	pub epoch: Option<crate::Epoch>,
 	pub id: u64,
 	pub broadcast: Path<'a>,
 	pub track: Cow<'a, str>,
@@ -65,6 +67,7 @@ impl Message for Subscribe<'_> {
 		let start_group = canonical_start_group(version, start_group, start_frame);
 
 		Ok(Self {
+			epoch: super::epoch::decode(r, version)?,
 			id,
 			broadcast,
 			track,
@@ -102,6 +105,7 @@ impl Message for Subscribe<'_> {
 			self.end_frame,
 		)?;
 
+		super::epoch::encode(w, version, self.epoch.as_ref())?;
 		Ok(())
 	}
 }
@@ -706,6 +710,7 @@ mod test {
 
 	fn subscribe_sample() -> Subscribe<'static> {
 		Subscribe {
+			epoch: None,
 			id: 1,
 			broadcast: Path::new("room").to_owned(),
 			track: Cow::Borrowed("video"),

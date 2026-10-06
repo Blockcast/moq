@@ -1,8 +1,8 @@
 //! A subscription survives its route changing, end to end over real sessions.
 //!
 //! A publisher `P` is pulled by two relays `A` and `B`, both of which re-advertise
-//! it to the subscribing relay `R`. A path naming an epoch is one broadcast whoever
-//! relays it, so `R` may resume a subscription served through one onto the other. The reader on `R`
+//! it to the subscribing relay `R`. Matching epochs identify the same content, so `R`
+//! may resume a subscription served through one onto the other. The reader on `R`
 //! must see every frame exactly once, in order, whether the route changes between
 //! groups or in the middle of one, and however it changes.
 
@@ -18,9 +18,6 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Frames per group.
 const FRAMES: u64 = 4;
-
-/// The broadcast, under an epoch: only an epoch path resumes across routes.
-const LIVE: &str = "live/@0199b7f4-3c2a-7d1e-9f0b-2b6c1a9d8e7f";
 
 fn produce_origin(hop: u64) -> origin::Producer {
 	let (producer, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
@@ -89,7 +86,7 @@ impl Topology {
 		let relay_b = produce_origin(3);
 		let subscriber = produce_origin(4);
 
-		let broadcast = publisher.create_broadcast(LIVE).unwrap();
+		let broadcast = publisher.create_broadcast("live").unwrap();
 		let track = broadcast.create_track("video", None).unwrap();
 		broadcast.announce(Default::default()).unwrap();
 
@@ -98,8 +95,18 @@ impl Topology {
 		let a_to_r = link(version, &relay_a, &subscriber).await;
 
 		let consumer = subscriber.consume();
-		consumer.routed(LIVE).await.unwrap();
-		let remote = consumer.request_broadcast(LIVE).await.unwrap();
+		consumer.routed("live").await.unwrap();
+		let route = consumer.announced().next().await.unwrap();
+		let moq_net::announce::Event::Start(route) = route else {
+			panic!("expected start")
+		};
+		let remote = consumer
+			.request_broadcast(broadcast::Id {
+				path: "live".into(),
+				epoch: route.route.epoch,
+			})
+			.await
+			.unwrap();
 		let prefs = track::Subscription::default().with_max_age(Duration::from_secs(60));
 		let sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
 
@@ -338,9 +345,6 @@ route_change_tests! {
 	lite_07: "moq-lite-07-wip",
 	lite_06: "moq-lite-06",
 	lite_05: "moq-lite-05",
-	lite_04: "moq-lite-04",
-	ietf_19: "moq-transport-19",
-	ietf_22: "moq-transport-22",
 }
 
 /// `P` feeds `A` slowly and `B` promptly, and `R` reads through `A` until that route dies
@@ -357,8 +361,18 @@ async fn lagging_route_dies(version: Version) -> mpsc::UnboundedReceiver<(u64, m
 	}
 	async fn subscribe(origin: &origin::Producer) -> track::Subscriber {
 		let consumer = origin.consume();
-		consumer.routed(LIVE).await.unwrap();
-		let remote = consumer.request_broadcast(LIVE).await.unwrap();
+		consumer.routed("live").await.unwrap();
+		let route = consumer.announced().next().await.unwrap();
+		let moq_net::announce::Event::Start(route) = route else {
+			panic!("expected start")
+		};
+		let remote = consumer
+			.request_broadcast(broadcast::Id {
+				path: "live".into(),
+				epoch: route.route.epoch,
+			})
+			.await
+			.unwrap();
 		let preferences = track::Subscription::default().with_max_age(Duration::from_secs(60));
 		remote.track("video").unwrap().subscribe(preferences).await.unwrap()
 	}
@@ -374,7 +388,7 @@ async fn lagging_route_dies(version: Version) -> mpsc::UnboundedReceiver<(u64, m
 		produce_origin(4),
 		produce_origin(5),
 	);
-	let broadcast = p.create_broadcast(LIVE).unwrap();
+	let broadcast = p.create_broadcast("live").unwrap();
 	let track = broadcast.create_track("video", None).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 	let p_a = lagged(version, &p, &a, Duration::from_millis(300)).await;
@@ -430,19 +444,38 @@ async fn lite_resumes_after_a_lagging_route_dies() {
 	}
 }
 
-/// Before draft 20 the resume rides a joining FETCH from group 1 through Largest, which
-/// a moq-rs publisher refuses for spanning several groups, so the subscription joins
-/// live instead. The rest of group 1 is still fetched on its own.
+/// Unidentified routes end the subscription instead of joining a second route.
 #[moq_net_sim::test]
-async fn an_older_ietf_draft_still_resumes_the_open_group() {
-	let version: Version = "moq-transport-19".parse().unwrap();
-	let mut rx = lagging_route_dies(version).await;
-	assert_eq!(next(&mut rx).await, (1, payload(1, 2)));
-	assert_eq!(next(&mut rx).await, (1, payload(1, 3)));
+async fn legacy_routes_do_not_resume() {
+	for version in ["moq-lite-04", "moq-transport-19", "moq-transport-22"] {
+		for trigger in [Trigger::Disconnect, Trigger::Unannounce] {
+			let (mut topology, mut sub) = Topology::new(version.parse().unwrap()).await;
+			topology.standby().await;
+			let mut group = topology.track.append_group().unwrap();
+			group.write_frame(Timestamp::ZERO, b"before".as_ref()).unwrap();
+			group.finish().unwrap();
+			let mut received = sub.recv_group().await.unwrap().unwrap();
+			assert_eq!(
+				received.read_frame().await.unwrap().unwrap().payload.as_ref(),
+				b"before"
+			);
+			topology.trigger(trigger).await;
+			let mut group = topology.track.append_group().unwrap();
+			group.write_frame(Timestamp::ZERO, b"after".as_ref()).unwrap();
+			group.finish().unwrap();
+			let next = moq_net_sim::timeout(TEST_TIMEOUT, sub.recv_group())
+				.await
+				.expect("must terminate");
+			assert!(!matches!(next, Ok(Some(_))), "{version} stitched an unidentified route");
+			// The client can make a fresh request through the surviving route.
+			let remote = topology.subscriber.consume().request_broadcast("live").await.unwrap();
+			let mut replacement = remote.track("video").unwrap().subscribe(None).await.unwrap();
+			let mut received = replacement.recv_group().await.unwrap().unwrap();
+			assert_eq!(received.read_frame().await.unwrap().unwrap().payload.as_ref(), b"after");
+		}
+	}
 }
 
-/// moq-transport 22 is left out: its relay fills a group's missing frames with a FETCH,
-/// which draft 20+ does not serve yet (see `quest/m1/ietf-fetch-location.md`).
 macro_rules! route_flap_tests {
 	($($name:ident: $version:literal,)*) => {
 		$(
@@ -460,7 +493,4 @@ route_flap_tests! {
 	flaps_lite_07: "moq-lite-07-wip",
 	flaps_lite_06: "moq-lite-06",
 	flaps_lite_05: "moq-lite-05",
-	flaps_lite_04: "moq-lite-04",
-	flaps_ietf_19: "moq-transport-19",
-	flaps_ietf_22: "moq-transport-22",
 }

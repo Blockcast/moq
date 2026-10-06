@@ -98,6 +98,7 @@ impl Server {
 		// link. Versions without a Setup Stream have nothing to advertise.
 		let our_setup = if version.has_setup_stream() {
 			lite::Setup {
+				epoch: false,
 				probe: lite::ProbeLevel::detect(&session),
 				path: None,
 				role: None,
@@ -1002,6 +1003,7 @@ mod tests {
 			.encode(&mut crate::coding::Encoder::new(&mut buf, v.into()), v)
 			.unwrap();
 		lite::Setup {
+			epoch: false,
 			probe: lite::ProbeLevel::None,
 			path: path.map(str::to_string),
 			role,

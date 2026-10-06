@@ -563,6 +563,8 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 					self.start(prefix, exclude_hop, hidden);
 				}
 				AnnounceState::Run { origin, announced, run } => {
+					run.epochs =
+						self.shared.version.has_setup_stream() && ready!(self.shared.peer_setup.poll_epoch(waiter));
 					let stream = self.stream.as_mut().expect("stream present");
 					if self.shared.withdrawal.poll(waiter).is_ready() {
 						run.withdraw(stream, origin, announced)?;
@@ -625,6 +627,7 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 /// The announce loop's state, minus the handles it borrows per poll so the test
 /// shim can supply its own.
 struct AnnounceRun {
+	epochs: bool,
 	self_origin: Hop,
 	version: Version,
 	// Lite06+: announce ids. Every `active` we send implicitly assigns the next
@@ -640,6 +643,7 @@ struct AnnounceRun {
 
 /// What the peer holds for one advertised suffix.
 struct Advertised {
+	epoch: Option<crate::Epoch>,
 	/// The announce id, on versions that assign them.
 	id: Option<u64>,
 	/// The chain and cost last put on the wire. The origin also reports changes the
@@ -660,6 +664,7 @@ enum AnnouncePhase {
 impl AnnounceRun {
 	fn new(self_origin: Hop, version: Version) -> Self {
 		Self {
+			epochs: false,
 			self_origin,
 			version,
 			encoder: lite::AnnounceEncoder::new(version),
@@ -670,7 +675,11 @@ impl AnnounceRun {
 
 	/// The chain and cost to put on the wire for `route`, or `None` when it must
 	/// not be forwarded.
-	fn outgoing(&self, route: &crate::origin::Route, absolute: &crate::Path) -> Option<(Hops, crate::origin::Cost)> {
+	fn outgoing(
+		&self,
+		route: &crate::origin::Route,
+		absolute: &crate::Path,
+	) -> Option<(Hops, crate::origin::Cost, Option<crate::Epoch>)> {
 		let mut hops = route.hops.clone();
 
 		// A route that already passed through us is a reflection. The origin
@@ -694,7 +703,7 @@ impl AnnounceRun {
 			true => route.cost.clamped(),
 			false => crate::origin::Cost::UNKNOWN,
 		};
-		Some((hops, cost))
+		Some((hops, cost, route.epoch.clone()))
 	}
 
 	/// Start advertising `suffix`, recording its announce id.
@@ -704,10 +713,20 @@ impl AnnounceRun {
 		suffix: crate::PathOwned,
 		hops: Hops,
 		cost: crate::origin::Cost,
+		epoch: Option<crate::Epoch>,
 	) -> Result<(), Error> {
 		let (id, wire, chain) = self.encoder.start(suffix.clone(), hops.clone());
-		self.live.insert(suffix, Advertised { id, hops, cost });
+		self.live.insert(
+			suffix,
+			Advertised {
+				id,
+				hops,
+				cost,
+				epoch: epoch.clone(),
+			},
+		);
 		stream.writer.buffer(&lite::AnnounceBroadcast::Active {
+			epoch: epoch.filter(|_| self.epochs),
 			suffix: wire,
 			hops: chain,
 			cost,
@@ -751,7 +770,7 @@ impl AnnounceRun {
 	) -> Result<(), Error> {
 		match self.version {
 			Version::Lite01 | Version::Lite02 => {
-				let mut init: Vec<(crate::PathOwned, Hops, crate::origin::Cost)> = Vec::new();
+				let mut init: Vec<(crate::PathOwned, Hops, crate::origin::Cost, Option<crate::Epoch>)> = Vec::new();
 
 				// Send ANNOUNCE_INIT as the first message with all currently active routes.
 				// We use `try_next()` to synchronously get the initial updates.
@@ -767,12 +786,12 @@ impl AnnounceRun {
 					let suffix = update.prefix;
 
 					if active {
-						let Some((hops, cost)) = self.outgoing(&update.route, &absolute) else {
+						let Some((hops, cost, epoch)) = self.outgoing(&update.route, &absolute) else {
 							continue;
 						};
 						tracing::debug!(route = %absolute, "announce");
 						init.retain(|(s, ..)| s != &suffix);
-						init.push((suffix, hops, cost));
+						init.push((suffix, hops, cost, epoch));
 					} else {
 						// A potential race: a just-announced route already retracted.
 						tracing::debug!(route = %absolute, "unannounce");
@@ -783,8 +802,16 @@ impl AnnounceRun {
 				let suffixes = init.iter().map(|(suffix, ..)| suffix.clone()).collect();
 				stream.writer.buffer(&lite::AnnounceInit { suffixes })?;
 				// Record the initial set so a later end reaches the peer.
-				for (suffix, hops, cost) in init {
-					self.live.insert(suffix, Advertised { id: None, hops, cost });
+				for (suffix, hops, cost, epoch) in init {
+					self.live.insert(
+						suffix,
+						Advertised {
+							id: None,
+							hops,
+							cost,
+							epoch,
+						},
+					);
 				}
 			}
 			_ if self.version.has_announce_ok() => {
@@ -792,7 +819,7 @@ impl AnnounceRun {
 				// stashing suffix+hops so we can both COUNT them for AnnounceOk and re-send
 				// them afterward. The receiver stamps our origin onto each hop chain, so we
 				// forward the stored chain as-is (no self push here).
-				let mut initial: Vec<(crate::PathOwned, Hops, crate::origin::Cost)> = Vec::new();
+				let mut initial: Vec<(crate::PathOwned, Hops, crate::origin::Cost, Option<crate::Epoch>)> = Vec::new();
 				while let Some(event) = announced.try_next() {
 					let (update, active) = match event {
 						announce::Event::Start(update) | announce::Event::Update(update) => (update, true),
@@ -805,12 +832,12 @@ impl AnnounceRun {
 					let suffix = update.prefix;
 
 					if active {
-						let Some((hops, cost)) = self.outgoing(&update.route, &absolute) else {
+						let Some((hops, cost, epoch)) = self.outgoing(&update.route, &absolute) else {
 							continue;
 						};
 						tracing::debug!(route = %absolute, "announce");
 						initial.retain(|(s, ..)| s != &suffix);
-						initial.push((suffix, hops, cost));
+						initial.push((suffix, hops, cost, epoch));
 					} else {
 						// A potential race: a just-announced route already retracted.
 						tracing::debug!(route = %absolute, "unannounce");
@@ -825,8 +852,8 @@ impl AnnounceRun {
 					active: initial.len() as u64,
 				};
 				stream.writer.buffer(&ok)?;
-				for (suffix, hops, cost) in initial {
-					self.start(stream, suffix, hops, cost)?;
+				for (suffix, hops, cost, epoch) in initial {
+					self.start(stream, suffix, hops, cost, epoch)?;
 				}
 			}
 			_ => {
@@ -915,38 +942,44 @@ impl AnnounceRun {
 			}
 
 			match self.outgoing(&update.route, &absolute) {
-				Some((hops, cost)) => match self.live.get_mut(&suffix) {
-					// The peer would decode what it already holds.
-					Some(advertised) if advertised.hops == hops && advertised.cost == cost => {}
-					// A metadata update on a live advertisement: restart it in
-					// place (lite-05 restarts via a duplicate ANNOUNCE).
-					Some(advertised) if lite::restart_supported(self.version) => {
-						tracing::debug!(route = %absolute, "reannounce");
-						advertised.hops = hops.clone();
-						advertised.cost = cost;
-						match advertised.id {
-							Some(id) => {
-								let hops = self.encoder.update(id, hops);
-								stream
-									.writer
-									.buffer(&lite::AnnounceBroadcast::Restart { id, hops, cost })?
+				Some((hops, cost, epoch)) => {
+					if self.live.get(&suffix).is_some_and(|old| old.epoch != epoch) {
+						self.retract(stream, suffix.clone(), &absolute)?;
+					}
+					match self.live.get_mut(&suffix) {
+						// The peer would decode what it already holds.
+						Some(advertised) if advertised.hops == hops && advertised.cost == cost => {}
+						// A metadata update on a live advertisement: restart it in
+						// place (lite-05 restarts via a duplicate ANNOUNCE).
+						Some(advertised) if lite::restart_supported(self.version) => {
+							tracing::debug!(route = %absolute, "reannounce");
+							advertised.hops = hops.clone();
+							advertised.cost = cost;
+							match advertised.id {
+								Some(id) => {
+									let hops = self.encoder.update(id, hops);
+									stream
+										.writer
+										.buffer(&lite::AnnounceBroadcast::Restart { id, hops, cost })?
+								}
+								// lite-05: a duplicate ANNOUNCE, which assigns no id.
+								None => stream.writer.buffer(&lite::AnnounceBroadcast::Active {
+									epoch: epoch.filter(|_| self.epochs),
+									suffix: lite::PathRef::literal(suffix),
+									hops: lite::HopsRef::literal(hops),
+									cost,
+								})?,
 							}
-							// lite-05: a duplicate ANNOUNCE, which assigns no id.
-							None => stream.writer.buffer(&lite::AnnounceBroadcast::Active {
-								suffix: lite::PathRef::literal(suffix),
-								hops: lite::HopsRef::literal(hops),
-								cost,
-							})?,
+						}
+						// Pre-restart versions have no way to update a live
+						// advertisement; the peer keeps the original chain.
+						Some(_) => {}
+						None => {
+							tracing::debug!(route = %absolute, "announce");
+							self.start(stream, suffix, hops, cost, epoch)?;
 						}
 					}
-					// Pre-restart versions have no way to update a live
-					// advertisement; the peer keeps the original chain.
-					Some(_) => {}
-					None => {
-						tracing::debug!(route = %absolute, "announce");
-						self.start(stream, suffix, hops, cost)?;
-					}
-				},
+				}
 				// The chain must not be forwarded (reflected, or full): retract
 				// whatever the peer holds.
 				None => self.retract(stream, suffix, &absolute)?,
@@ -981,6 +1014,7 @@ trait Request<S: crate::transport::poll::Session>: Sized {
 
 	/// The broadcast and track the request names.
 	fn target(msg: &Self::Message) -> (&crate::Path<'static>, &str);
+	fn epoch(msg: &Self::Message) -> Option<&crate::Epoch>;
 
 	/// Start answering, once the broadcast resolves.
 	fn start(shared: &Shared<S>, msg: Self::Message, broadcast: crate::broadcast::Consumer) -> Result<Self, Error>;
@@ -1109,7 +1143,18 @@ impl<S: crate::transport::poll::Session, R: Request<S>> RequestServe<S, R> {
 						// served on demand by the route covering it (an `origin::Dynamic`), or
 						// errors when there is none.
 						let origin = ready!(self.shared.poll_serving_origin(waiter));
-						*requesting = Some(origin.request_broadcast(R::target(msg).0).into_inner());
+						let epoch = R::epoch(msg).cloned();
+						if epoch.is_some()
+							&& (!self.shared.version.has_setup_stream()
+								|| !ready!(self.shared.peer_setup.poll_epoch(waiter)))
+						{
+							return Poll::Ready(Err(Error::ProtocolViolation));
+						}
+						let id = crate::broadcast::Id {
+							path: R::target(msg).0.to_owned(),
+							epoch,
+						};
+						*requesting = Some(origin.request_broadcast(id).into_inner());
 					}
 					let broadcast = ready!(requesting.as_ref().expect("requesting").poll_ok(waiter))?;
 					// Any placeholder but `Decode`, so a failed start is answered on the stream.
@@ -1174,6 +1219,9 @@ impl<S: crate::transport::poll::Session> Request<S> for TrackInfoServe {
 	type Message = lite::Track<'static>;
 	type Update = NoUpdate;
 
+	fn epoch(msg: &Self::Message) -> Option<&crate::Epoch> {
+		msg.epoch.as_ref()
+	}
 	fn target(msg: &Self::Message) -> (&crate::Path<'static>, &str) {
 		(&msg.broadcast, &msg.track)
 	}
@@ -1212,7 +1260,7 @@ impl<S: crate::transport::poll::Session> Request<S> for TrackInfoServe {
 enum SubscribeServe<S: crate::transport::poll::Session> {
 	/// Waiting for the model subscription to be confirmed.
 	Confirm {
-		msg: lite::Subscribe<'static>,
+		msg: Box<lite::Subscribe<'static>>,
 		subscribing: track::Subscribing,
 		/// The newest group when the SUBSCRIBE arrived; see [`position_cursor`].
 		latest: Option<u64>,
@@ -1232,6 +1280,9 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 	type Message = lite::Subscribe<'static>;
 	type Update = lite::SubscribeUpdate;
 
+	fn epoch(msg: &Self::Message) -> Option<&crate::Epoch> {
+		msg.epoch.as_ref()
+	}
 	fn target(msg: &Self::Message) -> (&crate::Path<'static>, &str) {
 		(&msg.broadcast, &msg.track)
 	}
@@ -1250,7 +1301,7 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 		let latest = track.latest();
 		let subscribing = track.subscribe(subscription).into_inner();
 		Ok(Self::Confirm {
-			msg,
+			msg: Box::new(msg),
 			subscribing,
 			latest,
 			update: None,
@@ -1331,7 +1382,7 @@ impl<S: crate::transport::poll::Session> Request<S> for SubscribeServe<S> {
 						opens: Default::default(),
 					};
 
-					let bounds = Bounds::from(&msg);
+					let bounds = Bounds::from(msg.as_ref());
 					position_cursor(&mut track, shared.version, bounds.start_group, latest);
 					let mut run = TrackRun::new(sub, track, bounds, track_priority_tx);
 					if let Some(update) = update {
@@ -1389,6 +1440,9 @@ impl<S: crate::transport::poll::Session> Request<S> for FetchServe {
 	type Message = lite::Fetch<'static>;
 	type Update = NoUpdate;
 
+	fn epoch(msg: &Self::Message) -> Option<&crate::Epoch> {
+		msg.epoch.as_ref()
+	}
 	fn target(msg: &Self::Message) -> (&crate::Path<'static>, &str) {
 		(&msg.broadcast, &msg.track)
 	}
@@ -1823,7 +1877,7 @@ mod announce_test {
 		let mut wire = Wire { writes, cursor: 0 };
 		assert_eq!(wire.take_ok().active, 1, "expected one initial announce");
 		match wire.take_announces().as_slice() {
-			[lite::AnnounceBroadcast::Active { suffix, hops, cost }] => {
+			[lite::AnnounceBroadcast::Active { suffix, hops, cost, .. }] => {
 				assert_eq!(suffix.rest.as_str(), "cam");
 				assert_eq!(hops, &lite::HopsRef::literal(pub_hops()));
 				assert_eq!(*cost, crate::origin::Cost::new(7));
@@ -4020,12 +4074,14 @@ mod tests {
 			for wait in [Wait::Broadcast, Wait::Track] {
 				for close in [Close::Fin, Close::Reset] {
 					let track = lite::Track {
+						epoch: None,
 						broadcast: broadcast.clone(),
 						track: "video".into(),
 					};
 					leave_request::<TrackInfoServe>(version, &track, wait, close).await;
 
 					let subscribe = lite::Subscribe {
+						epoch: None,
 						id: 0,
 						broadcast: broadcast.clone(),
 						track: "video".into(),
@@ -4039,6 +4095,7 @@ mod tests {
 					leave_request::<SubscribeServe<ScriptedSession>>(version, &subscribe, wait, close).await;
 
 					let fetch = lite::Fetch {
+						epoch: None,
 						broadcast: broadcast.clone(),
 						track: "video".into(),
 						priority: 0,
@@ -4077,6 +4134,7 @@ mod tests {
 
 		let mut script = Vec::new();
 		lite::Subscribe {
+			epoch: None,
 			id: 0,
 			broadcast: crate::Path::new("room"),
 			track: "video".into(),

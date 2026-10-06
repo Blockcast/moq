@@ -173,6 +173,7 @@ impl Client {
 		// no media. Versions without a Setup Stream have nothing to advertise.
 		let our_setup = if version.has_setup_stream() {
 			lite::Setup {
+				epoch: false,
 				probe: lite::ProbeLevel::detect(&session),
 				path: self.setup_path.clone(),
 				role: lite::Role::from_origins(self.publish.is_some(), self.subscribe.is_some()),

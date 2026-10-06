@@ -19,13 +19,11 @@ and a flagged forward jump publishes break markers and carries on.
 
 Decided (maintainer, 2026-09-30):
 
-- A rewind is new content, so it is always a new broadcast at a new epoch
-  path (`Path::mint_epoch`), never a continuation of the old name. Smart viewers
-  switch to it from its announcement; a bare-name viewer binds to it on its
-  next subscribe.
+- A rewind is new content, so it is always a new broadcast at a new epoch, never a continuation of the old name. Viewers of the bare name follow
+  it through [epoch metadata](/doc/concept/moq-lite.md#publisher-epochs).
 - `decode` stops at the flagged rewind and reports it. The caller finishes the
   old broadcast (a clean end, not an abort, so its viewers read to its end),
-  publishes a new broadcast at a fresh epoch path, and calls
+  publishes a new broadcast at a fresh epoch, and calls
   `import.restart(broadcast)`. The importer carries over only the PAT/PMT
   layout and the bytes it has not consumed, so there is no wait for the next
   PSI repetition; tracks, groups, and timestamps start fresh. `ts::Programs`

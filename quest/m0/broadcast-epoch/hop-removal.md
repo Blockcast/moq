@@ -2,11 +2,10 @@
 
 ## Goal
 
-Nothing names a publisher's identity outside its path. `moq` loses `--hop`,
+Publisher identity is the path plus epoch metadata. `moq` loses `--hop`,
 `MOQ_HOP`, and the hidden `--origin` alias; an optional `--epoch` takes their
-place for publishing. Omitted, each run mints a fresh epoch
-(`Path::mint_epoch`, since publishing does not mint one); a redundant pair
-passes the same value. A plain publisher declares
+place for publishing. Omitted, each run gets a fresh epoch (the origin
+default); a redundant pair passes the same value. A plain publisher declares
 a random Hop ID per process with no flag, as the bindings and js already do,
 so a multi-homed publisher still catches its own loops. `--cluster-id` names
 a node and no longer falls back to `--hop`. Relays stop stamping an unnamed

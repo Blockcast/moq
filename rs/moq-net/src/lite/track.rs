@@ -16,6 +16,8 @@ const LEGACY_UNLIMITED: u64 = (1u64 << 53) - 1;
 /// Lite05+ only.
 #[derive(Clone, Debug)]
 pub struct Track<'a> {
+	/// The requested publisher instance, only sent after epoch negotiation.
+	pub epoch: Option<crate::Epoch>,
 	pub broadcast: Path<'a>,
 	pub track: Cow<'a, str>,
 }
@@ -29,7 +31,11 @@ impl Message for Track<'_> {
 		let broadcast = Path::decode(r, version)?;
 		let track = Cow::Owned(r.string()?);
 
-		Ok(Self { broadcast, track })
+		Ok(Self {
+			broadcast,
+			track,
+			epoch: super::epoch::decode(r, version)?,
+		})
 	}
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -39,6 +45,7 @@ impl Message for Track<'_> {
 
 		self.broadcast.encode(w, version)?;
 		w.string(&self.track)?;
+		super::epoch::encode(w, version, self.epoch.as_ref())?;
 		Ok(())
 	}
 }
@@ -269,6 +276,7 @@ mod test {
 	#[test]
 	fn track_request_roundtrips_on_lite05() {
 		let msg = Track {
+			epoch: None,
 			broadcast: Path::new("room").to_owned(),
 			track: Cow::Borrowed("video"),
 		};
@@ -284,6 +292,7 @@ mod test {
 	#[test]
 	fn track_request_errors_before_lite05() {
 		let msg = Track {
+			epoch: None,
 			broadcast: Path::new("room").to_owned(),
 			track: Cow::Borrowed("video"),
 		};

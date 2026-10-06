@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import { Signal } from "@moq/signals";
 import { accept } from "../connection/accept.ts";
 import { connect } from "../connection/connect.ts";
 import { SessionCode } from "../error.ts";
@@ -469,6 +470,58 @@ test("close waits for a request served while withdrawals are in flight", async (
 		server.abort();
 		announced.close();
 		broadcast.close();
+		source.close();
+		destination.close();
+	}
+});
+
+test.each([ALPN_05, ALPN_06, ALPN_07_WIP])("announced epochs pin every request over %s", async (alpn) => {
+	const pair = createMockTransportPair(alpn);
+	const source = new Producer();
+	const destination = new Producer();
+	const path = Path.from("live");
+	const a = source.createBroadcast(path);
+	const video = a.createTrack("video");
+	const group = video.appendGroup();
+	group.writeString("a");
+	group.close();
+	a.announce();
+	const url = new URL("https://localhost/test");
+	const [client, server] = await Promise.all([
+		connect({ url, transport: pair.client, consume: destination }),
+		accept({ url, transport: pair.server, publish: source.consume() }),
+	]);
+	const announcements = destination.announced();
+	const request = destination.consume().request(path);
+	try {
+		const first = await announcements.next();
+		expect(first?.kind).toBe("start");
+		if (first?.kind !== "start") throw new Error("expected start");
+		expect(first.prefix).toBe(path);
+		expect(first.route.epoch).toBe(a.epoch);
+		while (!request.active.peek()) await Signal.race(request.active);
+		const remote = request.active.peek()?.clone();
+		if (!remote) throw new Error("no broadcast");
+		expect(remote.epoch).toBe(a.epoch);
+		const track = remote.track("video");
+		expect(await track.info()).toBeDefined();
+		const sub = track.subscribe().ordered();
+		expect(await (await sub.nextGroup())?.readString()).toBe("a");
+		sub.close();
+		expect(await (await track.fetchGroup(0)).readString()).toBe("a");
+		// A new instance reuses the plain path, but cannot satisfy A's later requests.
+		const b = source.createBroadcast(path);
+		b.createTrack("late");
+		b.announce();
+		expect(b.epoch).not.toBe(a.epoch);
+		await expect(remote.track("late").info()).rejects.toThrow();
+		b.close();
+	} finally {
+		request.close();
+		announcements.close();
+		client.abort();
+		server.abort();
+		a.close();
 		source.close();
 		destination.close();
 	}

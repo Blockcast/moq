@@ -183,3 +183,11 @@ test("SETUP decode refuses an oversized length before reading the body", async (
 		"too large",
 	);
 });
+
+test("epoch metadata is explicitly negotiated", async () => {
+	expect((await roundTrip(new Setup())).epoch).toBe(false);
+	expect((await roundTrip(new Setup({ epoch: true }))).epoch).toBe(true);
+	expect((await decodeParam(0x6n, Varint.encode(1))).epoch).toBe(true);
+	await expect(decodeParam(0x6n, Varint.encode(0))).rejects.toThrow("epoch");
+	await expect(decodeParam(0x6n, Varint.encode(2))).rejects.toThrow("epoch");
+});

@@ -1,4 +1,4 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, test } from "bun:test";
 import * as Epoch from "./epoch.ts";
 import * as Path from "./path.ts";
 
@@ -333,7 +333,6 @@ const epochs = (await Bun.file(new URL("../../../rs/moq-net/src/path/epoch.json"
 	valid: Array<{ text: string; unix_ms: number }>;
 	invalid: string[];
 	ordered: string[];
-	paths: Array<{ path: string; name: string; epoch: string | null; misplaced?: boolean }>;
 };
 
 test("shared epoch parse, reject, order and time vectors", () => {
@@ -345,69 +344,4 @@ test("shared epoch parse, reject, order and time vectors", () => {
 	for (const text of epochs.invalid) expect(() => Epoch.parse(text)).toThrow(RangeError);
 	const ordered = epochs.ordered.map(Epoch.parse);
 	expect([...ordered].reverse().sort()).toEqual(ordered);
-});
-
-test("shared epoch path vectors", () => {
-	for (const row of epochs.paths) {
-		const path = Path.from(row.path);
-		const { name, epoch } = Path.splitEpoch(path);
-		expect(name).toBe(row.name as Path.Valid);
-		expect(epoch ?? null).toBe(row.epoch as Epoch.Valid | null);
-		if (!row.misplaced) expect(Path.withEpoch(name, epoch)).toBe(path);
-	}
-});
-
-test("withEpoch sets the final epoch", () => {
-	const [old, next] = epochs.ordered.map(Epoch.parse);
-	const name = Path.from("room/alice");
-	const pinned = Path.withEpoch(name, old);
-	expect(pinned).toBe(`room/alice/@${old}` as Path.Valid);
-	// Never stacks: an existing epoch is replaced, and `undefined` removes it.
-	expect(Path.withEpoch(pinned, next)).toBe(Path.withEpoch(name, next));
-	expect(Path.withEpoch(pinned)).toBe(name);
-	expect(Path.withEpoch(name)).toBe(name);
-});
-
-test("references resolve against the name past its epoch", () => {
-	const [epoch, other] = epochs.ordered.map(Epoch.parse);
-	const name = Path.from("room/transcode");
-	const pinned = Path.withEpoch(name, epoch);
-	for (const text of ["./source", ".", "../other", "transcode/sub"]) {
-		const rel = Path.normalizeRelative(text);
-		expect(Path.resolve(pinned, rel)).toBe(Path.resolve(name, rel));
-		expect(Path.tryResolve(pinned, rel)).toBe(Path.tryResolve(name, rel));
-	}
-	// The empty reference still names the catalog broadcast itself.
-	expect(Path.resolve(pinned, "" as Path.Relative)).toBe(pinned);
-	// And `relative` stays its inverse.
-	for (const text of ["room/source", `room/source/@${other}`, "room", "other"]) {
-		const target = Path.from(text);
-		const rel = Path.relative(target, pinned);
-		expect(rel).toBeDefined();
-		expect(Path.resolve(pinned, rel as Path.Relative)).toBe(target);
-	}
-});
-
-test("epoch segments are literal pattern components", () => {
-	const epoch = Epoch.parse(epochs.valid[1].text);
-	const path = Path.withEpoch(Path.from("demo/video"), epoch);
-	expect(Path.Pattern.parse("demo/**").matches(path)).toBe(true);
-	expect(Path.Pattern.parse("demo/video/@*").matches(path)).toBe(true);
-	expect(Path.Pattern.parse("demo/video").matches(path)).toBe(false);
-	expect(Path.Pattern.parse(path).matches(path)).toBe(true);
-});
-
-test("mintEpoch appends a fresh epoch", () => {
-	// UUIDv7 minting stays monotonic across a process, so a real clock here would push
-	// every later fixed-clock mint (epoch.test.ts) forward. Pin one earlier than theirs.
-	const now = spyOn(Date, "now").mockReturnValue(1_600_000_000_000);
-	try {
-		const minted = Path.mintEpoch(Path.from("room/alice"));
-		const { name, epoch } = Path.splitEpoch(minted);
-		expect(name).toBe(Path.from("room/alice"));
-		expect(epoch).toBeDefined();
-		expect(Path.mintEpoch(Path.from("room/alice"))).not.toBe(minted);
-	} finally {
-		now.mockRestore();
-	}
 });

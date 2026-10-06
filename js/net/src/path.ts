@@ -35,7 +35,6 @@
  * ```
  * @module
  */
-import * as Epoch from "./epoch.ts";
 
 /** A normalized broadcast path. */
 export type Valid = string & { __brand: "Name" };
@@ -217,8 +216,6 @@ export function normalizeRelative(rel: string): Relative {
  * resolution. `..` segments then pop another segment; other segments are appended.
  * `.` and empty segments are no-ops. Excess `..` once the base is empty is also a no-op
  * (subsequent named segments still append). An empty `rel` returns the base unchanged.
- * A base's final epoch is not a segment here: `a/b/@<uuidv7>` resolves like `a/b`, so a
- * catalog's references mean the same whether it was requested by name or by epoch.
  *
  * Mirrors the Rust `Path::resolve`, used by hang catalogs to express
  * cross-broadcast track references (a rendition's `broadcast` field).
@@ -233,8 +230,7 @@ export function normalizeRelative(rel: string): Relative {
 export function resolve(base: Valid, rel: Relative): Valid {
 	if (rel === "") return base;
 
-	const { name } = splitEpoch(base);
-	const segments = name === "" ? [] : name.split("/");
+	const segments = base === "" ? [] : base.split("/");
 	segments.pop();
 
 	for (const seg of rel.split("/")) {
@@ -261,8 +257,7 @@ export function resolve(base: Valid, rel: Relative): Valid {
 export function tryResolve(base: Valid, rel: Relative): Valid | undefined {
 	if (rel === "") return base;
 
-	const { name } = splitEpoch(base);
-	const segments = name === "" ? [] : name.split("/");
+	const segments = base === "" ? [] : base.split("/");
 	segments.pop();
 
 	for (const seg of rel.split("/")) {
@@ -312,9 +307,8 @@ export function relative(target: Valid, base: Valid): Relative | undefined {
 	// since resolution replaces that segment rather than emitting it.
 	if (target === base) return "" as Relative;
 
-	// Resolution replaces the base's last segment, past any epoch, so walk from its parent.
-	const { name } = splitEpoch(base);
-	const dir = name === "" ? [] : name.split("/");
+	// Resolution replaces the base's last segment, so walk from its parent.
+	const dir = base === "" ? [] : base.split("/");
 	dir.pop();
 
 	const parts = target === "" ? [] : target.split("/");
@@ -345,29 +339,3 @@ export {
 	type Segment,
 	type Specificity,
 } from "@moq/pattern";
-
-/** Split off a final `@<uuidv7>` segment, leaving all other paths unchanged. */
-export function splitEpoch(path: Valid): { name: Valid; epoch?: Epoch.Valid } {
-	const slash = path.lastIndexOf("/");
-	const segment = path.slice(slash + 1);
-	if (segment.startsWith("@")) {
-		try {
-			const epoch = Epoch.parse(segment.slice(1));
-			return { name: path.slice(0, Math.max(0, slash)) as Valid, epoch };
-		} catch {
-			// `@alice` and other application segments remain valid literal paths.
-		}
-	}
-	return { name: path };
-}
-
-/** `path` with its final epoch set to `epoch`, replacing any it has, or removed for `undefined`. */
-export function withEpoch(path: Valid, epoch?: Epoch.Valid): Valid {
-	const { name } = splitEpoch(path);
-	return epoch === undefined ? name : join(name, from(`@${epoch}`));
-}
-
-/** `path` under a freshly minted epoch, naming a new instance of the broadcast. */
-export function mintEpoch(path: Valid): Valid {
-	return withEpoch(path, Epoch.mint());
-}

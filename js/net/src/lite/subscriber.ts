@@ -3,6 +3,7 @@ import * as announce from "../announced.ts";
 import * as broadcast from "../broadcast.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import { BroadcastCache } from "../consume.ts";
+import type * as Epoch from "../epoch.ts";
 import { controlTimeout, error, ProtocolViolation, reason, StreamCode, StreamError, sessionCause } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, type Route, randomHop, routesEqual, stampHops, UNKNOWN_HOP } from "../hop.ts";
@@ -28,7 +29,7 @@ import { Fetch as FetchMessage } from "./fetch.ts";
 import { frameDecoder, type Group as GroupMessage, readFrames } from "./group.ts";
 import { sendOrder } from "./priority.ts";
 import { Probe } from "./probe.ts";
-import { ProbeLevel, type Setup } from "./setup.ts";
+import { ProbeLevel, type Setup, supportsEpoch } from "./setup.ts";
 import { StreamId } from "./stream.ts";
 import {
 	decodeSubscribeResponse,
@@ -153,6 +154,7 @@ export class Subscriber {
 	// The peer's SETUP (lite-05+), undefined until it arrives. Gates opening the PROBE
 	// stream on the peer having advertised Probe >= Report.
 	#peerSetup?: Signal<Setup | undefined>;
+	#epochs: Promise<boolean>;
 
 	// Distinguishes failures from streams torn down by Subscriber.close().
 	#closed = new AbortController();
@@ -179,6 +181,7 @@ export class Subscriber {
 		this.#stamp = randomHop();
 		this.#probe = probe;
 		this.#peerSetup = peerSetup;
+		this.#epochs = supportsEpoch({ version, peer: peerSetup, closed: quic.closed });
 	}
 
 	/**
@@ -331,9 +334,13 @@ export class Subscriber {
 				// Present on active/restart; ended messages never carry hops worth checking.
 				let hops: Hop[] | undefined;
 				let cost: Cost | undefined;
+				let epoch: Epoch.Valid | undefined;
 
 				switch (announce.status) {
 					case "active": {
+						epoch = announce.epoch;
+						if (epoch !== undefined && !(await this.#epochs))
+							throw new ProtocolViolation("epoch metadata was not negotiated");
 						const resolved = hasAnnounceId(this.version) ? history.start(announce) : announce;
 						// The wire names the suffix beneath the interest prefix; the consumer
 						// sees the covered path from the session root.
@@ -356,6 +363,7 @@ export class Subscriber {
 						// Resolve the id; it stays live (the replacement reuses it).
 						const resolved = history.update(announce);
 						path = Path.join(prefix, resolved.suffix);
+						epoch = advertised.get(path)?.route.epoch;
 						active = true;
 						hops = resolved.hops;
 						cost = announce.cost;
@@ -389,7 +397,7 @@ export class Subscriber {
 					const previous = advertised.get(path);
 					advertised.delete(path);
 					if (!previous?.live) return;
-					this.#consumes.evict(path);
+					this.#consumes.evict(path, previous.route.epoch);
 					console.debug(`announced: broadcast=${path} active=false`);
 					announced.append({
 						prefix: path,
@@ -443,7 +451,7 @@ export class Subscriber {
 					});
 					continue;
 				}
-				const route: Route = { hops: fullHops, cost: cost ?? Cost.zero };
+				const route: Route = { hops: fullHops, cost: cost ?? Cost.zero, epoch };
 				const captures = scopeCaptures(scope, path);
 				if (!visible(path)) {
 					advertised.set(path, { live: false, route, captures });
@@ -455,6 +463,8 @@ export class Subscriber {
 				// route in place, so a forwarder re-prices without retracting.
 				const previous = advertised.get(path);
 				if (previous?.live) {
+					if (previous.route.epoch !== epoch)
+						throw new ProtocolViolation("an announcement cannot change publisher epoch");
 					// Even from another publisher: the path still names the same broadcast, so
 					// the shared consume stays.
 					advertised.set(path, { live: true, route, captures });
@@ -501,28 +511,30 @@ export class Subscriber {
 	 * @param name - The name of the broadcast to consume
 	 * @returns A Broadcast instance
 	 */
-	consume(path: Path.Valid): broadcast.Consumer {
-		return this.#consumes.get(path) ?? this.#consumes.insert(path, this.#createConsume(path));
+	consume(path: Path.Valid, epoch?: Epoch.Valid): broadcast.Consumer {
+		return (
+			this.#consumes.get(path, epoch) ?? this.#consumes.insert(path, this.#createConsume({ path, epoch }), epoch)
+		);
 	}
 
-	#createConsume(path: Path.Valid): broadcast.Consumer {
+	#createConsume(id: broadcast.Id): broadcast.Consumer {
 		// A consumed broadcast resolves info() and fetchGroup() over the wire by reaching
 		// back into this Subscriber (see ConsumeBroadcast below), rather than the wire
 		// installing callbacks on the broadcast.
-		const consumer = new ConsumeBroadcast(this, path);
+		const consumer = new ConsumeBroadcast(this, id);
 
 		void (async () => {
 			for (;;) {
 				const request = await wireOf(consumer).requested();
 				if (!request) break;
-				void this.#runSubscribe(path, request);
+				void this.#runSubscribe(id, request);
 			}
 		})();
 
 		return consumer;
 	}
 
-	async #runSubscribe(broadcast: Path.Valid, request: track.Request) {
+	async #runSubscribe(broadcast: broadcast.Id, request: track.Request) {
 		const id = this.#subscribeNext++;
 		const subscription = request.subscription;
 		const initialBounds = groupBounds(subscription.groups);
@@ -540,7 +552,8 @@ export class Subscriber {
 
 		const msg = new Subscribe({
 			id,
-			broadcast,
+			broadcast: broadcast.path,
+			epoch: broadcast.epoch,
 			track: request.name,
 			priority: subscription.priority ?? 0,
 			maxAge: subscription.maxAge,
@@ -602,7 +615,7 @@ export class Subscriber {
 			const subscriptionUpdates =
 				this.version === Version.DRAFT_01 || this.version === Version.DRAFT_02
 					? undefined
-					: this.#runSubscriptionUpdates(id, broadcast, entry, msg, stream);
+					: this.#runSubscriptionUpdates(id, broadcast.path, entry, msg, stream);
 
 			// Terminal conditions (stream end, track close, a failed subscription update) settle at most
 			// once; race them into one stable promise so the demand loop doesn't re-subscribe each pass.
@@ -660,7 +673,7 @@ export class Subscriber {
 
 		if (supportsTrackStream(this.version)) {
 			// Fetch the immutable properties once via the TRACK stream.
-			const info = await this.#trackInfo(msg.broadcast, msg.track);
+			const info = await this.#trackInfo({ path: msg.broadcast, epoch: msg.epoch }, msg.track);
 			producer = request.accept(this.#toModelInfo(info));
 			timescale.set(info.timescale);
 		} else {
@@ -703,10 +716,12 @@ export class Subscriber {
 	}
 
 	// Opens a TRACK stream, reads the single TRACK_INFO, and FINs. Lite-05+ only.
-	async #trackInfo(broadcast: Path.Valid, track: string): Promise<TrackInfo> {
+	async #trackInfo(broadcast: broadcast.Id, track: string): Promise<TrackInfo> {
+		if (broadcast.epoch !== undefined && !(await this.#epochs))
+			throw new Error("peer does not support epoch identity");
 		return this.#exchange({ version: this.version }, async (stream) => {
 			await stream.writer.u53(StreamId.Track);
-			await new TrackMessage(broadcast, track).encode(stream.writer, this.version);
+			await new TrackMessage(broadcast.path, track, broadcast.epoch).encode(stream.writer, this.version);
 			const info = await TrackInfo.decode(stream.reader, this.version);
 			// The publisher FINs after TRACK_INFO; FIN our side too.
 			stream.close();
@@ -748,7 +763,7 @@ export class Subscriber {
 	// Resolve a track's immutable model info via a TRACK stream (lite-05+), for the
 	// ConsumeBroadcast backing track.Consumer.query(). On older drafts there's no TRACK
 	// stream, so this rejects rather than fabricating defaults.
-	async resolveTrackInfo(broadcast: Path.Valid, track: string): Promise<track.Info> {
+	async resolveTrackInfo(broadcast: broadcast.Id, track: string): Promise<track.Info> {
 		if (!supportsTrackStream(this.version)) {
 			throw new Error("track info requires moq-lite-05 or newer");
 		}
@@ -758,7 +773,7 @@ export class Subscriber {
 	// Open a FETCH stream for one group and stream its bare frames into a group, for the
 	// ConsumeBroadcast backing track.Consumer.fetchGroup() (lite-05+).
 	async fetchGroup(
-		broadcast: Path.Valid,
+		broadcast: broadcast.Id,
 		track: string,
 		sequence: number,
 		options: track.FetchGroupOptions = {},
@@ -800,7 +815,7 @@ export class Subscriber {
 	// group, evict the entry, and reject every caller waiting for acceptance. A setup every caller
 	// has abandoned is cancelled the same way.
 	async #runFetch(
-		broadcast: Path.Valid,
+		broadcast: broadcast.Id,
 		track: string,
 		sequence: number,
 		priority: number,
@@ -837,7 +852,7 @@ export class Subscriber {
 	// Resolve the track's timescale, then open the FETCH stream and wait for it to be accepted.
 	// Closing the group during that wait resets the stream.
 	async #fetchSetup(
-		broadcast: Path.Valid,
+		broadcast: broadcast.Id,
 		track: string,
 		sequence: number,
 		priority: number,
@@ -846,7 +861,13 @@ export class Subscriber {
 		const info = await untilClosed(group, this.#trackInfo(broadcast, track));
 		return this.#exchange({ sendOrder: sendOrder({ priority }), version: this.version }, async (stream) => {
 			await stream.writer.u53(StreamId.Fetch);
-			await new FetchMessage({ broadcast, track, priority, group: sequence }).encode(stream.writer, this.version);
+			await new FetchMessage({
+				broadcast: broadcast.path,
+				epoch: broadcast.epoch,
+				track,
+				priority,
+				group: sequence,
+			}).encode(stream.writer, this.version);
 			// A byte or an empty-group FIN accepts the fetch; a reset rejects it.
 			// done() buffers that byte so the response pump can decode it normally.
 			await untilClosed(group, stream.reader.done());
@@ -1306,21 +1327,21 @@ async function untilAbandoned<T>(group: netGroup.Producer, step: Promise<T>): Pr
  */
 class ConsumeBroadcast extends broadcast.Consumer {
 	#subscriber: Subscriber;
-	#path: Path.Valid;
+	#id: broadcast.Id;
 
-	constructor(subscriber: Subscriber, path: Path.Valid, state?: never) {
-		super(state);
+	constructor(subscriber: Subscriber, id: broadcast.Id, state?: never) {
+		super(state, id.epoch);
 		overrideBroadcastWire(this, {
-			resolveTrackInfo: (name) => subscriber.resolveTrackInfo(path, name),
-			fetchGroup: (name, sequence, options) => subscriber.fetchGroup(path, name, sequence, options),
+			resolveTrackInfo: (name) => subscriber.resolveTrackInfo(id, name),
+			fetchGroup: (name, sequence, options) => subscriber.fetchGroup(id, name, sequence, options),
 		});
 		this.#subscriber = subscriber;
-		this.#path = path;
+		this.#id = id;
 	}
 
 	// Preserve the subclass (and its wire-backed info/fetchGroup) when the consume cache shares
 	// this broadcast across callers.
 	override clone(): ConsumeBroadcast {
-		return new ConsumeBroadcast(this.#subscriber, this.#path, this.shareState());
+		return new ConsumeBroadcast(this.#subscriber, this.#id, this.shareState());
 	}
 }

@@ -97,12 +97,9 @@ always a prefix, on every wire version and on moq-transport alike; a service
 that serves only some of the paths beneath its prefix refuses the rest as they
 are requested. Each route carries the chain of relay identities it passed
 through, which is how forwarding loops are caught, and a cost, which is how a
-subscriber picks among several routes to the same broadcast. A path naming an
-[epoch](#publisher-epochs) is one broadcast from one publisher, so a subscription
-to it moves between routes without a seam; a publisher must not reuse an epoch
-for different content. A path without an epoch carries no such promise (two
-transcoder claimants may serve different bytes), so its subscription stays on
-the route that first served it and ends when that route goes. A hop of 0 is
+subscriber picks among routes to the same broadcast. A subscription with a known
+epoch can resume through routes attesting that epoch; an unidentified subscription
+stays on its first serving route. A publisher must not reuse an identity for different content. A hop of 0 is
 the anonymous mark and travels the chain unchanged; when it is the first hop, a
 relay puts a random ID, fresh per connection, in front of it. A route that passed through an
 anonymous hop at any depth ranks below every fully identified route, whatever
@@ -139,57 +136,45 @@ without waiting, since it has no FIN to acknowledge.
 
 ### Publisher epochs
 
-An application can identify each publisher instance with a shared `Epoch` from
-`moq-net` or `@moq/net`. It is a lowercase hyphenated UUIDv7, ordered newest
-last, with its wall-clock creation time available as `Epoch::time()` in Rust
-or `Epoch.time(epoch)` in TypeScript. Minting is explicit; publishing does not
-add an epoch automatically. A publisher that may restart publishes each run
-under a fresh one, so a restart is a new broadcast rather than a reused name:
-`path.mint_epoch()` in Rust and `Path.mintEpoch(path)` in TypeScript append a
-freshly minted epoch. The epoch segment counts toward the 32-part path limit.
+A broadcast identity is its path plus an optional publisher epoch. An epoch is
+an immutable lowercase UUIDv7. Creating a local broadcast through Origin mints
+one automatically; an explicit epoch lets replicas declare the same content.
+Every track, group and frame position within an identity must remain immutable.
+`Epoch::time()` and `Epoch.time()` expose the UUID's creation time; route selection
+does not rank publishers by that clock.
 
-`Path::with_epoch(&epoch)` and `Path.withEpoch(path, epoch)` set the final
-`@<uuidv7>` segment, replacing any epoch already there, and
-`with_epoch(None)` / `Path.withEpoch(path)` remove it. `Path::split_epoch()` and
-`Path.splitEpoch(path)` return the name and optional epoch. Only the final
-segment and canonical UUIDv7 text count: `@alice`, bare UUIDs, uppercase UUIDs,
-and other UUID versions remain ordinary path segments. An epoch only ever ends
-a path, so publishing `name/@<uuidv7>/more` fails (`Error::MisplacedEpoch` in
-Rust); a derived broadcast carries its source's epoch at its own end instead.
-Existing path normalization still applies.
+Rust accepts `broadcast::Id::from("room/camera").with_epoch(epoch)` for publication
+and requests. JavaScript accepts `{ path: Path.from("room/camera"), epoch }` when
+creating a broadcast, and exposes `broadcast.epoch` on consumers. Announcements
+carry `route.epoch`. The path stays `room/camera`: authentication, wildcard grants,
+relative references, and hidden-name rules are unchanged. There is no special
+`@epoch` path syntax or implicit bare-to-epoch binding.
 
-The segment travels as part of the ordinary broadcast path on every supported
-wire version. Epochs do not hide a broadcast; a leading `.` in a name segment
-still does.
+Lite peers negotiate the Epoch SETUP parameter (0x6, value 1). When both support
+it, announcements and TRACK, SUBSCRIBE and FETCH requests carry an optional
+trailing epoch. A request with an epoch can only use a matching route; it never
+falls back to a different instance. Replacing an announced epoch sends END then
+START at the same path. Repricing the same epoch preserves the announcement.
 
-A request for a bare name binds once, when made, to its newest epoch: the
-greatest `name/@<uuidv7>` with a live route, ahead of any route covering the
-name. With no epoch it goes through a route covering the name, such as a
-transcoder's claim, and stays on that route. The broadcast is still named
-`name`, and it never moves to a newer epoch, which is a different broadcast: in
-Rust it ends with the epoch it was bound to, and the next request binds to the
-newest. In TypeScript a request is long-lived, so its `active` broadcast swaps
-to the newer epoch as a new broadcast, and js/watch restarts its decoders on it.
-A path naming an epoch pins it and never moves. A smart subscriber watches the
-announcements below a name and requests each epoch by its full path, treating
-a new one as a discontinuity.
+Without an epoch, a Rust subscription pins its first serving route, including
+when that route has a known epoch. It ends when that route disappears, including
+a cluster reconnect after GOAWAY. It never shares a front with an explicit-epoch
+request. Clients follow announcement changes by requesting a fresh broadcast and
+resetting their catalog and decoders. JavaScript's `request.active` delivers a
+new broadcast handle when its selected source changes; it does not splice frames.
+Native clients must select an announced epoch explicitly to retain seamless failover.
 
-A catalog's relative references resolve against its name past any final
-epoch, so they mean the same whether the catalog was requested by name or by
-epoch, and a reference binds to its target's newest epoch when requested unless it spells one
-(`./source/@<uuidv7>`).
+Lite peers without the capability, pre-05 Lite, and moq-transport receive the same
+plain paths and no epoch metadata. An incoming route from such a peer has unknown
+identity, even if its name happens to resemble a UUID. Relays never invent an
+epoch for it or resume it through a different route. Known identity can survive
+between upgraded relays even when a downstream peer cannot represent it.
 
-A relay resolves bare requests this way for every client and protocol
-version, so an older client subscribing by name keeps working. A relay without
-this support routes `name/@<uuidv7>` but never resolves bare `name`, since a
-route covers its descendants, not its parent: a bare-name viewer behind one
-needs a publisher that publishes the bare name itself.
-
-A grant that admits a name also admits its epochs: an exact `room/camera`
-grant reaches `room/camera/@<uuidv7>` for publishing and subscribing, and
-`room/**` covers both. A grant on one epoch reaches only that epoch, never the
-bare name or a sibling. The widening is a `room/camera/@*` pattern, so any
-single `@`-prefixed segment below the name is admitted, not only UUIDv7 text.
+This preserves legacy discovery and subscriptions, but does not invalidate caches
+in third-party moq-transport relays. Those deployments still need immutable wire
+names and object positions across publisher restarts. Applications that require
+end-to-end generation identity must use an epoch-aware path through the network
+or arrange unique names themselves.
 
 ### Hidden broadcasts
 

@@ -136,9 +136,9 @@ export class Connection implements Established {
 		this.probe = this.#probe;
 
 		this.hop = randomHop();
-		this.#publisher = new Publisher(this.#quic, this.#version, this.hop, publish);
+		this.#publisher = new Publisher(this.#quic, this.#version, this.hop, { publish, peerSetup: this.#peerSetup });
 		this.#subscriber = new Subscriber(this.#quic, this.#version, this.hop, this.#probe, this.#peerSetup);
-		registerWire(this, { consume: (path) => this.#subscriber.consume(path), goaway: this.#goaway });
+		registerWire(this, { consume: (path, epoch) => this.#subscriber.consume(path, epoch), goaway: this.#goaway });
 
 		void this.#run();
 	}
@@ -233,7 +233,7 @@ export class Connection implements Established {
 		try {
 			await writer.u53(DataType.Setup);
 			const probe = await probeLevel(this.#quic, this.#version);
-			await new Setup({ probe, hop: this.hop }).encode(writer, this.#version);
+			await new Setup({ probe, hop: this.hop, epoch: true }).encode(writer, this.#version);
 			writer.close();
 		} catch (err: unknown) {
 			writer.reset(err);

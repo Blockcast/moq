@@ -15,6 +15,7 @@ const PARAM_ROLE: u64 = 0x3;
 const PARAM_COST: u64 = 0x4;
 /// Setup Parameter id for the endpoint's Hop ID.
 const PARAM_HOP: u64 = 0x5;
+const PARAM_EPOCH: u64 = 0x6;
 
 /// The cost of crossing a link that neither end priced.
 ///
@@ -157,6 +158,8 @@ impl std::fmt::Display for Role {
 /// depends on a negotiated capability (e.g. PROBE) must wait for it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Setup {
+	/// Whether this endpoint understands publisher epochs in announcements and requests.
+	pub epoch: bool,
 	/// The probe capability this endpoint supports. [`ProbeLevel::None`] when absent.
 	pub probe: ProbeLevel,
 	/// The request path, for transports that carry no request URI (native QUIC,
@@ -214,6 +217,11 @@ impl Message for Setup {
 			.and_then(|id| crate::Hop::new(id).ok());
 
 		Ok(Self {
+			epoch: match params.get_varint(PARAM_EPOCH, version)? {
+				None => false,
+				Some(1) => true,
+				_ => return Err(DecodeError::InvalidValue),
+			},
 			probe,
 			path,
 			role,
@@ -228,6 +236,9 @@ impl Message for Setup {
 		}
 
 		let mut params = Parameters::default();
+		if self.epoch {
+			params.set_varint(PARAM_EPOCH, 1, version)?;
+		}
 		// None is the wire default, so omit it to keep the message empty when nothing is set.
 		if self.probe != ProbeLevel::None {
 			params.set_varint(PARAM_PROBE, self.probe.to_code(), version)?;
@@ -266,6 +277,11 @@ struct PeerSetupState {
 }
 
 impl PeerSetup {
+	/// Whether the peer accepts publisher identities, once its SETUP arrives.
+	pub(crate) fn poll_epoch(&self, waiter: &kio::Waiter) -> std::task::Poll<bool> {
+		self.poll_get(waiter, |setup| setup.epoch)
+	}
+
 	/// Record the peer's SETUP.
 	pub fn set(&self, setup: Setup) {
 		let mut state = self.0.lock();

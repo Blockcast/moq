@@ -4,6 +4,7 @@
  * @module
  */
 import { type Dispose, race } from "@moq/signals";
+import type * as Epoch from "../epoch.ts";
 import type { Dynamic, Producer as OriginProducer, RequestSlot } from "../origin.ts";
 import * as Path from "../path.ts";
 import { wireOf } from "../wire.ts";
@@ -80,7 +81,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 						} else {
 							const handle = originWire.receive(event.prefix, event.route);
 							inserted.set(event.prefix, handle);
-							void drive(handle, conn);
+							void drive(handle, conn, event.route.epoch);
 						}
 					} else {
 						const handle = inserted.get(event.prefix);
@@ -126,11 +127,11 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
  * A path the table already routes is left alone. A request resolves to the table's route over
  * any blind answer, so answering one would only park a handle nothing reads.
  */
-async function drive(handle: Dynamic, conn: Established): Promise<void> {
+async function drive(handle: Dynamic, conn: Established, epoch?: Epoch.Valid): Promise<void> {
 	const session = wireOf(conn);
 	try {
 		for await (const request of handle.requested()) {
-			request.accept(session.consume(request.path));
+			request.accept(session.consume(request.path, epoch));
 		}
 	} catch {
 		handle.close();

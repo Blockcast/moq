@@ -991,13 +991,12 @@ async fn read_payloads(sub: &mut moq_net::track::Subscriber, count: usize) -> Ve
 /// The client connects to two servers announcing the same route. The preferred
 /// (cheaper) route serves the track; when that session dies, the broadcast
 /// re-splices through the standby at a group boundary, without the path ever
-/// being retracted: the path names an epoch, so both routes serve one origin
-/// reached different ways and the subscription rides the failover.
+/// being retracted: both routes name the same first hop, so they are the same
+/// origin reached different ways and the subscription rides the failover.
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_route_migration() {
-	// Only an epoch path resumes across sessions.
-	let path = moq_net::Path::new("test").mint_epoch();
+	let id = moq_net::broadcast::Id::from("test").with_epoch(moq_net::Epoch::mint());
 	use moq_net::Timestamp;
 
 	let publisher = Hop::new(0x42).unwrap();
@@ -1006,7 +1005,7 @@ async fn broadcast_route_migration() {
 	let origin_a = moq_tokio::origin::spawn();
 	let mut hops_a = moq_net::Hops::new();
 	hops_a.push(publisher).unwrap();
-	let broadcast_a = origin_a.create_broadcast(&path).expect("create broadcast");
+	let broadcast_a = origin_a.create_broadcast(id.clone()).expect("create broadcast");
 	broadcast_a
 		.announce(moq_net::origin::Route::default().with_hops(hops_a).with_cost(1))
 		.expect("announce");
@@ -1026,7 +1025,7 @@ async fn broadcast_route_migration() {
 	let mut hops_b = moq_net::Hops::new();
 	hops_b.push(publisher).unwrap();
 	hops_b.push(Hop::new(0x1234).unwrap()).unwrap();
-	let broadcast_b = origin_b.create_broadcast(&path).expect("create broadcast");
+	let broadcast_b = origin_b.create_broadcast(id.clone()).expect("create broadcast");
 	broadcast_b
 		.announce(moq_net::origin::Route::default().with_hops(hops_b).with_cost(2))
 		.expect("announce");
@@ -1100,14 +1099,14 @@ async fn broadcast_route_migration() {
 	// One path, announced once even though two sessions route it (the cheaper
 	// route wins the advertisement).
 	let (update, active) = next_announce(&mut announcements).await;
-	assert_eq!(update.prefix, path);
+	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce");
 
 	// Resolve and subscribe: the cheaper route (A) serves the track.
 	let subscription = moq_net::track::Subscription::default()
 		.with_start(moq_net::track::Position::group(1))
 		.with_max_age(Duration::from_secs(10));
-	let broadcast = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast(&path))
+	let broadcast = tokio::time::timeout(TIMEOUT, sub_consumer.request_broadcast(id.clone()))
 		.await
 		.expect("request timeout")
 		.expect("routed broadcast resolves");

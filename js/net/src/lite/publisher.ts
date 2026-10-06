@@ -18,6 +18,7 @@ import type { Fetch } from "./fetch.ts";
 import { Group as GroupMessage } from "./group.ts";
 import { Priority, sendOrder } from "./priority.ts";
 import { Probe } from "./probe.ts";
+import { type Setup, supportsEpoch } from "./setup.ts";
 import {
 	encodeSubscribeResponse,
 	exclusiveGroupEnd,
@@ -363,6 +364,7 @@ export class Publisher {
 	#advertised: Getter<Advertisements | undefined>;
 
 	#publish?: OriginConsumer;
+	#epochs: Promise<boolean>;
 
 	// TRACK_INFO is immutable per track, so resolve it from the application once
 	// (via a throwaway subscribe whose info() resolves when the app calls accept)
@@ -381,7 +383,13 @@ export class Publisher {
 	 *
 	 * @internal
 	 */
-	constructor(quic: WebTransport, version: Version, hop: Hop, publish?: OriginConsumer) {
+	constructor(
+		quic: WebTransport,
+		version: Version,
+		hop: Hop,
+		{ publish, peerSetup }: { publish?: OriginConsumer; peerSetup?: Getter<Setup | undefined> } = {},
+	) {
+		this.#epochs = supportsEpoch({ version, peer: peerSetup, closed: quic.closed });
 		this.#quic = quic;
 		this.version = version;
 		this.hop = hop;
@@ -408,6 +416,7 @@ export class Publisher {
 	}
 
 	async #runAnnounce(msg: AnnounceRequest, stream: Stream) {
+		const epochs = await this.#epochs;
 		if (this.#withdrawal.closing.peek()) return;
 		console.debug(`announce: prefix=${msg.prefix}`);
 
@@ -434,7 +443,13 @@ export class Publisher {
 			if (hasAnnounceId(this.version)) announceIds.set(suffix, nextAnnounceId++);
 			await encodeAnnounceBroadcast(
 				stream.writer,
-				{ status: "active", suffix, hops: wireHops(route), cost: route.cost },
+				{
+					status: "active",
+					suffix,
+					hops: wireHops(route),
+					cost: route.cost,
+					epoch: epochs ? route.epoch : undefined,
+				},
 				this.version,
 			);
 		};
@@ -541,11 +556,12 @@ export class Publisher {
 
 				for (const [suffix, snap] of active) {
 					const cur = updated.get(suffix);
-					if (!cur || cur.identity !== snap.identity) await retract(suffix);
+					if (!cur || cur.identity !== snap.identity || cur.route.epoch !== snap.route.epoch)
+						await retract(suffix);
 				}
 				for (const [suffix, snap] of updated) {
 					const prev = active.get(suffix);
-					if (!prev || prev.identity !== snap.identity) {
+					if (!prev || prev.identity !== snap.identity || prev.route.epoch !== snap.route.epoch) {
 						await announce(suffix, snap.route);
 					} else if (!routesEqual(onWire(prev.route), onWire(snap.route))) {
 						await restart(suffix, snap.route);
@@ -572,11 +588,16 @@ export class Publisher {
 	 * @internal
 	 */
 	async runSubscribe(msg: Subscribe, stream: Stream) {
+		if (msg.epoch !== undefined && !(await this.#epochs)) {
+			stream.abort(new Error("epoch metadata was not negotiated"));
+			return;
+		}
 		let front: broadcast.Consumer | undefined;
 		try {
 			front =
 				this.#publish &&
-				(wireOf(this.#publish).local(msg.broadcast) ?? (await wireOf(this.#publish).demand(msg.broadcast)));
+				(wireOf(this.#publish).local(msg.broadcast, msg.epoch) ??
+					(await wireOf(this.#publish).demand(msg.broadcast, msg.epoch)));
 		} catch (err: unknown) {
 			stream.writer.reset(error(err));
 			return;
@@ -696,11 +717,16 @@ export class Publisher {
 			return;
 		}
 
+		if (msg.epoch !== undefined && !(await this.#epochs)) {
+			stream.abort(new Error("epoch metadata was not negotiated"));
+			return;
+		}
 		let front: broadcast.Consumer | undefined;
 		try {
 			front =
 				this.#publish &&
-				(wireOf(this.#publish).local(msg.broadcast) ?? (await wireOf(this.#publish).demand(msg.broadcast)));
+				(wireOf(this.#publish).local(msg.broadcast, msg.epoch) ??
+					(await wireOf(this.#publish).demand(msg.broadcast, msg.epoch)));
 		} catch (err: unknown) {
 			stream.writer.reset(error(err));
 			return;
@@ -967,10 +993,15 @@ export class Publisher {
 	 * @internal
 	 */
 	async runTrackInfo(msg: TrackMessage, stream: Stream) {
+		if (msg.epoch !== undefined && !(await this.#epochs)) {
+			stream.abort(new Error("epoch metadata was not negotiated"));
+			return;
+		}
 		try {
 			const front =
 				this.#publish &&
-				(wireOf(this.#publish).local(msg.broadcast) ?? (await wireOf(this.#publish).demand(msg.broadcast)));
+				(wireOf(this.#publish).local(msg.broadcast, msg.epoch) ??
+					(await wireOf(this.#publish).demand(msg.broadcast, msg.epoch)));
 			if (!front) throw new NotFound(`broadcast ${msg.broadcast}`);
 
 			const info = await this.#resolveTrackInfo(front, msg.track);

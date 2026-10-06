@@ -1645,17 +1645,21 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn truncated_resumed_group_skips_to_the_next_clean_group() {
+		let epoch = moq_net::Epoch::mint();
 		let origin = crate::source::produce_origin();
-		// Only an epoch path resumes across routes.
-		let live = moq_net::Path::new("live").mint_epoch();
 		let hops = moq_net::Hops::try_from(vec![moq_net::Hop::new(10).unwrap()]).unwrap();
 		let first_route = origin
 			.dynamic(
-				&live,
-				moq_net::origin::Route::default().with_hops(hops.clone()).with_cost(5),
+				"live",
+				moq_net::origin::Route::default()
+					.with_epoch(epoch.clone())
+					.with_hops(hops.clone())
+					.with_cost(5),
 			)
 			.unwrap();
-		let pending = origin.consume().request_broadcast(&live);
+		let pending = origin
+			.consume()
+			.request_broadcast(moq_net::broadcast::Id::from("live").with_epoch(epoch.clone()));
 		let first = moq_net::broadcast::Info::new().produce();
 		let info = hang::container::track_info(hang::catalog::PRIORITY.video);
 		let first_track = first.create_track("video", info.clone()).unwrap();
@@ -1692,8 +1696,9 @@ mod tests {
 		for sequence in 1..=4 {
 			let route = origin
 				.dynamic(
-					&live,
+					"live",
 					moq_net::origin::Route::default()
+						.with_epoch(epoch.clone())
 						.with_hops(hops.clone())
 						.with_cost(5 - sequence),
 				)

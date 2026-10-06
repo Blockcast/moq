@@ -289,3 +289,13 @@ filters with `origin::Consumer::local()`.
 
 The `/nodes` [internal endpoint](/bin/relay/http#get-nodes) lists the peers
 this relay dialed and holds a session with.
+
+### Epoch identity and failover
+
+Upgraded Lite peers carry publisher epochs as announcement and request metadata.
+A relay can resume a subscription through another route only when its requested
+epoch matches. Plain-path subscriptions with no epoch remain pinned and end
+when their serving route disappears, including GOAWAY reconnects. The client
+must resubscribe. Legacy Lite and moq-transport links carry no epoch; they keep
+plain paths and cannot establish cross-route content identity. See
+[Publisher epochs](/concept/moq-lite#publisher-epochs) for cache compatibility.
