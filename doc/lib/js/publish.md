@@ -68,8 +68,11 @@ plays the audio before it as live.
 
 Each audio frame is its own group by default, so a relay pays a stream and a
 group's bookkeeping per 20ms frame. `el.audio.groupDuration` sets a minimum
-per group instead, such as `Time.Milli(100)`: the frame that reaches it ends
-the group. Frames still forward as they are encoded, so this adds no latency,
+per group instead, such as `Time.Milli(100)`: the first frame at least 100ms
+after the group's first timestamp opens the next group and closes the previous
+one. If encoding pauses, the current group stays open until the next frame or
+timeline marker. Frames still forward as they are encoded, so grouping does
+not buffer them,
 but loss gets coarser: a viewer that falls behind skips a whole group, and a
 lost frame holds back the rest of its group until it is retransmitted. A 60ms
 Opus `frameDuration` also cuts the group rate, without code, at the cost of

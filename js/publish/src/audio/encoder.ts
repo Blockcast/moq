@@ -151,8 +151,7 @@ export class Encoder {
 	/** The live-editable codec selection plus its encoder settings. */
 	codec: Signal<Codec>;
 	/**
-	 * The minimum audio carried by each group: the frame that reaches it ends the group, and the
-	 * next frame opens a new one. 0 puts every frame in its own group. A longer group costs the
+	 * The minimum timestamp span before a frame opens the next group, closing the previous one. 0 puts every frame in its own group. A longer group costs the
 	 * relay fewer streams but makes loss coarser: a viewer that falls behind skips a whole group. A
 	 * negative or non-finite duration refuses the rendition.
 	 */

@@ -210,10 +210,12 @@ async function setup(baseline = new Baseline(), codec?: Codec, groupDuration?: T
 	const track = new Moq.Track.Producer("audio").accept();
 	const written: [number, number][] = [];
 	const groups: number[] = [];
+	const appended: ReturnType<typeof track.appendGroup>[] = [];
 	const writes = { onWrite: undefined as (() => void) | undefined };
 	const appendGroup = track.appendGroup.bind(track);
 	track.appendGroup = () => {
 		const group = appendGroup();
+		appended.push(group);
 		const index = groups.push(0) - 1;
 		const writeFrame = group.writeFrame.bind(group);
 		group.writeFrame = (frame) => {
@@ -263,6 +265,7 @@ async function setup(baseline = new Baseline(), codec?: Codec, groupDuration?: T
 		feed,
 		written,
 		groups,
+		appended,
 		writes,
 		[Symbol.dispose]() {
 			encoder.close();
@@ -396,7 +399,7 @@ test("a push completing several frames keeps the encoder running", async () => {
 test("a group duration packs frames until the minimum and restarts after a break", async () => {
 	using _webcodecs = installFakeWebCodecs();
 	using env = await setup(new Baseline(), undefined, Time.Milli(100));
-	const { enabled, feed, written, groups, writes } = env;
+	const { enabled, feed, written, groups, appended, writes } = env;
 
 	let index = 0;
 	const push = async (count: number) => {
@@ -406,7 +409,12 @@ test("a group duration packs frames until the minimum and restarts after a break
 		await feed.drain();
 	};
 
-	await push(9); // seven written, two held
+	await push(7); // five written, two held
+	expect(groups).toEqual([5]);
+	expect(appended[0].closed.peek()).toBeUndefined();
+	await push(2); // the next frame opens a new group and closes the first
+	expect(groups).toEqual([5, 2]);
+	expect(appended[0].closed.peek()).toBeNull();
 
 	const marked = new Promise<void>((resolve) => {
 		writes.onWrite = resolve;
@@ -423,8 +431,8 @@ test("a group duration packs frames until the minimum and restarts after a break
 	expect(written.map(([timestamp]) => timestamp)).toEqual([
 		20_000, 40_000, 60_000, 80_000, 100_000, 120_000, 140_000, 200_000, 200_000, 220_000,
 	]);
-	// 20-100 reaches 100ms on its fifth frame. The break ends 120-140 short of it, so the resumed
-	// frames start over after the marker rather than joining a group that is already closed.
+	// 120ms opens the next group, closing the five frames at 20-100ms. The break ends the
+	// 120-140ms group early, so resumed frames start a fresh group after the marker.
 	expect(groups).toEqual([5, 2, 1, 2]);
 });
 
