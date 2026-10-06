@@ -414,6 +414,7 @@ class MoqAudio {
   final int sampleRate;
   final int channelCount;
   final int? bitrate;
+  final bool enabled;
   final MoqContainer container;
   MoqAudio({
     this.label = null,
@@ -423,6 +424,7 @@ class MoqAudio {
     required this.sampleRate,
     required this.channelCount,
     this.bitrate,
+    this.enabled = true,
     required this.container,
   });
 }
@@ -469,6 +471,11 @@ class FfiConverterMoqAudio {
     );
     final bitrate = bitrate_lifted.value;
     new_offset += bitrate_lifted.bytesRead;
+    final enabled_lifted = FfiConverterBool.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final enabled = enabled_lifted.value;
+    new_offset += enabled_lifted.bytesRead;
     final container_lifted = FfiConverterMoqContainer.read(
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -483,6 +490,7 @@ class FfiConverterMoqAudio {
         sampleRate: sampleRate,
         channelCount: channelCount,
         bitrate: bitrate,
+        enabled: enabled,
         container: container,
       ),
       new_offset - buf.offsetInBytes,
@@ -498,6 +506,7 @@ class FfiConverterMoqAudio {
         FfiConverterUInt32.allocationSize(value.sampleRate) +
         FfiConverterUInt32.allocationSize(value.channelCount) +
         FfiConverterOptionalUInt64.allocationSize(value.bitrate) +
+        FfiConverterBool.allocationSize(value.enabled) +
         FfiConverterMoqContainer.allocationSize(value.container) +
         0;
     final buf = Uint8List(total_length);
@@ -535,6 +544,10 @@ class FfiConverterMoqAudio {
       value.bitrate,
       Uint8List.view(buf.buffer, new_offset),
     );
+    new_offset += FfiConverterBool.write(
+      value.enabled,
+      Uint8List.view(buf.buffer, new_offset),
+    );
     new_offset += FfiConverterMoqContainer.write(
       value.container,
       Uint8List.view(buf.buffer, new_offset),
@@ -550,6 +563,7 @@ class FfiConverterMoqAudio {
         FfiConverterUInt32.allocationSize(value.sampleRate) +
         FfiConverterUInt32.allocationSize(value.channelCount) +
         FfiConverterOptionalUInt64.allocationSize(value.bitrate) +
+        FfiConverterBool.allocationSize(value.enabled) +
         FfiConverterMoqContainer.allocationSize(value.container) +
         0;
   }
@@ -1103,7 +1117,7 @@ class MoqVideo {
   final MoqDimensions? coded;
   final MoqDimensions? displayAspect;
   final int? bitrate;
-  final bool stalled;
+  final bool enabled;
   final double? framerate;
   final MoqContainer container;
   MoqVideo({
@@ -1114,7 +1128,7 @@ class MoqVideo {
     this.coded,
     this.displayAspect,
     this.bitrate,
-    this.stalled = false,
+    this.enabled = true,
     this.framerate,
     required this.container,
   });
@@ -1162,11 +1176,11 @@ class FfiConverterMoqVideo {
     );
     final bitrate = bitrate_lifted.value;
     new_offset += bitrate_lifted.bytesRead;
-    final stalled_lifted = FfiConverterBool.read(
+    final enabled_lifted = FfiConverterBool.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final stalled = stalled_lifted.value;
-    new_offset += stalled_lifted.bytesRead;
+    final enabled = enabled_lifted.value;
+    new_offset += enabled_lifted.bytesRead;
     final framerate_lifted = FfiConverterOptionalDouble64.read(
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -1186,7 +1200,7 @@ class FfiConverterMoqVideo {
         coded: coded,
         displayAspect: displayAspect,
         bitrate: bitrate,
-        stalled: stalled,
+        enabled: enabled,
         framerate: framerate,
         container: container,
       ),
@@ -1203,7 +1217,7 @@ class FfiConverterMoqVideo {
         FfiConverterOptionalMoqDimensions.allocationSize(value.coded) +
         FfiConverterOptionalMoqDimensions.allocationSize(value.displayAspect) +
         FfiConverterOptionalUInt64.allocationSize(value.bitrate) +
-        FfiConverterBool.allocationSize(value.stalled) +
+        FfiConverterBool.allocationSize(value.enabled) +
         FfiConverterOptionalDouble64.allocationSize(value.framerate) +
         FfiConverterMoqContainer.allocationSize(value.container) +
         0;
@@ -1243,7 +1257,7 @@ class FfiConverterMoqVideo {
       Uint8List.view(buf.buffer, new_offset),
     );
     new_offset += FfiConverterBool.write(
-      value.stalled,
+      value.enabled,
       Uint8List.view(buf.buffer, new_offset),
     );
     new_offset += FfiConverterOptionalDouble64.write(
@@ -1265,7 +1279,7 @@ class FfiConverterMoqVideo {
         FfiConverterOptionalMoqDimensions.allocationSize(value.coded) +
         FfiConverterOptionalMoqDimensions.allocationSize(value.displayAspect) +
         FfiConverterOptionalUInt64.allocationSize(value.bitrate) +
-        FfiConverterBool.allocationSize(value.stalled) +
+        FfiConverterBool.allocationSize(value.enabled) +
         FfiConverterOptionalDouble64.allocationSize(value.framerate) +
         FfiConverterMoqContainer.allocationSize(value.container) +
         0;

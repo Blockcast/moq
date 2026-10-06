@@ -192,7 +192,7 @@ In addition to the WebCodecs fields, each rendition MAY carry the common renditi
 type VideoDecoderConfigExtensions = {
   "displayAspectWidth": number | undefined,
   "displayAspectHeight": number | undefined,
-  "stalled": boolean | undefined,
+  "enabled": boolean | undefined,
 }
 ~~~
 
@@ -200,10 +200,7 @@ type VideoDecoderConfigExtensions = {
 A consumer that understands neither field MUST assume square pixels, a 1:1 ratio.
 Both MUST be present together; a consumer that sees only one MUST ignore it.
 
-`stalled` indicates that the publisher recommends temporarily avoiding the rendition.
-The track remains available when `stalled` is true.
-A consumer SHOULD select an unstalled rendition when it supports one, but MAY select a stalled rendition when no unstalled rendition is suitable.
-If absent, `stalled` defaults to false.
+`enabled` is defined in {{field-enabled}}.
 
 For example:
 
@@ -217,7 +214,7 @@ For example:
       "codedWidth": 1280,
       "codedHeight": 720,
       "bitrate": 6000000,
-      "stalled": true,
+      "enabled": false,
       "framerate": 30.0,
       "jitter": 34
     },
@@ -240,6 +237,14 @@ For example:
 }
 ~~~
 
+### enabled {#field-enabled}
+The `enabled` field says whether a consumer may select an audio or video rendition.
+When `enabled` is false, no frames are coming, and a consumer MUST NOT select the rendition.
+If absent, `enabled` defaults to true; a publisher SHOULD only write it when false.
+
+Earlier versions defined a video `stalled` field instead.
+A publisher MUST NOT write `stalled`, and a consumer MUST ignore it.
+
 
 ## Audio
 An audio track contains the necessary information to decode an audio stream.
@@ -254,7 +259,7 @@ The `renditions` field contains a map of track names to audio decoder configurat
 See the [WebCodecs specification](https://www.w3.org/TR/webcodecs/#audio-decoder-config) for specifics and registered codecs.
 Any field carrying raw bytes, notably `description`, is a hex string ({{binary}}).
 
-In addition to the WebCodecs fields, each rendition MAY carry the common rendition fields ({{common}}).
+In addition to the WebCodecs fields, each rendition MAY carry the common rendition fields ({{common}}) and `enabled` ({{field-enabled}}).
 
 ### PCM {#audio-pcm}
 
@@ -1087,6 +1092,11 @@ This document has no IANA actions.
 
 # Appendix A: Changelog
 {:numbered="false"}
+
+## moq-hang-04
+{:numbered="false"}
+
+- Replaced the video `stalled` field with an optional `enabled` field on audio and video renditions. A consumer MUST NOT select a disabled rendition and ignores `stalled`. A consumer that predates `enabled` keeps selecting a disabled rendition.
 
 ## moq-hang-03
 {:numbered="false"}

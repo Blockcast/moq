@@ -270,8 +270,8 @@ impl Consume {
 		Ok(())
 	}
 
-	/// Return whether the publisher recommends temporarily avoiding a video rendition.
-	pub fn video_stalled(&self, catalog: Id, index: usize) -> Result<bool, Error> {
+	/// Return whether a video rendition may be selected.
+	pub fn video_enabled(&self, catalog: Id, index: usize) -> Result<bool, Error> {
 		let consume = self.catalog.get(catalog).ok_or(Error::CatalogNotFound)?;
 		let (_, config) = consume
 			.catalog
@@ -280,7 +280,7 @@ impl Consume {
 			.iter()
 			.nth(index)
 			.ok_or(Error::NoIndex)?;
-		Ok(config.stalled.unwrap_or(false))
+		Ok(config.enabled)
 	}
 
 	/// Fill `dst` with the properties shared by every video rendition.

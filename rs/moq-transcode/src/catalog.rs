@@ -327,10 +327,11 @@ pub(crate) async fn rung_entry(
 	Ok(entry)
 }
 
-/// Rungs inherit the state of the rendition the pipeline actually decodes.
-pub(crate) fn inherit_stalled(rungs: &mut [Published], source: &VideoConfig) {
+/// Rungs are enabled exactly when the rendition the pipeline decodes is: a disabled source sends
+/// no frames, so neither can its rungs.
+pub(crate) fn inherit_enabled(rungs: &mut [Published], source: &VideoConfig) {
 	for published in rungs {
-		published.entry.stalled = source.stalled;
+		published.entry.enabled = source.enabled;
 	}
 }
 
@@ -415,10 +416,10 @@ mod tests {
 	}
 
 	#[test]
-	fn rungs_inherit_a_stalled_source() {
+	fn rungs_inherit_a_disabled_source() {
 		let mut source_catalog = moq_mux::catalog::hang::Catalog::default();
 		let mut src = source(1280, 720, Some(2_500_000));
-		src.stalled = Some(true);
+		src.enabled = false;
 		source_catalog.video.insert("video", src).unwrap();
 
 		let mut published = [Published {
@@ -432,20 +433,17 @@ mod tests {
 			entry: source(640, 360, Some(600_000)),
 		}];
 
-		inherit_stalled(&mut published, &source_catalog.video.renditions["video"]);
+		inherit_enabled(&mut published, &source_catalog.video.renditions["video"]);
 		let mut out = moq_mux::catalog::hang::Catalog::default();
 		populate(&mut out, &source_catalog, &published, None).unwrap();
-		assert_eq!(
-			out.video.renditions.get("video/360p").and_then(|c| c.stalled),
-			Some(true)
-		);
+		assert!(!out.video.renditions["video/360p"].enabled);
 
-		// A different local rendition may stay stalled after the selected input recovers.
+		// Following an enabled input re-enables the rungs.
 		let healthy = source(1920, 1080, Some(5_000_000));
 		source_catalog.video.insert("healthy", healthy.clone()).unwrap();
-		inherit_stalled(&mut published, &healthy);
+		inherit_enabled(&mut published, &healthy);
 		populate(&mut out, &source_catalog, &published, None).unwrap();
-		assert_eq!(out.video.renditions["video/360p"].stalled, None);
+		assert!(out.video.renditions["video/360p"].enabled);
 	}
 
 	#[test]

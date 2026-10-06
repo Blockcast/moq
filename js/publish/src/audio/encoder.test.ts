@@ -342,6 +342,28 @@ test("disabling with a subscriber attached marks where submitted audio ends", as
 	]);
 });
 
+// A muted rendition stays in the catalog, so a viewer deselects it with a one-field delta instead of
+// seeing it removed and re-added.
+test("disabling keeps the rendition in the catalog with enabled: false", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	using env = await setup();
+	const { encoder, enabled, rendition } = env;
+
+	const before = encoder.out.catalog.peek();
+	expect(before).toBeDefined();
+	expect(before?.enabled).toBeUndefined();
+
+	enabled.set(false);
+	await settle();
+	expect(encoder.out.catalog.peek()).toEqual({ ...before, enabled: false } as never);
+	expect(rendition.config.peek()).toEqual({ ...before, enabled: false } as never);
+	expect(encoder.out.active.peek()).toBe(false);
+
+	enabled.set(true);
+	await settle();
+	expect(encoder.out.catalog.peek()).toEqual(before);
+});
+
 // Closing tears down the subscription and the pipeline, which both end the epoch; cleanups run
 // last-in, first-out, so the marker lands once and before the rendition closes the track.
 test("closing with a subscriber attached marks the end once before the track closes", async () => {

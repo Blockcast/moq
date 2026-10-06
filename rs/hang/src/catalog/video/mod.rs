@@ -209,12 +209,13 @@ pub struct VideoConfig {
 	#[serde(default)]
 	pub bitrate: Option<u64>,
 
-	/// Whether the publisher recommends temporarily avoiding this rendition.
-	///
-	/// The track remains available. Consumers may still select it when no
-	/// unstalled rendition is suitable.
-	#[serde(default)]
-	pub stalled: Option<bool>,
+	/// Whether this rendition may be selected. When false, no frames are coming and a consumer
+	/// must not select it. Only written when false.
+	#[serde(
+		default = "crate::catalog::enabled_default",
+		skip_serializing_if = "crate::catalog::enabled_skip"
+	)]
+	pub enabled: bool,
 
 	/// The frame rate of the video track, if known.
 	#[serde(default)]
@@ -280,7 +281,7 @@ impl VideoConfig {
 			display_aspect_width: None,
 			display_aspect_height: None,
 			bitrate: None,
-			stalled: None,
+			enabled: true,
 			framerate: None,
 			optimize_for_latency: None,
 			container: Container::default(),
@@ -370,17 +371,25 @@ mod test {
 	}
 
 	#[test]
-	fn stalled_is_optional_and_round_trips() {
+	fn enabled_is_written_only_when_false() {
 		let mut config = VideoConfig::new(VideoCodec::VP8);
 		let encoded = serde_json::to_value(&config).expect("failed to encode");
-		assert!(encoded.get("stalled").is_none());
+		assert!(encoded.get("enabled").is_none());
 
-		config.stalled = Some(true);
+		config.enabled = false;
 		let encoded = serde_json::to_value(&config).expect("failed to encode");
-		assert_eq!(encoded["stalled"], true);
+		assert_eq!(encoded["enabled"], false);
 
 		let decoded: VideoConfig = serde_json::from_value(encoded).expect("failed to decode");
-		assert_eq!(decoded.stalled, Some(true));
+		assert!(!decoded.enabled);
+	}
+
+	#[test]
+	fn legacy_stalled_is_ignored() {
+		let json = serde_json::json!({ "codec": "vp8", "stalled": true });
+		let config: VideoConfig = serde_json::from_value(json).expect("failed to decode");
+		assert!(config.enabled);
+		assert!(serde_json::to_value(&config).unwrap().get("stalled").is_none());
 	}
 
 	#[test]
