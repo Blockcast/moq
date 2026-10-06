@@ -110,6 +110,12 @@ These land with the next breaking release, not the 2026-09-23 train.
   `moq export fmp4`, `mkv`, `flv`, `h264`, `h265`, and `rtmp` take
   `--max-delay`, and refuse `--max-age`. `track::Info::max_age`,
   `MoqTrackInfo.max_age_us`, `moq import --max-age`, and `moq export ts --max-age` are unchanged, as is the wire.
+- **moq-tokio's `Transport` names WebTransport.** `moq_tokio::server::Transport`
+  is `moq_tokio::Transport`, with no re-export. A WebTransport session reports
+  `Transport::WebTransport` (`"webtransport"` in logs) instead of `Quic`, which
+  now means raw QUIC only, and `Connection::transport()` reports the live
+  transport. The bindings' `MoqTransport` gains a `WebTransport` case, so an
+  exhaustive `switch` or `when` needs one more arm.
 - **moq-net has no `VarInt`.** Varints are plain `u64`s:
   `VarInt::decode_quic(buf)?.into_inner()` is `moq_net::varint::decode_quic(buf)?`,
   and `VarInt::try_from(v)?.encode_quic(buf)` is
@@ -120,6 +126,9 @@ These land with the next breaking release, not the 2026-09-23 train.
   `mapping: None`; any other family is the mapping's own (`mapping.family()`).
   Set `mapping` alone when building a surround head. The OpusHead bytes are
   unchanged.
+- **@moq/publish drops `OpusConfig.usedtx`.** Chromium's DTX output shifts the
+  audio timeline, so Opus DTX is always off (the WebCodecs default). Remove the
+  field; a plain-JS caller still passing it is ignored.
 
 ## Wire
 
