@@ -197,7 +197,6 @@ impl poll::SendStream for MockSendStream {
 			let landing = self
 				.landing
 				.get_or_insert_with(|| Box::pin(tokio::time::sleep_until(arrival)));
-			landing.as_mut().reset(arrival);
 			if landing.as_mut().poll(cx).is_ready() {
 				return Poll::Ready(result);
 			}
@@ -386,7 +385,7 @@ struct ConnectionState {
 	/// Set once by whichever side closes first.
 	/// Setting it wakes both sides.
 	close_state: kio::Shared<Option<(u32, String)>>,
-	/// One-way delay for stream data in each direction. Zero by default.
+	/// One-way delay for stream data and STOP_SENDING in each direction. Zero by default.
 	latency: Mutex<Duration>,
 }
 
@@ -640,8 +639,8 @@ impl MockSession {
 		*self.side.lossy.lock().unwrap() = true;
 	}
 
-	/// Delay stream data sent from now on by `latency` in each direction, keeping
-	/// each stream in order. Measured on tokio's clock, so paused-time tests advance
+	/// Delay stream data and STOP_SENDING sent from now on by `latency` in each direction,
+	/// keeping each stream in order. Measured on tokio's clock, so paused-time tests advance
 	/// through it without sleeping.
 	pub fn set_latency(&self, latency: Duration) {
 		*self.side.conn.latency.lock().unwrap() = latency;
