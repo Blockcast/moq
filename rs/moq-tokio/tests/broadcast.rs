@@ -1292,11 +1292,10 @@ async fn rejoin_skips_a_stale_warm_cache(version: &str) {
 #[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_rejoin_replays_a_current_warm_cache() {
-	for version in moq_net::Version::names() {
-		for open in [false, true] {
-			rejoin_replays_a_current_warm_cache(version, open).await;
-		}
-	}
+	// Concurrently: each round waits out the relay's request linger on the wall clock.
+	let runs = moq_net::Version::names()
+		.flat_map(|version| [false, true].map(move |open| rejoin_replays_a_current_warm_cache(version, open)));
+	futures::future::join_all(runs).await;
 }
 
 async fn rejoin_replays_a_current_warm_cache(version: &str, open: bool) {
