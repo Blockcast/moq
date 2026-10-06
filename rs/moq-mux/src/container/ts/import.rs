@@ -963,7 +963,11 @@ impl<E: catalog::Catalog> Import<E> {
 			.streams
 			.iter()
 			.filter_map(|(pid, stream)| Some((pid.as_u16(), stream.stats()?)))
-			.chain(self.sections.keys().map(|&pid| (pid, stats::Stream::new(".ts", stats::Class::Data))));
+			.chain(
+				self.sections
+					.keys()
+					.map(|&pid| (pid, stats::Stream::new(".ts", stats::Class::Data))),
+			);
 		for (pid, current) in routes {
 			streams
 				.entry(pid)
@@ -972,7 +976,10 @@ impl<E: catalog::Catalog> Import<E> {
 		}
 		// A dedicated PCR PID routes no stream, so its damage gets a clock-only row.
 		for (&pid, &damaged) in &self.damaged {
-			streams.entry(pid).or_insert_with(|| stats::Stream::new("", stats::Class::Data)).damaged = damaged;
+			streams
+				.entry(pid)
+				.or_insert_with(|| stats::Stream::new("", stats::Class::Data))
+				.damaged = damaged;
 		}
 		for (pid, stats) in &mut streams {
 			(stats.units, stats.quiet) = self.liveness.stream(*pid);
