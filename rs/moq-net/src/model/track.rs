@@ -1322,7 +1322,15 @@ impl TrackState {
 		if self.feed != Feed::Idle {
 			return;
 		}
-		let cached = self.idle_newest.take();
+		// Judged by what survived: the cancel that idled the copy resets the group in flight,
+		// and an answer past it leaves a gap after the newest group still cached.
+		let cached = self.idle_newest.take().and_then(|newest| {
+			self.lookup
+				.range(..=newest)
+				.rev()
+				.find(|(_, slot)| slot.is_shown())
+				.map(|(sequence, _)| *sequence)
+		});
 		self.live_floor = match (largest, cached) {
 			(Some(largest), Some(cached)) if largest.group > cached.saturating_add(1) => Some(cached + 1),
 			// The route has nothing, so whatever is cached is not its feed.
@@ -5620,6 +5628,35 @@ mod test {
 			sequences.push(group.sequence);
 		}
 		sequences
+	}
+
+	/// A rejoined copy judges the route's answer by the groups that survived the leave.
+	///
+	/// The cancel that idles a copy resets the group in flight. The route then answers past
+	/// it, so the newest group still cached is two behind: a gap, which the cached group
+	/// cannot be measured across. Judged by the group the copy held when it went idle, the
+	/// answer would read as contiguous, and the cached group would reach all the way to the
+	/// answer, fresh to any positive budget.
+	#[test]
+	fn an_answer_past_a_reset_group_skips_the_cache() {
+		let mut producer = track_producer("test", None);
+		append_at(&mut producer, 0);
+		let mut open = producer.append_group().unwrap();
+		open.write_frame(Timestamp::from_millis(500).unwrap(), bytes::Bytes::from_static(b"x"))
+			.unwrap();
+
+		producer.set_idle();
+		open.abort(Error::Cancel).unwrap();
+
+		let mut answer = producer.receive_group(group::Info { sequence: 2 }).unwrap();
+		producer.set_live(Some(Position::group(2)));
+		answer
+			.write_frame(Timestamp::from_millis(533).unwrap(), bytes::Bytes::from_static(b""))
+			.unwrap();
+		producer.reveal_group(&answer);
+
+		let mut subscriber = producer.subscribe(Subscription::default().with_max_age(Duration::from_millis(400)));
+		assert_eq!(drain(&mut subscriber), vec![2]);
 	}
 
 	#[test]
