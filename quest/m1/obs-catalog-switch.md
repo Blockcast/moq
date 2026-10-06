@@ -36,5 +36,4 @@ real-relay source tests (`cpp/obs/test/moq-source-test.cpp`).
 
 ## Related
 
-- [C++ through moq-ffi](/quest/m1/cpp/README.md) - the line this blocks
 - [Video source replacement](/quest/m1/obs-moq-video/source.md) - later replaces the source's decoder, and should keep this switch behavior

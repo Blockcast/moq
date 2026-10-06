@@ -23,8 +23,7 @@
 #include <vector>
 
 // Aborts: the fixture can't carry on without its relay.
-template <typename T>
-T TestOk(moq::expected<T> result, const char *what)
+template<typename T> T TestOk(moq::expected<T> result, const char *what)
 {
 	if (!result) {
 		std::fprintf(stderr, "FAIL: %s: moq::Error variant %zu\n", what, result.error().get_variant().index());
@@ -121,6 +120,13 @@ public:
 		sessions.clear();
 	}
 
+	// The session accepted `index`-th, or null before it was.
+	std::shared_ptr<moq::Session> Session(size_t index)
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		return index < sessions.size() ? sessions[index] : nullptr;
+	}
+
 	size_t Accepted()
 	{
 		std::lock_guard<std::mutex> lock(mutex);
@@ -174,9 +180,9 @@ private:
 					return;
 				char request[1024];
 				(void)::recv(client, request, sizeof(request), 0);
-				const std::string response = "HTTP/1.1 200 OK\r\nContent-Length: " +
-							     std::to_string(fingerprint.size()) +
-							     "\r\nConnection: close\r\n\r\n" + fingerprint;
+				const std::string response =
+					"HTTP/1.1 200 OK\r\nContent-Length: " + std::to_string(fingerprint.size()) +
+					"\r\nConnection: close\r\n\r\n" + fingerprint;
 				(void)::send(client, response.data(), response.size(), MSG_NOSIGNAL);
 				::close(client);
 			}
@@ -200,9 +206,9 @@ private:
 // out of a keyframe; the slice after it is never decoded.
 inline std::vector<uint8_t> TestH264Init()
 {
-	return {0x00, 0x00, 0x00, 0x01, 0x67, 0x64, 0x00, 0x1f, 0xac, 0x24, 0x84, 0x01, 0x40, 0x16, 0xec,
-		0x04, 0x40, 0x00, 0x00, 0x03, 0x00, 0x40, 0x00, 0x00, 0x0c, 0x23, 0xc6, 0x0c, 0x92, 0x00,
-		0x00, 0x00, 0x01, 0x68, 0xee, 0x32, 0xc8, 0xb0};
+	return {0x00, 0x00, 0x00, 0x01, 0x67, 0x64, 0x00, 0x1f, 0xac, 0x24, 0x84, 0x01, 0x40,
+		0x16, 0xec, 0x04, 0x40, 0x00, 0x00, 0x03, 0x00, 0x40, 0x00, 0x00, 0x0c, 0x23,
+		0xc6, 0x0c, 0x92, 0x00, 0x00, 0x00, 0x01, 0x68, 0xee, 0x32, 0xc8, 0xb0};
 }
 
 // A keyframe: the parameter sets, then an IDR slice.

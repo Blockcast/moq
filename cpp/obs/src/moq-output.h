@@ -12,6 +12,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <vector>
 #include "logger.h"
 #include "moq-worker.h"
 
@@ -142,6 +143,10 @@ private:
 	// An encoder maps to null when its track failed to initialize, so it isn't retried.
 	std::map<obs_encoder_t *, std::shared_ptr<moq::MediaProducer>> video_tracks;
 	std::map<obs_encoder_t *, std::shared_ptr<moq::MediaProducer>> audio_tracks;
+
+	// Retired sessions still draining their finished tracks, which the destructor
+	// waits out. Guarded by signal_mutex.
+	std::vector<moq::Future<void>> draining;
 
 	std::string path;
 

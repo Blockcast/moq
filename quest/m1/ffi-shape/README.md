@@ -19,9 +19,11 @@ Decided in the 2026-10-05 audit:
 - The m0 [Bindings](/quest/m0/broadcast-epoch/bindings.md) quest lands
   first. This line rebases onto it and adopts its epoch surface and the
   `session.epoch()` rename, rather than renaming again.
-- This line lands before [C++ through moq-ffi](/quest/m1/cpp/README.md),
-  which then ports `cpp/moq`, `cpp/obs`, and the C++ interop client onto the
-  reshaped moq-ffi, so the C++ breaks once.
+- The C++ package landed first (#4079, reversing the 2026-10-05 order so
+  the cpp questline could retire), so this line also ports `cpp/moq`
+  (including the hand-kept `moq::` aliases in `cpp/moq/include/moq/moq.hpp`,
+  which `just cpp check` audits), `cpp/obs`, and the C++ interop client
+  onto the reshaped moq-ffi.
 
 Settled shape:
 
@@ -44,9 +46,9 @@ Settled shape:
   namespaces.
 - `demand()` is the one way to watch subscribers; producers drop their
   `name`/`is_used`/`used`/`unused` duplicates.
-- moq-ffi and its generated consumers. The C++ line ports `cpp/obs` after
-  this lands (above). The hand-written moq-c is out of scope: the
-  [generated C](/quest/m1/c/README.md) and [C++](/quest/m1/cpp/README.md)
+- moq-ffi and its generated consumers, including `cpp/obs` (above). The
+  hand-written moq-c is out of scope: the
+  [generated C](/quest/m1/c/README.md) and C++
   bindings inherit this shape from moq-ffi, so reshaping the hand-written C
   ABI would break C users twice.
 

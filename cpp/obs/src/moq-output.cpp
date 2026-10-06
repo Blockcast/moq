@@ -8,6 +8,7 @@
 #include "logger.h"
 #include "util/util_uint64.h"
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 #include <variant>
@@ -79,6 +80,16 @@ MoQOutput::~MoQOutput()
 	// Retires the attempt, so a continuation that is already queued won't signal a
 	// stop on an output that is going away.
 	Stop();
+
+	// Let the sessions finish draining, so the relay sees the tracks end rather than a
+	// cancel. moq-ffi bounds each drain to about a second.
+	std::vector<moq::Future<void>> drains;
+	{
+		std::lock_guard<std::recursive_mutex> signal_lock(signal_mutex);
+		drains.swap(draining);
+	}
+	for (auto &drain : drains)
+		drain.wait();
 
 	// Drops whatever is still queued and waits out a continuation in flight, which
 	// may be parked on signal_mutex; so this must not hold it. Nothing touches this
@@ -344,8 +355,7 @@ void MoQOutput::Reset()
 	std::lock_guard<std::recursive_mutex> signal_lock(signal_mutex);
 
 	// Dropping the attempt cancels its pending connect or status call.
-	if (attempt && attempt->session)
-		attempt->session->shutdown();
+	std::shared_ptr<moq::Session> retired = attempt ? attempt->session : nullptr;
 	attempt.reset();
 
 	{
@@ -378,6 +388,19 @@ void MoQOutput::Reset()
 		broadcast->close();
 	broadcast.reset();
 	origin.reset();
+
+	// Drain once the tracks are finished, so the session delivers their tails instead
+	// of cutting them off. The future holds the session until the drain settles, and
+	// dropping it would abort the drain, so keep it past this attempt.
+	if (retired) {
+		draining.erase(std::remove_if(draining.begin(), draining.end(),
+					      [](const moq::Future<void> &drain) {
+						      return drain.wait_for(std::chrono::seconds(0)) ==
+							     std::future_status::ready;
+					      }),
+			       draining.end());
+		draining.push_back(retired->shutdown());
+	}
 }
 
 bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)

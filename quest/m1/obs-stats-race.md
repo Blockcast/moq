@@ -29,7 +29,3 @@ every option needs one. The test must fail with the recheck removed.
 
 If other scenarios the stubbed suites covered are clearly lost, list them as
 follow-up quests rather than restoring them here.
-
-## Related
-
-- [C++ through moq-ffi](/quest/m1/cpp/README.md) - the line this blocks

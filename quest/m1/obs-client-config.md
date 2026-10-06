@@ -33,4 +33,4 @@ Public API: additive on moq-ffi and every binding. Wire: none.
 
 ## Related
 
-- [Session report parity](/quest/m1/cpp/session-report.md) - the dock's other gaps after the migration
+- [Session report parity](/quest/m1/obs-session-report.md) - the dock's other gaps after the migration

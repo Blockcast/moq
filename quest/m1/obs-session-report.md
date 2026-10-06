@@ -24,4 +24,4 @@ Public API: additive on moq-ffi and every binding. Wire: none.
 
 ## Related
 
-- [Client settings parity](/quest/m1/cpp/client-config.md) - the settings the migration dropped
+- [Client settings parity](/quest/m1/obs-client-config.md) - the settings the migration dropped

@@ -19,7 +19,8 @@ cmake --install "$build/package" --config Release --prefix "$prefix"
 # Every generated moq::MoqFoo needs its moq::Foo alias in the wrapper.
 missing=$(comm -23 \
     <(sed -nE 's/^(struct|enum class) Moq([A-Za-z0-9]+);$/\2/p' "$prefix/include/moq/ffi/moq.hpp" | sort -u) \
-    <(sed -nE 's/^using ([A-Za-z0-9]+) = Moq\1;$/\1/p' moq/include/moq/moq.hpp | sort -u))
+    <(sed -nE 's/^using ([A-Za-z0-9]+) = Moq([A-Za-z0-9]+);$/\1 \2/p' moq/include/moq/moq.hpp |
+        awk '$1 == $2 { print $1 }' | sort -u))
 if [[ -n "$missing" ]]; then
     echo "cpp check: cpp/moq/include/moq/moq.hpp lacks an alias for: ${missing//$'\n'/ }" >&2
     exit 1

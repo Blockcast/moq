@@ -15,7 +15,9 @@
 #include <cstdarg>
 #include <cstdio>
 #include <functional>
+#include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <utility>
@@ -275,14 +277,21 @@ encoder_packet audioPacket(std::vector<uint8_t> &payload, int64_t pts)
 	return packet;
 }
 
-// The catalog the relay serves for the output's broadcast, once it has video.
-std::optional<moq::Catalog> relayCatalog(TestRelay &relay)
+// The output's broadcast as the relay serves it, or null once the wait times out.
+std::shared_ptr<moq::BroadcastConsumer> relayBroadcast(TestRelay &relay)
 {
 	auto announced = TestOk(relay.origin->consume()->announced_broadcast("room"), "announced_broadcast");
 	auto available = announced->available();
 	if (available.wait_for(std::chrono::seconds(10)) != std::future_status::ready)
+		return nullptr;
+	return TestOk(available.get(), "available");
+}
+
+// The broadcast's catalog, once it has video and audio.
+std::optional<moq::Catalog> relayCatalog(const std::shared_ptr<moq::BroadcastConsumer> &broadcast)
+{
+	if (!broadcast)
 		return std::nullopt;
-	auto broadcast = TestOk(available.get(), "available");
 	auto catalogs = TestOk(broadcast->subscribe_catalog().get(), "subscribe_catalog");
 	for (;;) {
 		auto next = catalogs->next();
@@ -327,7 +336,7 @@ int main()
 			}
 			CHECK(o.GetTotalBytes() == 3 * (keyframe.size() + opus.size()));
 
-			auto catalog = relayCatalog(relay);
+			auto catalog = relayCatalog(relayBroadcast(relay));
 			CHECK(catalog.has_value());
 			if (catalog) {
 				CHECK(catalog->video.size() == 1);
@@ -348,6 +357,72 @@ int main()
 		CHECK(signalCount() == 2);
 	}
 	printf("publishes, and only CBR hints its bitrate: ok\n");
+
+	// Stop drains the session, even when the output is destroyed straight after: a
+	// large frame written just before it still reaches the relay, and the track then
+	// ends cleanly instead of being cut off with the session.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		auto o = std::make_unique<MoQOutput>(nullptr, OUTPUT);
+		CHECK(o->Start());
+		CHECK(WaitFor([&] { return o->IsLiveSession(); }));
+
+		auto keyframe = TestH264Keyframe();
+		std::vector<uint8_t> opus = {0xfc, 0xff, 0xfe};
+		auto video = videoPacket(keyframe, 0);
+		o->Data(&video);
+		auto audio = audioPacket(opus, 0);
+		o->Data(&audio);
+
+		auto broadcast = relayBroadcast(relay);
+		auto catalog = relayCatalog(broadcast);
+		CHECK(catalog.has_value());
+		if (catalog) {
+			const auto &[name, rendition] = *catalog->video.begin();
+			auto media = TestOk(broadcast->subscribe_media(name, rendition.container, std::nullopt).get(),
+					    "subscribe_media");
+			// Read a frame first, so the relay is subscribed before the last one is written.
+			auto next = media->next();
+			CHECK(next.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
+			auto first = TestOk(next.get(), "first frame");
+			CHECK(first.has_value());
+
+			// Large enough that it is still in flight when Stop() runs.
+			auto large = keyframe;
+			large.resize(large.size() + 16 * 1024 * 1024, 0xff);
+			auto last = videoPacket(large, 1);
+			o->Data(&last);
+			// OBS may destroy the output right after stopping it.
+			o->Stop();
+			o.reset();
+
+			// Read once the relay has seen the session end, so it serves only what the
+			// session delivered before closing.
+			auto closed = relay.Session(0)->closed();
+			CHECK(closed.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
+
+			// Everything up to the last frame, then the end of the track.
+			bool ended = false;
+			uint64_t last_timestamp = first ? first->timestamp_us : 0;
+			for (;;) {
+				next = media->next();
+				if (next.wait_for(std::chrono::seconds(10)) != std::future_status::ready)
+					break;
+				auto result = next.get();
+				if (!result)
+					break;
+				if (!*result) {
+					ended = true;
+					break;
+				}
+				last_timestamp = (*result)->timestamp_us;
+			}
+			CHECK(ended);
+			CHECK(first && last_timestamp > first->timestamp_us);
+		}
+	}
+	printf("stop drains the session: ok\n");
 
 	// Invalid advanced settings refuse the start before any capture begins.
 	{

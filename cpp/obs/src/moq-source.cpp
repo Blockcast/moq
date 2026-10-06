@@ -741,9 +741,10 @@ static void moq_source_disconnect_locked(struct moq_source *ctx)
 	moq_source_clear_audio_locked(ctx);
 
 	// Dropping the connection cancels whatever it was waiting on, including a wait
-	// for a broadcast that is never announced.
+	// for a broadcast that is never announced. A subscriber has nothing to drain, so
+	// the session closes at once.
 	if (ctx->connection && ctx->connection->session)
-		ctx->connection->session->shutdown();
+		ctx->connection->session->cancel(0);
 	ctx->connection.reset();
 }
 

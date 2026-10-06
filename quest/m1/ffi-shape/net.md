@@ -18,8 +18,8 @@ are renamed.
   `moq_client_config.versions` already does (`rs/moq-c/src/client.rs:37`), so
   every binding can pin or restrict versions. moq-ffi has no version setter
   today.
-- The cpp line's client-config quest (`quest/m1/cpp/client-config.md` on
-  branch `quest/m1/cpp/README`) ships this same `MoqClientConfig` record
+- [Client settings parity](/quest/m1/obs-client-config.md) ships this same
+  `MoqClientConfig` record
   additively. Decided in the 2026-09-30 audit: this quest then only
   removes the fallible setters, rather than designing the record
   twice.

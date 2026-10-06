@@ -9,8 +9,9 @@ endif()
 project(moq-cpp VERSION ${_version} LANGUAGES CXX)
 
 # Builds moq-ffi as a staticlib with cargo and renders its bindings with uniffi-bindgen-cpp,
-# the same no-Corrosion custom target rs/moq-c/CMakeLists.txt uses. Multi-config generators
-# (Visual Studio) have no CMAKE_BUILD_TYPE and get the release profile.
+# the same no-Corrosion custom target rs/moq-c/CMakeLists.txt uses. The cargo profile follows
+# CMAKE_BUILD_TYPE (release unless Debug), even on a multi-config generator (Visual Studio),
+# whose --config never changes it: the staticlib links the release CRT either way.
 set(_workspace "${CMAKE_CURRENT_SOURCE_DIR}/../..")
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     set(_profile debug)
