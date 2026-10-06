@@ -876,10 +876,8 @@ impl Setup {
 	where
 		S: web_transport_trait::Session,
 		crate::transport::Session<S>: moq_net::transport::poll::Boxable,
-		<crate::transport::Session<S> as moq_net::transport::poll::Session>::SendStream:
-			moq_net::transport::MaybeSync,
-		<crate::transport::Session<S> as moq_net::transport::poll::Session>::RecvStream:
-			moq_net::transport::MaybeSync,
+		<crate::transport::Session<S> as moq_net::transport::poll::Session>::SendStream: moq_net::transport::MaybeSync,
+		<crate::transport::Session<S> as moq_net::transport::poll::Session>::RecvStream: moq_net::transport::MaybeSync,
 	{
 		let session = crate::transport::Session::new(session);
 		let deadline = deadline.map(|at| Deadline::new(at, session.clone()));
