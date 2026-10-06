@@ -5082,6 +5082,42 @@ fn qlog_packet_lost_trigger() {
     );
 }
 
+#[cfg(feature = "qlog")]
+#[test]
+fn qlog_pacing_rate_is_bits_per_second() {
+    use qlog::events::EventData;
+    use qlog::reader::{Event as QlogEvent, QlogSeqReader};
+
+    const BYTES_PER_SECOND: u64 = 125_000;
+    let qlog = SharedBuffer::default();
+    let mut qlog_config = QlogConfig::default();
+    qlog_config.writer(Box::new(qlog.clone()));
+    let mut transport = cubic_transport();
+    transport
+        .congestion_controller_factory(Arc::new(PacketRecorderFactory {
+            pacing_rate: Some(BYTES_PER_SECOND),
+            ..Default::default()
+        }))
+        .qlog_stream(qlog_config.into_stream());
+    let mut config = client_config();
+    config.transport_config(Arc::new(transport));
+    let mut pair = Pair::default();
+    pair.connect_with(config);
+
+    let rates = QlogSeqReader::new(Box::new(&qlog.0.lock().unwrap()[..]))
+        .unwrap()
+        .filter_map(|event| match event {
+            QlogEvent::Qlog(event) => match event.data {
+                EventData::QuicMetricsUpdated(metrics) => metrics.pacing_rate,
+                _ => None,
+            },
+            QlogEvent::Json(_) => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(!rates.is_empty(), "no qlog pacing rate emitted");
+    assert!(rates.iter().all(|rate| *rate == BYTES_PER_SECOND * 8));
+}
+
 /// A controller whose window is effectively unbounded but which always reports a low pacing
 /// rate, so the only thing that can ever block a send is the pacer. Counts how many times the
 /// connection reports the spec's `C.is_cwnd_limited` signal.
