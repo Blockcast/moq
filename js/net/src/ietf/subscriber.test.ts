@@ -1376,3 +1376,47 @@ test("object properties reach the consumer, both parities and unknown ids", asyn
 	track.close();
 });
 
+/**
+ * The same object, read where a player actually reads it.
+ *
+ * {@link track.Ordered.readFrame} is the track-level entry point, and it reaches the frame
+ * through a different path than a raw group does: it rebuilds the frame around the group and
+ * frame numbers. A frame read straight off a {@link netGroup.Consumer} can carry an extra
+ * field structurally even when nothing declares it, so a round-trip asserted there passes on
+ * a model that every consumer-facing read still drops. Assert at the consumer.
+ */
+test("object identity and properties survive to the track-level reader", async () => {
+	const { subscriber, track } = await subscribeTrack({ timescale: Timescale.MILLI });
+
+	// Subgroup 1, Object IDs 0 and 2 (deltas 0 and 1), each carrying Timestamp plus an
+	// unknown even property, so identity and properties are asserted on one read.
+	const properties = [PROP_TIMESTAMP, 20, 0x10, 42];
+	await subscriber.handleGroup(
+		subgroupHeader(1, subgroupFlags(true)),
+		new Reader(
+			undefined,
+			new Uint8Array([...encodeObject(0, properties, "first"), ...encodeObject(1, properties, "second")]),
+			VERSION,
+		),
+	);
+
+	const ordered = track.ordered();
+	const first = await ordered.readFrame();
+	const second = await ordered.readFrame();
+	if (!first || !second) throw new Error("the track reader delivered no frame");
+
+	expect([first, second].map((f) => new TextDecoder().decode(f.payload))).toEqual(["first", "second"]);
+	expect([first, second].map((f) => f.object?.subgroup)).toEqual([1, 1]);
+	expect([first, second].map((f) => f.object?.id)).toEqual([0, 2]);
+	expect([first, second].map((f) => f.object?.status)).toEqual([0, 0]);
+
+	// The whole block, verbatim and parsed, not just the Timestamp the frame is stamped with.
+	expect(Array.from(first.object?.properties ?? [])).toEqual(properties);
+	expect(first.object?.propertyList).toEqual([
+		{ type: BigInt(PROP_TIMESTAMP), value: 20n },
+		{ type: BigInt(PROP_EVEN), value: 42n },
+	]);
+	expect(first.timestamp.value).toBe(20);
+
+	track.close();
+});
