@@ -88,7 +88,7 @@ Design points left open for the implementer:
 `requested_track_shape` and the track-name helpers for every name that takes
 `.json.z`, created only when requested rather than with the plain/compressed
 pair. Weigh replacing `compressed: bool` in the helpers with a flavor enum,
-which is a published API break and goes to `dev` unless additive.
+which is a published API break.
 
 **Readers.** `Consumer` and the aggregate read either flavor into
 `TrafficFrame` / `SessionsFrame`. The JS decoder is about 120 lines and
@@ -108,7 +108,7 @@ impact: new on-demand tracks; existing tracks unchanged.
 
 ## Required
 
-- [Bench coverage](/quest/m2/bench-coverage.md) - its stats producer benchmark is the moq-json snapshot encoder profile the gate needs
+- [Benchmark the moq-stats producer](/quest/m2/stats-producer-bench.md) - the moq-json snapshot encoder profile the gate needs
 
 ## Related
 

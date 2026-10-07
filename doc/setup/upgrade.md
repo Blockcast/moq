@@ -15,6 +15,98 @@ A released flag, environment variable, or config key that was renamed is
 refused at startup with its replacement named, rather than ignored. Fix what the
 error lists and rerun.
 
+## Unreleased
+
+These land with the next breaking release, not the 2026-09-23 train.
+
+- **moq-binary is moq-flate, and @moq/binary is @moq/flate.** The opaque
+  `snapshot` and `stream` tracks moved beside the codec; the wire and the
+  catalog's `binary` section are unchanged. In Rust, `moq_binary::X` is
+  `moq_flate::X`, and `moq_binary::Error::Flate(e)` is the matching
+  `moq_flate::Error` variant (`Decompress`, `TooLarge`). `moq_flate::Error`
+  now carries `moq_net::Error`, so it is no longer `PartialEq`. moq-mux's
+  `Error::Binary` is `Error::Flate`. In TypeScript, import `Snapshot` and
+  `Stream` from `@moq/flate`.
+- **moq-ffi flate tracks.** `publish_binary_snapshot` / `publish_binary_stream`
+  are `publish_flate_snapshot` / `publish_flate_stream`, taking
+  `MoqFlateConfig` and returning `MoqFlateSnapshotProducer` /
+  `MoqFlateStreamProducer`. The C `moq_publish_binary_*` calls are unchanged.
+- **Demand is read through `demand()`.** In Rust, `track::Producer`'s
+  `is_used`, `used`, `unused`, and `poll_unused` are `producer.demand().X`,
+  and so are `group::Producer`'s `used` and `unused`.
+  `track::Request::poll_unused`, `track::Dynamic::poll_unused`, and
+  `group::Request::poll_unused` are `demand().poll_unused`, which returns
+  `Poll<Result<()>>` instead of `Poll<()>`: an `Err` means the request closed,
+  so treat it as unused too. A `group::Request` no longer needs polling to be
+  withdrawn; the last `fetch_group` caller leaving does it, so a handler that
+  sees it unused just drops it. A fetch arriving after that queues a fresh
+  request instead of joining the abandoned one, so a handler that keeps serving
+  without watching `demand()` may see its `accept` return `Error::Duplicate`.
+  The moq-json snapshot and moq-flate `is_used()` is `demand().is_used()`.
+  In TypeScript, `Track.Producer`'s `used` and `unused()` are
+  `producer.demand().used` and `.unused()`, as are `Group.Producer`'s, and
+  `Allocator.reserve` takes `producer.demand()`, replacing the
+  `Bandwidth.Demand` interface.
+- **The `"auto"` delay is measured, not derived from RTT** (#4162). It is sized
+  from how late frames arrive (see [audio jitter](/concept/audio-jitter)) in
+  `@moq/watch` and `moq play`, which now defaults `--delay` to `auto` instead of
+  `100ms`. A numeric `@moq/watch` delay is taken literally instead of having
+  the rendition's own delay added on top. `Sync.out.jitter` now always
+  equals `Sync.out.delay`, and `"auto"` with no decoder registered resolves to
+  0 rather than 100 ms.
+- **moq-mux has no clock translators.** `clock::Anchor`, `clock::Lane`, and
+  `SourceMap` (#4667) are gone, along with the importers' `live()`. Publish the
+  source's own timestamps and let the catalog clock map them to wall time;
+  pin that mapping with `Config::with_clock` when the source's zero is known.
+- **`--cluster-mesh` and `--cluster-linger` are unknown flags.** moq-relay
+  0.17 refuses them by name; later relays reject them, and TOML `mesh` and
+  `linger`, like any unknown setting. `MOQ_CLUSTER_MESH` and
+  `MOQ_CLUSTER_LINGER` are no longer read, so drop them from the environment.
+  In Rust, `cluster::Config` has no `mesh` or `linger` field.
+- **moq-mux data producers take a broadcast-clock `Timestamp`.** `json` and
+  `binary` `Snapshot::update` and `Stream::append` take `Timed<_, Timestamp>`
+  instead of `Timed<_, Instant>`, and publish it as given. Convert a capture
+  `Instant` with `.at(catalog.clock().capture(instant)?)`, reading
+  `catalog.clock()` at write time, since an importer's first frame re-anchors
+  it. A timestamp ahead of now is published rather than refused.
+- **moq-mux importers publish the catalog at their first frame.** The fMP4,
+  MKV, and MPEG-TS importers used to publish it at their init segment (`moov`,
+  `Tracks`, or the first PMT) on a provisional clock, then re-anchor it on the
+  first frame. They now hold it until that frame, as FLV already did, so the
+  first snapshot carries the final root `clock`. A reader waiting for the
+  catalog now waits for media of a selected track, not just the init segment:
+  a track `with_select` deselects doesn't release it, even if its media
+  arrives first. A `moov` or `Tracks` decoded after `finish()` is refused with
+  `fmp4::Error::MoovAfterFinish` or `mkv::Error::TracksAfterFinish`, since the
+  tracks it declares could never finish.
+- **fMP4 export fixes its track set at the init segment.** moq-mux's
+  `fmp4::Error` drops `MissingVideoTrack`, `MissingAudioTrack`, and
+  `NoCatalogSnapshot`, and adds `TrackAdded`, `TrackChanged`, `TrackRewound`,
+  and `TrackUndescribed`. `fmp4::Export` and `moq export fmp4` now end with one
+  of these where they used to write a track missing from the moov, and a
+  broadcast that ends with media queued behind an undescribed track is an error
+  rather than an empty `Ok(None)`. Restart the export to pick up a new
+  rendition.
+- **moq-tokio's `Transport` names WebTransport.** `moq_tokio::server::Transport`
+  is `moq_tokio::Transport`, with no re-export. A WebTransport session reports
+  `Transport::WebTransport` (`"webtransport"` in logs) instead of `Quic`, which
+  now means raw QUIC only, and `Connection::transport()` reports the live
+  transport. The bindings' `MoqTransport` gains a `WebTransport` case, so an
+  exhaustive `switch` or `when` needs one more arm.
+- **moq-net has no `VarInt`.** Varints are plain `u64`s:
+  `VarInt::decode_quic(buf)?.into_inner()` is `moq_net::varint::decode_quic(buf)?`,
+  and `VarInt::try_from(v)?.encode_quic(buf)` is
+  `moq_net::varint::encode_quic(v, buf)`, which fails past
+  `varint::MAX_QUIC` (2^62 - 1).
+- **Opus mapping family lives only on `mapping`.**
+  `moq_mux::codec::opus::Config::mapping_family` is gone. Family 0 is
+  `mapping: None`; any other family is the mapping's own (`mapping.family()`).
+  Set `mapping` alone when building a surround head. The OpusHead bytes are
+  unchanged.
+- **@moq/publish drops `OpusConfig.usedtx`.** Chromium's DTX output shifts the
+  audio timeline, so Opus DTX is always off (the WebCodecs default). Remove the
+  field; a plain-JS caller still passing it is ignored.
+
 ## Wire
 
 Older protocol versions still negotiate, so relays and clients can be upgraded
@@ -187,7 +279,7 @@ PRs, so a minor rename may be missing.
   is `Watch.Player({ origin: connection.origin, ... })`.
 - **@moq/publish** takes `origin: connection.origin` instead of a
   `connection` signal.
-- **@moq/json and @moq/binary** take one options object (#3640):
+- **@moq/json and @moq/binary** (now `@moq/flate`) take one options object (#3640):
   `new Json.Snapshot.Consumer({ track })` instead of `(track, config)`.
 - **@moq/hang** reads the catalog `archive` entry instead of `timeline`.
 

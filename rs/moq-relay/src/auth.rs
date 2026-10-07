@@ -321,6 +321,10 @@ pub enum Error {
 	#[error("auth server unavailable: {0}")]
 	Unavailable(String),
 
+	/// A valid grant does not cover the requested direction or path.
+	#[error("{0}")]
+	Forbidden(String),
+
 	/// The relay could not build the request the server needs.
 	#[error("{0}")]
 	Request(String),
@@ -341,6 +345,7 @@ impl From<&Error> for http::StatusCode {
 			// A server-side problem, not a credential problem: the client may retry.
 			Error::Unavailable(_) => http::StatusCode::BAD_GATEWAY,
 			Error::Request(_) => http::StatusCode::BAD_REQUEST,
+			Error::Forbidden(_) => http::StatusCode::FORBIDDEN,
 			_ => http::StatusCode::UNAUTHORIZED,
 		}
 	}
@@ -380,6 +385,8 @@ pub struct Token {
 	pub tier: Tier,
 	/// Whether the session is a cluster peer, so its routes entered elsewhere.
 	pub peer: bool,
+	/// Whether the peer is upstream, so it is never offered another upstream's routes.
+	pub upstream: bool,
 }
 
 impl Token {
@@ -402,6 +409,7 @@ impl Token {
 			publish: grant.publish.clone(),
 			tier: crate::configured_tier(grant.tier.clone()),
 			peer: grant.peer,
+			upstream: grant.upstream,
 		}
 	}
 
@@ -475,8 +483,9 @@ impl Lease {
 	///
 	/// A changed root or mounts, or a narrower grant, ends it: origin handles cannot yet narrow
 	/// a live scope in place (tracked by `quest/m1/auth/narrowing.md`). A flipped
-	/// `peer` ends it too, since the routes it already announced would be
-	/// misreported as entering here or from a peer. A changed tier keeps the
+	/// `peer` or `upstream` ends it too, since the routes it already announced
+	/// would be misreported as entering here or from a peer, or offered to the
+	/// wrong links. A changed tier keeps the
 	/// session and moves its [stats](Self::with_stats) to the new tier.
 	pub async fn ended(&mut self) -> lease::Reason {
 		loop {
@@ -491,7 +500,7 @@ impl Lease {
 					Ok(grant) => {
 						let fresh = self.token.recheck(&grant);
 						if fresh.root != self.token.root {
-							return "root changed".into();
+							return lease::Reason::Narrowed;
 						}
 						if fresh.mounts != self.token.mounts {
 							return "mounts changed".into();
@@ -501,8 +510,11 @@ impl Lease {
 						if fresh.peer != self.token.peer {
 							return "peer changed".into();
 						}
+						if fresh.upstream != self.token.upstream {
+							return "upstream changed".into();
+						}
 						if !self.token.covered_by(&fresh) {
-							return "grant narrowed".into();
+							return lease::Reason::Narrowed;
 						}
 						if fresh.tier != self.token.tier {
 							tracing::info!(from = %self.token.tier, to = %fresh.tier, "tier changed");
@@ -523,6 +535,25 @@ impl Lease {
 	/// revoked first. Dropping the consumer reports zero bytes.
 	pub fn close(self, reason: impl Into<lease::Reason>, bytes: Bytes) -> lease::Reason {
 		self.consumer.close(reason, bytes)
+	}
+}
+
+/// Run gateway work while its admission lease still covers the session.
+///
+/// Work is dropped when the lease expires, narrows, or is revoked. A completed
+/// work future ends the lease with zero byte totals. A gateway that tracks
+/// transport totals can use [`Lease::ended`] and [`Lease::close`] directly.
+pub async fn hold<T>(mut lease: Lease, work: impl std::future::Future<Output = T>) -> Result<T, lease::Reason> {
+	tokio::select! {
+		biased;
+		reason = lease.ended() => {
+			lease.close(reason.clone(), Bytes::default());
+			Err(reason)
+		},
+		result = work => {
+			lease.close("done", Bytes::default());
+			Ok(result)
+		},
 	}
 }
 
@@ -690,11 +721,12 @@ impl Admission {
 /// transport knows, nothing parsed on the server's behalf.
 pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Request {
 	let transport = match request.transport() {
-		moq_tokio::server::Transport::Quic => moq_auth::Transport::Quic,
-		moq_tokio::server::Transport::Iroh => moq_auth::Transport::Iroh,
-		moq_tokio::server::Transport::WebSocket => moq_auth::Transport::WebSocket,
-		moq_tokio::server::Transport::Tcp => moq_auth::Transport::Tcp,
-		moq_tokio::server::Transport::Unix => moq_auth::Transport::Unix,
+		// The auth contract names QUIC either way; WebTransport is QUIC underneath.
+		moq_tokio::Transport::Quic | moq_tokio::Transport::WebTransport => moq_auth::Transport::Quic,
+		moq_tokio::Transport::Iroh => moq_auth::Transport::Iroh,
+		moq_tokio::Transport::WebSocket => moq_auth::Transport::WebSocket,
+		moq_tokio::Transport::Tcp => moq_auth::Transport::Tcp,
+		moq_tokio::Transport::Unix => moq_auth::Transport::Unix,
 		// A transport this build does not know is still a session on the wire; the
 		// server sees the same facts either way.
 		other => unreachable!("unknown transport {other}"),
@@ -717,12 +749,18 @@ pub fn request_for(auth: &Auth, request: &moq_tokio::server::Request) -> Request
 		.map(str::to_owned)
 		.or_else(|| request.authority().map(str::to_owned));
 	out.alpn = request.alpn().map(str::to_owned);
-	out.role = request.role().map(|role| match role {
-		moq_net::Role::Publisher => moq_auth::Role::Publisher,
-		_ => moq_auth::Role::Subscriber,
-	});
+	out.role = request.role().and_then(role);
 	out.tls = request.peer_identity().as_ref().and_then(peer);
 	out
+}
+
+/// The auth role for a session role, `None` for one `moq-auth` cannot name yet.
+pub(crate) fn role(role: moq_net::Role) -> Option<moq_auth::Role> {
+	match role {
+		moq_net::Role::Publisher => Some(moq_auth::Role::Publisher),
+		moq_net::Role::Subscriber => Some(moq_auth::Role::Subscriber),
+		_ => None,
+	}
 }
 
 /// The certificate facts for a verified peer, or `None` when the chain does not parse.
@@ -1024,7 +1062,7 @@ mod tests {
 	/// Routes a session announced were recorded as a peer's or not; a re-check that
 	/// flips it closes the session rather than misreport them.
 	#[tokio::test]
-	async fn a_recheck_that_flips_peer_closes() {
+	async fn a_recheck_that_flips_the_link_closes() {
 		let grant = Grant::new(patterns(&["**"]), patterns(&["**"]));
 		let (producer, consumer) = lease::Producer::new(grant.clone());
 		let mut lease = Lease::new("/", consumer);
@@ -1032,8 +1070,17 @@ mod tests {
 
 		let mut peer = grant;
 		peer.peer = true;
-		producer.update(peer);
+		producer.update(peer.clone());
 		assert_eq!(lease.ended().await.to_string(), "peer changed");
+
+		// Routes already offered to (or withheld from) the session were filtered
+		// by whether it is upstream, so flipping that closes it too.
+		let (producer, consumer) = lease::Producer::new(peer.clone());
+		let mut lease = Lease::new("/", consumer);
+		let mut upstream = peer;
+		upstream.upstream = true;
+		producer.update(upstream);
+		assert_eq!(lease.ended().await.to_string(), "upstream changed");
 	}
 
 	#[test]

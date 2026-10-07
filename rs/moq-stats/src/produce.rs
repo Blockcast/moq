@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use std::task::Poll;
 
@@ -205,7 +205,7 @@ impl Producer {
 			depth,
 			linger,
 			interval,
-			sequence: Arc::new(AtomicU64::new(first_sequence(SystemTime::now()))),
+			sequence: Arc::new(AtomicU64::new(0)),
 		};
 		spawn(task.run(Arc::downgrade(&keepalive)));
 
@@ -224,19 +224,6 @@ impl Producer {
 }
 
 /// Everything the publish task owns.
-/// A producer's first group number: wall-clock microseconds, so a restarted
-/// relay resumes past the groups its previous run left in a subscriber's cache.
-/// The allocator takes far fewer than one group per microsecond, so it stays
-/// below the next run's start. A clock stepped back across a restart still
-/// parks subscribers until the new run passes their floor.
-///
-/// Temporary, on `release` only: `main` replaces this with stats epochs, a
-/// fresh broadcast per restart whose totals the aggregator sums.
-fn first_sequence(now: SystemTime) -> u64 {
-	now.duration_since(UNIX_EPOCH)
-		.map_or(0, |since| since.as_micros() as u64)
-}
-
 struct Task {
 	registry: Registry,
 	origin: origin::Producer,
@@ -443,8 +430,8 @@ impl<V: Serialize> Snapshot<V> {
 		}
 	}
 
-	fn is_used(&self) -> bool {
-		self.track.is_used()
+	fn demand(&self) -> moq_net::track::Demand {
+		self.track.demand()
 	}
 
 	fn update(&mut self, value: &Frame<V>) -> moq_json::Result<()> {
@@ -514,7 +501,7 @@ impl<V: Serialize> TrackPair<V> {
 
 	/// Whether any consumer exists on either flavor.
 	fn is_used(&self) -> bool {
-		self.plain.is_used() || self.compressed.is_used()
+		self.plain.demand().is_used() || self.compressed.demand().is_used()
 	}
 
 	/// Publish this drain's entries on both flavors (`{}` when there are none)
@@ -588,7 +575,7 @@ impl PendingPair {
 		self.plain
 			.iter()
 			.chain(self.compressed.iter())
-			.any(|request| request.poll_unused(waiter).is_pending())
+			.any(|request| request.demand().poll_unused(waiter).is_pending())
 	}
 }
 
@@ -1117,29 +1104,12 @@ fn advertised_path(prefix: &Path, group: &Path, node: Option<&str>) -> PathOwned
 mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn reclaimed_requested_tracks_resume_after_the_last_group() {
-		let sequence = Arc::new(AtomicU64::new(0));
-		resumes_after_the_last_group(sequence.clone(), sequence).await;
-	}
-
-	#[tokio::test(start_paused = true)]
-	async fn restarted_producers_resume_after_the_last_group() {
-		let start = UNIX_EPOCH + Duration::from_secs(1_790_000_000);
-		resumes_after_the_last_group(
-			Arc::new(AtomicU64::new(first_sequence(start))),
-			Arc::new(AtomicU64::new(first_sequence(start + Duration::from_secs(1)))),
-		)
-		.await;
-	}
-
-	/// Serve a track from `before`, reclaim it, then recreate it on `after` for
-	/// a subscriber resuming past the last group it saw.
-	async fn resumes_after_the_last_group(before: Arc<AtomicU64>, after: Arc<AtomicU64>) {
 		use futures::FutureExt;
 		for name in ["idle/publisher.json", "idle/publisher.json.z"] {
 			let broadcast = moq_net::broadcast::Info::new().produce();
 			let _dynamic = broadcast.dynamic();
 			let consumer = broadcast.consume();
-			let mut family = TrackFamily::<Traffic>::new(before.clone());
+			let mut family = TrackFamily::<Traffic>::new(Arc::new(AtomicU64::new(0)));
 			let mut requested = HashSet::new();
 			let subscribing = consumer.track(name).unwrap().subscribe(None);
 			family.adopt_pair(
@@ -1155,7 +1125,6 @@ mod tests {
 			drop(subscriber);
 			family.reclaim(&mut requested);
 			assert!(family.tracks.is_empty());
-			family.sequence = after.clone();
 
 			let subscribing = consumer
 				.track(name)
@@ -1189,6 +1158,17 @@ mod tests {
 			std::mem::forget(driver);
 		}
 		producer
+	}
+
+	/// The next route and whether it is active, skipping the caught-up marker.
+	async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq_net::announce::Announce, bool)> {
+		loop {
+			return match announced.next().await? {
+				moq_net::announce::Event::Start(route) | moq_net::announce::Event::Update(route) => Some((route, true)),
+				moq_net::announce::Event::End(route) => Some((route, false)),
+				moq_net::announce::Event::Live => continue,
+			};
+		}
 	}
 
 	use std::collections::BTreeMap;
@@ -1242,8 +1222,8 @@ mod tests {
 		source.announce(origin::Route::default()).expect("announce");
 		let producer = source.create_track("video", None).expect("create_track");
 
-		let update = announced.next().await.expect("announce");
-		assert!(update.kind.is_active());
+		let (_, active) = next_update(&mut announced).await.expect("announce");
+		assert!(active);
 		let consumer = egress.request_broadcast(path).await.expect("resolve");
 
 		let sub = if subscribe {
@@ -1283,8 +1263,8 @@ mod tests {
 	async fn announced(origin: &origin::Producer) -> (String, moq_net::broadcast::Consumer) {
 		let mut consumer = origin.consume().with_hidden(true).announced();
 		tokio::time::advance(Duration::from_millis(1)).await;
-		let update = consumer.next().await.expect("expected announce");
-		assert!(update.kind.is_active());
+		let (update, active) = next_update(&mut consumer).await.expect("expected announce");
+		assert!(active);
 		let broadcast = origin
 			.consume()
 			.request_broadcast(moq_net::Path::new(update.prefix.as_str()))
@@ -1559,8 +1539,8 @@ mod tests {
 	fn take_events(events: &mut announce::Consumer) -> Vec<(String, bool)> {
 		use futures::FutureExt;
 		let mut out = Vec::new();
-		while let Some(Some(update)) = events.next().now_or_never() {
-			out.push((update.prefix.as_str().to_string(), update.kind.is_active()));
+		while let Some(Some((route, active))) = next_update(events).now_or_never() {
+			out.push((route.prefix.as_str().to_string(), active));
 		}
 		out
 	}

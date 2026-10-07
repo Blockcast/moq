@@ -35,6 +35,31 @@ struct StatsState {
 	demanded: bool,
 }
 
+/// How [`Session::setup`] learns that the peer's SETUP arrived.
+#[derive(Clone)]
+pub(crate) enum Setup {
+	/// The handshake read it before the session started.
+	Read,
+	/// The lite driver records it from the peer's Setup Stream.
+	Lite(crate::lite::PeerSetup),
+	/// The moq-transport driver records it from the peer's SETUP stream.
+	Ietf(crate::ietf::peer::PeerSetup),
+	/// The version carries no SETUP from the peer.
+	Never,
+}
+
+impl Setup {
+	/// `Ready(true)` once the SETUP arrived, `Ready(false)` if it never will.
+	fn poll(&self, waiter: &kio::Waiter) -> Poll<bool> {
+		match self {
+			Self::Read => Poll::Ready(true),
+			Self::Lite(setup) => setup.poll_seen(waiter).map(|()| true),
+			Self::Ietf(setup) => setup.poll_seen(waiter).map(|()| true),
+			Self::Never => Poll::Ready(false),
+		}
+	}
+}
+
 /// A snapshot of connection statistics for a [`Session`].
 ///
 /// Every field is optional: availability depends on the transport backend (native QUIC
@@ -101,6 +126,7 @@ pub struct Session {
 	send_bandwidth: Option<bandwidth::Consumer>,
 	recv_bandwidth: Option<bandwidth::Consumer>,
 	goaway: Arc<goaway::Handle>,
+	setup: Setup,
 }
 
 impl Session {
@@ -169,7 +195,8 @@ impl Session {
 	/// the session's terminal error if it ended some other way first. A track that
 	/// is still live never finishes, so finish or abort tracks before closing.
 	///
-	/// moq-transport (IETF) sessions close without waiting.
+	/// Both protocols withdraw this session's announcements and wait for their
+	/// delivery. IETF drafts 14 through 16 send withdrawals without waiting.
 	pub async fn close(self) -> Result<(), Error> {
 		if let Ok(mut close) = self.close.write()
 			&& close.is_none()
@@ -215,6 +242,35 @@ impl Session {
 		}
 	}
 
+	/// Wait for the peer's SETUP, or return the session's close reason.
+	///
+	/// Resolves when the peer's SETUP arrives. This crate's servers send it only once
+	/// they admit the client, but neither protocol requires that ordering, so another
+	/// server may send SETUP and still refuse the session afterward.
+	/// [`crate::Client::connect`] returns before the SETUP on moq-lite-05+ and
+	/// moq-transport draft 17+. Older versions read it during the handshake and resolve
+	/// at once, except moq-lite-03 and -04, which carry none and return
+	/// [`Error::Unsupported`]. A session that already closed returns its close reason.
+	pub async fn setup(&self) -> Result<(), Error> {
+		kio::wait(|waiter| {
+			match self.closed.poll(waiter, |state| match &**state {
+				Some(ended) => Poll::Ready(ended.err.clone()),
+				None => Poll::Pending,
+			}) {
+				Poll::Ready(Ok(err)) => return Poll::Ready(Err(err)),
+				// The driver was dropped before it could observe the close.
+				Poll::Ready(Err(_)) => return Poll::Ready(Err(Error::Cancel)),
+				Poll::Pending => {}
+			}
+			match self.setup.poll(waiter) {
+				Poll::Ready(true) => Poll::Ready(Ok(())),
+				Poll::Ready(false) => Poll::Ready(Err(Error::Unsupported)),
+				Poll::Pending => Poll::Pending,
+			}
+		})
+		.await
+	}
+
 	/// Drain the peer gracefully: the handle for sending this session's single
 	/// GOAWAY.
 	///
@@ -254,6 +310,7 @@ impl Session {
 		recv_bandwidth: Option<bandwidth::Consumer>,
 		protocol: crate::driver::Protocol<S>,
 		goaway: goaway::Handle,
+		setup: Setup,
 	) -> (Self, crate::Driver<S>)
 	where
 		S: crate::transport::poll::Session,
@@ -297,6 +354,7 @@ impl Session {
 			send_bandwidth,
 			recv_bandwidth,
 			goaway: Arc::new(goaway),
+			setup,
 		};
 		let driver = crate::Driver::new(
 			runtime.clone(),
@@ -343,7 +401,7 @@ enum Drain {
 	/// Nobody asked for one.
 	Idle,
 	/// Requested: close once drained, or at the deadline.
-	Waiting(crate::runtime::Deadline<crate::time::Clock>),
+	Waiting(crate::time::Deadline),
 	/// The drain closed the transport, with this outcome.
 	Done(Result<(), Error>),
 }
@@ -352,16 +410,14 @@ enum SamplerMode {
 	/// Nobody wants stats; sampling is paused.
 	Idle,
 	/// Someone does; sample when the deadline elapses.
-	Polling {
-		deadline: crate::runtime::Deadline<crate::time::Clock>,
-	},
+	Polling { deadline: crate::time::Deadline },
 }
 
 impl<S: crate::transport::poll::Session> Supervisor<S> {
 	const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 	pub(crate) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
-		let mut cx = std::task::Context::from_waker(waiter.waker());
+		let mut cx = waiter.context();
 
 		// The transport's terminal error ends the supervisor.
 		if let Poll::Ready(err) = self.closed_watch.poll_closed(&mut cx) {
@@ -414,7 +470,7 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 				}
 				Close::Drain => {
 					if !draining {
-						self.drain = Drain::Waiting(crate::runtime::Deadline::after(&self.runtime, CLOSE_TIMEOUT));
+						self.drain = Drain::Waiting(crate::time::Deadline::after(&self.runtime, CLOSE_TIMEOUT));
 					}
 					// No handle is left to abort.
 					if last {
@@ -426,6 +482,10 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 
 		self.poll_sampler(waiter);
 		Poll::Pending
+	}
+
+	pub(crate) fn draining(&self) -> bool {
+		matches!(self.drain, Drain::Waiting(_))
 	}
 
 	/// Finish a requested drain once the protocol owes the peer nothing, or at
@@ -465,7 +525,7 @@ impl<S: crate::transport::poll::Session> Supervisor<S> {
 		stats.demanded = false;
 		drop(stats);
 		self.mode = SamplerMode::Polling {
-			deadline: crate::runtime::Deadline::after(&self.runtime, Self::POLL_INTERVAL),
+			deadline: crate::time::Deadline::after(&self.runtime, Self::POLL_INTERVAL),
 		};
 	}
 
@@ -541,3 +601,45 @@ const _: () = {
 	const fn assert_send_sync<T: Send + Sync>() {}
 	assert_send_sync::<Session>();
 };
+
+/// Session-local advertisement withdrawal; the source origin remains shared.
+#[derive(Clone, Default)]
+pub(crate) struct Withdrawal(kio::Shared<WithdrawalState>);
+
+#[derive(Default)]
+struct WithdrawalState {
+	closing: bool,
+	active: usize,
+}
+
+impl Withdrawal {
+	pub(crate) fn begin(&self) {
+		self.0.lock().closing = true;
+	}
+
+	pub(crate) fn poll(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.0
+			.poll(
+				waiter,
+				|state| if state.closing { Poll::Ready(()) } else { Poll::Pending },
+			)
+			.map(|_| ())
+	}
+
+	pub(crate) fn drained(&self) -> bool {
+		self.0.read().active == 0
+	}
+
+	pub(crate) fn register(&self) -> Withdrawing {
+		self.0.lock().active += 1;
+		Withdrawing(self.clone())
+	}
+}
+
+pub(crate) struct Withdrawing(Withdrawal);
+
+impl Drop for Withdrawing {
+	fn drop(&mut self) {
+		self.0.0.lock().active -= 1;
+	}
+}

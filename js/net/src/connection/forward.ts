@@ -4,7 +4,6 @@
  * @module
  */
 import { type Dispose, race } from "@moq/signals";
-import { isActive } from "../announced.ts";
 import type { Dynamic, Producer as OriginProducer, RequestSlot } from "../origin.ts";
 import * as Path from "../path.ts";
 import { wireOf } from "../wire.ts";
@@ -53,6 +52,11 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 		const announced = conn.announced(Path.Pattern.subtree(prefix), { hidden: true });
 		const inserted = new Map<Path.Valid, Dynamic>();
 
+		// Taken before the session is handed out, so no announcement stream on the origin misses
+		// it: each overlapping one opened now withholds its live marker until this interest's
+		// initial set lands.
+		const landed = originWire.replaying(prefix);
+
 		// End the stream the moment the session closes rather than waiting for the wire to
 		// error it, so the retractions below land promptly.
 		void conn.closed.then(() => announced.close());
@@ -63,9 +67,13 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 				for (;;) {
 					const event = await announced.next();
 					if (!event) break;
+					if (event.kind === "live") {
+						landed();
+						continue;
+					}
 					if (!originWire.accepts(event.prefix)) continue;
 
-					if (isActive(event.kind)) {
+					if (event.kind !== "end") {
 						const existing = inserted.get(event.prefix);
 						if (existing) {
 							existing.update(event.route);
@@ -85,6 +93,8 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 				// cleanup below retracts everything this stream fed either way.
 				failure = err;
 			} finally {
+				// A dead stream cannot hold the marker back.
+				landed();
 				for (const handle of inserted.values()) handle.close();
 				inserted.clear();
 				announced.close();
@@ -147,7 +157,7 @@ async function serveRequests(conn: Established, origin: OriginProducer): Promise
 		if (!map || dead) break;
 
 		for (const [path, slot] of map) {
-			if (slot.blind === 0) continue;
+			if (!table.blind(slot)) continue;
 			if (answered.get(path)?.slot === slot || slot.answer !== undefined) continue;
 			if (table.routes(path)) continue;
 			const withdraw = table.answer(path, session.consume(path));
@@ -158,7 +168,7 @@ async function serveRequests(conn: Established, origin: OriginProducer): Promise
 		// A replaced slot counts as withdrawn: the answer we hold belongs to the slot that
 		// went away, not to whatever now occupies the path.
 		for (const [path, entry] of [...answered]) {
-			if (map.get(path) === entry.slot && entry.slot.blind > 0) continue;
+			if (map.get(path) === entry.slot && table.blind(entry.slot)) continue;
 			answered.delete(path);
 			entry.withdraw();
 		}

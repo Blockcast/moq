@@ -19,8 +19,8 @@ state, so Warm has no job.
   ignore Cold, and write the one cost as Warm with Cold at the saturation
   ceiling.
 - The single cost still prices a standby claim above a live one, per the
-  wildcard line's standby floor. Update that text in
-  `quest/m0/wildcard/README.md` and anything else naming `Cost { warm, cold }`.
+  standby floor Wildcard landed in #4403. Update anything naming
+  `Cost { warm, cold }`.
 - Replace `Cost { warm, cold }` in `rs/moq-net/src/model/origin.rs` and its
   JS mirror, and delete what computes Warm from cache state.
 - The moq-transport cluster extension already carries one cost.
@@ -28,5 +28,5 @@ state, so Warm has no job.
   single cost stays on ANNOUNCE as the origin's per-prefix seed and stops
   accumulating per hop; link costs move to the ROUTE metric.
 
-Public API: `Cost` changes shape (a break, so it lands on `dev`). Wire: the
+Public API: `Cost` changes shape (a break). Wire: the
 wip version drops a field; lite-06 is unchanged.

@@ -25,6 +25,15 @@ codec requirements in `encode::Settings`; `encode::Options` adds publication
 policy. Decoding likewise separates low-level `decode::Config`, PCM
 `decode::Output`, and subscription `decode::Options`.
 
+`encode::Settings::with_preset` applies an `encode::Preset` without touching
+codec, rate, layout, bitrate, or DTX. `LowLatency` (the default preset) packs
+10 ms of audio per packet, `Balanced` and `Quality` 20 ms, which is also what
+`Settings` defaults to without a preset. AAC frames are fixed at 1024 samples,
+so a preset leaves AAC's frame duration alone. That is packetization, not a delay
+guarantee: Opus adds its 6.5 ms lookahead either way. libopus already runs at
+full complexity, where a 10 ms stereo packet takes about 0.1 ms to encode, so
+Quality has nothing further to spend and matches Balanced.
+
 | Module | Does |
 | --- | --- |
 | `capture` | Microphones via CoreAudio, WASAPI, ALSA (and PipeWire/PulseAudio hosts), plus macOS system audio |
@@ -81,7 +90,7 @@ that way there.
 
 Highlights:
 
-- **`encode::Publication`** advertises the track and opens the microphone only while someone listens. Stop, swap devices, and restart without changing the track subscribers know; read a level meter for the UI.
+- **`encode::Control`** advertises the track and opens the microphone only while someone listens. Stop, swap devices, and restart without changing the track subscribers know; read a level meter for the UI.
 - **A/V sync signal.** `Sink::buffered()` reports how far ahead the speaker is, which is what a video clock steers by.
 - **Activity per packet**, read off the Opus stream, so a call UI shows who is talking without a second voice detector.
 - **One Linux build dependency**: ALSA headers, and only when `capture` or `playback` is enabled.
@@ -99,10 +108,15 @@ while let Some(frame) = audio.read().await? {
         eprintln!("dropped {} live audio frames", write.dropped_sample_frames);
     }
 }
+sink.finish().await;
 ```
 
 Playback writes never block. Inspect the returned input sample-frame counts for
 telemetry, but do not retry dropped live audio because that would add latency.
+Await `sink.finish()` to play its queued tail before leaving the mix; dropping
+its `Drain` stops immediately. An unavailable device keeps it pending. When
+sample rates differ, the current resampling channel cannot flush its partial
+input block, so completion covers the output ring.
 
 For a speakerphone, build one echo-cancellation control set from the playback
 engine and give a clone to the microphone configuration. Other clones are safe

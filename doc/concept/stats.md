@@ -40,9 +40,7 @@ returns within the linger keeps its broadcast, so viewer churn doesn't
 unannounce and re-announce it across the mesh; while it lingers empty, its
 tracks hold `{}`. Once the linger elapses with the group still empty, the
 broadcast is unannounced. Group numbers keep increasing across recreated
-tracks, group broadcasts, and restarts; they may have gaps. A producer's first
-group is the wall clock in microseconds, so a clock stepped back across a
-restart parks subscribers until the new run passes their cached groups. A
+tracks and group broadcasts for the producer's life; they may have gaps. A
 recreated compressed track starts a new group with a full snapshot, never a
 delta whose compression state belonged to its previous writer.
 
