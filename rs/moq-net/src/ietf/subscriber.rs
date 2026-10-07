@@ -2913,9 +2913,12 @@ where
 		reading: &mut Reading,
 	) -> Result<Opened, Error> {
 		let sequence = header.group_id;
+		// The subgroup is the publisher's and is carried verbatim: a non-zero one is a
+		// valid stream, not an unsupported shape (BLO-40849).
+		let subgroup = header.sub_group_id;
 		// Stats (groups/frames/bytes) are counted in the model as the group is written,
 		// through the tagged `track::Producer`.
-		let create = |track: &mut track::Producer| track.create_group(group::Info { sequence });
+		let create = |track: &mut track::Producer| track.create_group(group::Info { sequence, subgroup });
 
 		let peeked = match header.flags.has_extensions {
 			true => stream
@@ -3899,7 +3902,7 @@ fn open_fill_group(
 	head: &mut Option<(u64, u64, crate::recv::Group)>,
 	sequence: u64,
 ) -> Result<(), Error> {
-	let producer = track.create_group(group::Info { sequence })?;
+	let producer = track.create_group(group::Info { sequence, subgroup: 0 })?;
 	*head = Some((sequence, 0, crate::recv::Group::new(producer)));
 	Ok(())
 }

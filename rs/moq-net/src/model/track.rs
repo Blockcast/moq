@@ -1347,7 +1347,7 @@ impl TrackState {
 			self.claim_sequence(sequence, frame_start)?;
 		}
 
-		let mut group = group::Producer::new(group::Info { sequence }, info, self.cache.clone());
+		let mut group = group::Producer::new(group::Info { sequence, subgroup: 0 }, info, self.cache.clone());
 		// Start where the request did before the group is visible: a fetch looking it up
 		// in between would otherwise see it begin at 0 and get a reader that later skips
 		// the head it asked for.
@@ -1500,7 +1500,8 @@ impl Producer {
 		let track = state.info.clone().unwrap();
 
 		let group =
-			group::Producer::new(group::Info { sequence }, track, state.cache.clone()).with_meter(self.stats.meter());
+			group::Producer::new(group::Info { sequence, subgroup: 0 }, track, state.cache.clone())
+				.with_meter(self.stats.meter());
 		state.commit_group(&group, true);
 
 		Ok(group)

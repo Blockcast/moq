@@ -33,6 +33,28 @@ pub struct Info {
 	pub timestamp: Timestamp,
 }
 
+/// What an object-level wire carries about a frame beyond its payload and timestamp.
+///
+/// The moq-lite wire has none of this, so a frame from that path leaves [`Frame::object`]
+/// `None` and nothing changes for it. On the IETF path every field is the publisher's,
+/// kept verbatim so a relay re-emits what it received rather than what it could
+/// reconstruct: that is the whole point of carrying it through the model at all.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Object {
+	/// Object ID within its subgroup.
+	///
+	/// A gap is data, not an error: the publisher chose those IDs and a relay forwards
+	/// them. Nothing here requires IDs to start at the group's start or increment by 1.
+	pub id: u64,
+	/// Every object property (extension header) exactly as received, even and odd alike.
+	///
+	/// Opaque on purpose. A parsed view is a reader's business; discarding a property the
+	/// model does not recognise would make the relay lossy for every future extension.
+	pub properties: Bytes,
+	/// Object status: 0 Normal, 3 End of Group, per the draft's Object Status registry.
+	pub status: u64,
+}
+
 /// A completed frame: a timestamp and its full, contiguous payload.
 ///
 /// This is the stored form of every finished frame in a group. The payload is a
@@ -43,6 +65,12 @@ pub struct Frame {
 	pub timestamp: Timestamp,
 	/// The full frame payload.
 	pub payload: Bytes,
+	/// Object identity and properties, when this frame came from an object-level wire.
+	///
+	/// `None` on the moq-lite path. A relay forwarding IETF to IETF re-emits this
+	/// unchanged; one bridging to moq-lite drops it, which is the moq-lite wire's limit
+	/// and not a decision taken here.
+	pub object: Option<Object>,
 }
 
 /// A reusable batch of frames, filled by [`group::Consumer::read_frames`] and drained
@@ -437,6 +465,8 @@ impl<G: std::borrow::BorrowMut<group::Producer>> Raw<G> {
 		self.group.borrow_mut().frame_commit(Frame {
 			timestamp: self.info.timestamp,
 			payload,
+			// TODO(BLO-40849): plumb from `frame::Info` once the IETF ingest sets it.
+			object: None,
 		})?;
 		self.done = true;
 		Ok(())

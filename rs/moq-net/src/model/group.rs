@@ -67,6 +67,19 @@ pub struct Info {
 	/// Per-track sequence number used to detect ordering and gaps. Higher numbers
 	/// supersede lower ones; consumers may skip late arrivals.
 	pub sequence: u64,
+	/// IETF Subgroup ID this group's objects were delivered on.
+	///
+	/// One subgroup is exactly what this model already calls a group — a single ordered
+	/// stream of frames — so an IETF subgroup maps onto one [`Info`] and the
+	/// producer/consumer contract above is untouched. The pair `(sequence, subgroup)`
+	/// identifies the stream; `sequence` alone still identifies the IETF Group.
+	///
+	/// Always 0 on the moq-lite path, which has no subgroup on the wire.
+	///
+	/// TODO(BLO-40849): `track.rs` still keys its group index on `sequence` alone, so two
+	/// subgroups of one group collide there. Carrying the field is step 1; re-keying the
+	/// index on the ordered pair is step 2 and is deliberately not done here.
+	pub subgroup: u64,
 }
 
 impl Info {
@@ -85,13 +98,14 @@ impl From<usize> for Info {
 	fn from(sequence: usize) -> Self {
 		Self {
 			sequence: sequence as u64,
+			subgroup: 0,
 		}
 	}
 }
 
 impl From<u64> for Info {
 	fn from(sequence: u64) -> Self {
-		Self { sequence }
+		Self { sequence, subgroup: 0 }
 	}
 }
 
@@ -99,6 +113,7 @@ impl From<u32> for Info {
 	fn from(sequence: u32) -> Self {
 		Self {
 			sequence: sequence as u64,
+			subgroup: 0,
 		}
 	}
 }
@@ -107,6 +122,7 @@ impl From<u16> for Info {
 	fn from(sequence: u16) -> Self {
 		Self {
 			sequence: sequence as u64,
+			subgroup: 0,
 		}
 	}
 }
@@ -531,7 +547,12 @@ impl Producer {
 		}
 		state.cache += size;
 		let now = state.charge.add(size);
-		state.frames.push_back(Frame { timestamp, payload });
+		state.frames.push_back(Frame {
+			timestamp,
+			payload,
+			// TODO(BLO-40849): plumb from the IETF ingest once the subscriber sets it.
+			object: None,
+		});
 		state.next_index = next_index;
 		state.committed = state.next_index;
 		state.stamp(timestamp);
@@ -1926,6 +1947,7 @@ mod test {
 		frames.push_back(Frame {
 			timestamp: Timestamp::ZERO,
 			payload: Bytes::new(),
+			object: None,
 		});
 		let capacity = frames.capacity();
 		assert!(

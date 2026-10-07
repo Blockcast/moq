@@ -837,7 +837,11 @@ impl<S: crate::transport::poll::Session> GroupRecv<S> {
 								frame: hdr.frame_start,
 							}));
 						}
-						let group_info = group::Info { sequence: hdr.sequence };
+						let group_info = group::Info {
+							sequence: hdr.sequence,
+							// moq-lite has no subgroup on the wire.
+							subgroup: 0,
+						};
 						// Stats (groups/frames/bytes) are counted in the model as the group
 						// is written, through the tagged `track::Producer`.
 						let mut group = match entry.producer.create_group(group_info) {
