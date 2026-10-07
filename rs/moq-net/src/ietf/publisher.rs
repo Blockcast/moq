@@ -1292,19 +1292,6 @@ where
 	async fn run_fetch_stream(mut self, mut stream: Stream<S, Version>, msg: ietf::Fetch<'_>) -> Result<(), Error> {
 		let priority = super::priority::from_wire(msg.subscriber_priority);
 
-		// Draft-20 moved the range into LOCATION_FILTER, which decodes to
-		// `FetchType::Filtered` but is not served yet.
-		if Filter::is_draft20(self.version) {
-			return self
-				.reject_fetch(
-					stream,
-					msg.request_id,
-					&Error::Unsupported,
-					"FETCH not supported on draft-20",
-				)
-				.await;
-		}
-
 		// Serving a Range Filter unfiltered would deliver objects the subscriber excluded.
 		if msg.range_filters {
 			return self
@@ -1348,13 +1335,7 @@ where
 						.await;
 				};
 
-				// The peer must have seen the announcement to name this namespace, so this
-				// resolves like a SUBSCRIBE does.
-				let broadcast = match self.serving_origin().await.request_broadcast(&namespace).await {
-					Ok(broadcast) => broadcast,
-					Err(err) => return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await,
-				};
-				let track = match broadcast.track(&track) {
+				let track = match self.fetch_track(&namespace, &track).await {
 					Ok(track) => track,
 					Err(err) => return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await,
 				};
@@ -1362,6 +1343,21 @@ where
 				// No SUBSCRIBE declared a timescale for this request, so its objects go
 				// out unstamped.
 				(track, start, end, None, false)
+			}
+			// Draft-20 replaced joining FETCH with subscription fills, so neither joining
+			// form has a meaning there. The wire cannot carry one — the Fetch Type tag is
+			// gone — but refuse rather than answer a request this draft never defined.
+			FetchType::RelativeJoining { .. } | FetchType::AbsoluteJoining { .. }
+				if Filter::is_draft20(self.version) =>
+			{
+				return self
+					.reject_fetch(
+						stream,
+						msg.request_id,
+						&Error::Unsupported,
+						"joining FETCH not supported on draft-20",
+					)
+					.await;
 			}
 			FetchType::RelativeJoining {
 				subscriber_request_id, ..
@@ -1398,11 +1394,87 @@ where
 					true,
 				)
 			}
-			// Refused above: only draft-20 decodes this form.
-			FetchType::Filtered { .. } => {
-				return self
-					.reject_fetch(stream, msg.request_id, &Error::Unsupported, "not supported")
-					.await;
+			// Draft-20 dropped the Fetch Type tag and carries the range as a
+			// LOCATION_FILTER instead. It resolves by the Fetch rules — relative to
+			// Largest Object and never extending beyond it — which is what a fill
+			// already does, so the same resolver answers both.
+			FetchType::Filtered {
+				namespace,
+				track,
+				filter,
+			} => {
+				let track = match self.fetch_track(&namespace, &track).await {
+					Ok(track) => track,
+					Err(err) => return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await,
+				};
+
+				// The filter resolves against the live edge, which a lazy handle does not
+				// carry until the producer has accepted the track. A SUBSCRIBE gets that
+				// for free by subscribing first; a FETCH has to ask.
+				let largest = match track.query().await {
+					Ok(_) => live_edge(&track).largest,
+					Err(err) => return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await,
+				};
+
+				// A FETCH names no subscription to inherit from, and its absent filter
+				// already decoded to Unfiltered. Range Filters are refused above.
+				let serve = fill_range(
+					ietf::Fill {
+						filter: Some(filter),
+						range_filters: false,
+					},
+					Filter::Unfiltered,
+					largest,
+				);
+
+				let (sequence, skip, until) = match serve {
+					FillServe::Group { sequence, skip, until } => (sequence, skip, until),
+					FillServe::Empty => {
+						return self
+							.reject_fetch(stream, msg.request_id, &Error::InvalidRange, "empty range")
+							.await;
+					}
+					// Same reason as the standalone form below: on a relay each missing
+					// group would be its own serial upstream fetch.
+					FillServe::Unsupported => {
+						return self
+							.reject_fetch(
+								stream,
+								msg.request_id,
+								&Error::Unsupported,
+								"FETCH spanning several groups not supported",
+							)
+							.await;
+					}
+				};
+
+				// `until` is one past the last object to write, while this function's
+				// `end` is a Location whose Object of 0 means the whole End Group.
+				let end = match until {
+					Some(object) => Location {
+						group: sequence,
+						object,
+					},
+					None => match sequence.checked_add(1) {
+						Some(group) => Location { group, object: 0 },
+						None => {
+							return self
+								.reject_fetch(stream, msg.request_id, &Error::InvalidRange, "empty range")
+								.await;
+						}
+					},
+				};
+
+				(
+					track,
+					Location {
+						group: sequence,
+						object: skip,
+					},
+					end,
+					None,
+					false,
+				)
 			}
 		};
 
@@ -1522,6 +1594,18 @@ where
 		let _ = stream.writer.close().await;
 
 		Ok(())
+	}
+
+	/// Resolve the track a FETCH names.
+	///
+	/// The peer must have seen the announcement to name this namespace, so this resolves
+	/// like a SUBSCRIBE does.
+	async fn fetch_track(&self, namespace: &crate::Path<'_>, track: &str) -> Result<track::Consumer, Error> {
+		self.serving_origin()
+			.await
+			.request_broadcast(namespace)
+			.await?
+			.track(track)
 	}
 
 	/// Resolve the subscription a joining FETCH names to its saved start, or the refusal
@@ -4498,6 +4582,9 @@ mod serve_tests {
 		Version::Draft19,
 	];
 
+	/// Draft-20 and newer, which carry the range as a LOCATION_FILTER instead.
+	const FILTERED_FETCH_DRAFTS: [Version; 3] = [Version::Draft20, Version::Draft21, Version::Draft22];
+
 	/// Groups `0..count`, each holding `g-0` and `g-1`, skipping `hole`.
 	fn publish_pairs(h: &mut Serve, count: u64, hole: Option<u64>) {
 		for sequence in (0..count).filter(|sequence| Some(*sequence) != hole) {
@@ -4529,6 +4616,33 @@ mod serve_tests {
 						track: "video".into(),
 						start,
 						end,
+					},
+					range_filters: false,
+					fill_timeout: false,
+				},
+			)
+			.await
+			.unwrap();
+		bytes::Bytes::from(h.log.writes.lock().unwrap()[mark..].to_vec())
+	}
+
+	/// Run a draft-20 FETCH of `room/video`, returning what the peer reads back.
+	async fn filtered_fetch(h: &Serve, filter: Filter) -> bytes::Bytes {
+		let version = h.publisher.version;
+		let mark = h.log.writes.lock().unwrap().len();
+		let stream = Stream::open(&mut h.session.clone(), version).await.unwrap();
+		h.publisher
+			.clone()
+			.run_fetch_stream(
+				stream,
+				ietf::Fetch {
+					request_id: FETCH_ID,
+					subscriber_priority: 128,
+					group_order: GroupOrder::Ascending,
+					fetch_type: FetchType::Filtered {
+						namespace: crate::Path::new("room"),
+						track: "video".into(),
+						filter,
 					},
 					range_filters: false,
 					fill_timeout: false,
@@ -4640,22 +4754,109 @@ mod serve_tests {
 		}
 	}
 
-	/// Draft-20 carries the range in LOCATION_FILTER, which is not read yet.
+	/// Draft-20 carries the range in LOCATION_FILTER. The repair case is one whole group:
+	/// a three-field filter, so an End Group Delta of 0 and no End Object.
 	#[moq_net_sim::test]
-	async fn a_draft20_fetch_is_refused() {
-		for version in [Version::Draft20, Version::Draft21, Version::Draft22] {
+	async fn a_draft20_fetch_serves_one_whole_group() {
+		for version in FILTERED_FETCH_DRAFTS {
+			let mut h = serve(version);
+			publish_pairs(&mut h, 5, None);
+			settle().await;
+
+			let buf = filtered_fetch(
+				&h,
+				Filter::Absolute {
+					start: Location { group: 2, object: 0 },
+					end: Some(EndLocation { group: 2, object: None }),
+				},
+			)
+			.await;
+			let (ok, objects) = fetch_answer(buf, version);
+			assert_eq!(ok.end_location, Location { group: 3, object: 0 }, "{version}");
+			assert!(!ok.end_of_track, "{version}");
+			assert_eq!(objects, pairs([2]), "{version}");
+			assert!(h.log.resets().is_empty(), "{version}");
+		}
+	}
+
+	/// The fourth field bounds the last object, so a range that stops mid-group must not
+	/// be widened to the whole group the way an absent End Object is.
+	#[moq_net_sim::test]
+	async fn a_draft20_fetch_honors_the_end_object() {
+		for version in FILTERED_FETCH_DRAFTS {
+			let mut h = serve(version);
+			publish_pairs(&mut h, 5, None);
+			settle().await;
+
+			let buf = filtered_fetch(
+				&h,
+				Filter::Absolute {
+					start: Location { group: 2, object: 0 },
+					end: Some(EndLocation {
+						group: 2,
+						object: Some(0),
+					}),
+				},
+			)
+			.await;
+			let (ok, objects) = fetch_answer(buf, version);
+			assert_eq!(ok.end_location, Location { group: 2, object: 1 }, "{version}");
+			assert_eq!(objects, pairs([2])[..1].to_vec(), "{version}");
+		}
+	}
+
+	/// Resolution is by the Fetch rules, so the range never runs past Largest Object:
+	/// the newest group is served up to its last published frame, not refused.
+	#[moq_net_sim::test]
+	async fn a_draft20_fetch_of_the_current_group_is_capped_at_the_largest_object() {
+		for version in FILTERED_FETCH_DRAFTS {
+			let mut h = serve(version);
+			publish_pairs(&mut h, 5, None);
+			settle().await;
+
+			// One group back from the next one is the current group.
+			let buf = filtered_fetch(&h, Filter::Relative(1)).await;
+			let (ok, objects) = fetch_answer(buf, version);
+			assert_eq!(ok.end_location, Location { group: 4, object: 2 }, "{version}");
+			assert_eq!(objects, pairs([4]), "{version}");
+		}
+	}
+
+	/// A filter resolving to several groups is refused for the same reason the standalone
+	/// form is: on a relay each missing group would be its own serial upstream fetch.
+	/// Unfiltered is this case too, being the whole track up to Largest Object.
+	#[moq_net_sim::test]
+	async fn a_draft20_fetch_of_several_groups_is_refused() {
+		for version in FILTERED_FETCH_DRAFTS {
+			for filter in [
+				Filter::Unfiltered,
+				Filter::Relative(2),
+				Filter::Absolute {
+					start: Location { group: 0, object: 0 },
+					end: Some(EndLocation { group: 1, object: None }),
+				},
+			] {
+				let mut h = serve(version);
+				publish_pairs(&mut h, 3, None);
+				settle().await;
+
+				let buf = filtered_fetch(&h, filter).await;
+				assert_eq!(fetch_refusal(buf, version), 0x3, "{version}: {filter:?}");
+			}
+		}
+	}
+
+	/// Next Object is one past the live edge, which for a FETCH is always empty.
+	#[moq_net_sim::test]
+	async fn a_draft20_fetch_past_the_live_edge_is_refused() {
+		for version in FILTERED_FETCH_DRAFTS {
 			let mut h = serve(version);
 			publish_pairs(&mut h, 3, None);
 			settle().await;
 
-			let buf = standalone_fetch(
-				&h,
-				Location { group: 1, object: 0 },
-				Location { group: 1, object: 0 },
-				GroupOrder::Ascending,
-			)
-			.await;
-			assert_eq!(fetch_refusal(buf, version), 0x3, "{version}");
+			let buf = filtered_fetch(&h, Filter::NextObject).await;
+			// InvalidRange, not Unsupported: the range is empty, not unservable.
+			assert_eq!(fetch_refusal(buf, version), 0x11, "{version}");
 		}
 	}
 
