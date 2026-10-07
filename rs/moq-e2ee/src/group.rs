@@ -14,8 +14,8 @@ use crate::limits::MAX_GROUPED_PAYLOAD;
 /// A decrypted grouped frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Frame {
-	/// Presentation timestamp.
-	pub timestamp: moq_net::Timestamp,
+	/// Presentation timestamp, or `None` when untimed.
+	pub timestamp: Option<moq_net::Timestamp>,
 	/// Decrypted application bytes.
 	pub plaintext: Bytes,
 }
@@ -58,14 +58,22 @@ impl Producer {
 	///
 	/// [`Error::Identity`] if the next frame exceeds 32 bits, [`Error::Exhausted`],
 	/// [`Error::Oversize`], or a net write error.
-	pub fn write_frame(&mut self, timestamp: moq_net::Timestamp, plaintext: &[u8]) -> Result<()> {
+	pub fn write_frame(&mut self, timestamp: impl Into<Option<moq_net::Timestamp>>, plaintext: &[u8]) -> Result<()> {
+		let timestamp = timestamp.into();
 		let frame = self.next_frame;
 		if frame == u32::MAX {
 			return Err(Error::Identity);
 		}
-		timestamp
-			.convert(self.inner.timescale())
-			.map_err(|_| Error::Net(moq_net::Error::TimestampMismatch))?;
+		// Checked before the frame identity is spent: a track is all timed or all untimed.
+		match (timestamp, self.inner.timescale()) {
+			(Some(timestamp), Some(timescale)) => {
+				timestamp
+					.convert(timescale)
+					.map_err(|_| Error::Net(moq_net::Error::TimestampMismatch))?;
+			}
+			(None, None) => {}
+			_ => return Err(Error::Net(moq_net::Error::TimestampMismatch)),
+		}
 		let payload = self.key.lock().expect("track key").protect(
 			self.inner.sequence,
 			u64::from(frame),

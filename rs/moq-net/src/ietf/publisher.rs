@@ -61,6 +61,8 @@ struct FetchedGroup {
 	frames: Vec<frame::Frame>,
 	/// The group ended within the range, so every frame it will ever hold was read.
 	complete: bool,
+	/// The track's timescale, or `None` for an untimed track.
+	timescale: Option<Timescale>,
 }
 
 impl FetchPrior {
@@ -117,6 +119,7 @@ async fn read_fetch(
 		first,
 		frames,
 		complete,
+		timescale: group.timescale(),
 	})
 }
 
@@ -673,9 +676,11 @@ where
 			let _ = track.update(subscription);
 			// A Timestamp goes out only when this SUBSCRIBE_OK actually carries TIMESCALE.
 			// Drafts 14-16 never write that property, so their objects stay unstamped.
+			// An untimed track declares none, and its objects carry no Timestamp.
 			let timescale = msg
 				.properties_wanted
 				.then(|| track.info().timescale)
+				.flatten()
 				.filter(|_| ietf::Properties::sends_timescale(self.version));
 
 			// Draft-20 replaced joining FETCH with subscription fills. Older drafts save
@@ -1196,7 +1201,7 @@ where
 		sequence: u64,
 		object: u64,
 		prior: FetchPrior,
-		timestamp: Timestamp,
+		timestamp: Option<Timestamp>,
 		timescale: Option<Timescale>,
 		version: Version,
 	) -> Result<(), Error> {
@@ -1206,6 +1211,8 @@ where
 		let timescale = timescale.filter(|_| ietf::Properties::sends_timescale(version));
 		let properties = match timescale {
 			Some(timescale) => {
+				// Every frame on a timed track is timed (see `track::Info::timescale`).
+				let timestamp = timestamp.ok_or(Error::TimestampMismatch)?;
 				let mut properties = Vec::new();
 				ietf::encode_object_time(
 					&mut Encoder::new(&mut properties, version.into()),
@@ -1359,8 +1366,7 @@ where
 					Err(err) => return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await,
 				};
 
-				// No SUBSCRIBE declared a timescale for this request, so its objects go
-				// out unstamped.
+				// The track's timescale is only known once its group is read, below.
 				(track, start, end, None, false)
 			}
 			FetchType::RelativeJoining {
@@ -1442,6 +1448,15 @@ where
 			Some(Ok(group)) => group,
 			Some(Err(err)) => return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await,
 			None => return Ok(()),
+		};
+
+		// A standalone FETCH keeps each object's Timestamp, in the track's own units, as a
+		// subscriber learned them from SUBSCRIBE_OK. FETCH_OK doesn't declare them yet.
+		let timescale = match joined {
+			true => timescale,
+			false => group
+				.timescale
+				.filter(|_| ietf::Properties::sends_timescale(self.version)),
 		};
 
 		let (end_location, end_of_track) = if joined {
@@ -2601,9 +2616,13 @@ impl<S: crate::transport::poll::Session> TrackServe<S> {
 			let sequence = datagram.sequence;
 			let properties = match self.timescale {
 				Some(timescale) => {
+					// Every datagram on a timed track is timed (see `track::Info::timescale`).
+					let Some(timestamp) = datagram.timestamp else {
+						continue;
+					};
 					let mut properties = Vec::new();
 					let mut w = Encoder::new(&mut properties, self.version.into());
-					if ietf::encode_object_time(&mut w, datagram.timestamp, timescale, self.version).is_err() {
+					if ietf::encode_object_time(&mut w, timestamp, timescale, self.version).is_err() {
 						continue;
 					}
 					Some(properties)
@@ -2930,7 +2949,7 @@ fn buffer_object_info<W: crate::transport::poll::SendStream>(
 	writer: &mut Writer<W, Version>,
 	delta: u64,
 	has_extensions: bool,
-	timestamp: Timestamp,
+	timestamp: Option<Timestamp>,
 	size: u64,
 	timescale: Option<Timescale>,
 	version: Version,
@@ -2938,7 +2957,9 @@ fn buffer_object_info<W: crate::transport::poll::SendStream>(
 	writer.buffer_varint(delta)?;
 
 	if let Some(timescale) = timescale.filter(|_| has_extensions) {
-		// Per-object extension headers carry the frame's presentation timestamp.
+		// Per-object extension headers carry the frame's presentation timestamp, which
+		// every frame on a timed track has (see `track::Info::timescale`).
+		let timestamp = timestamp.ok_or(Error::TimestampMismatch)?;
 		let mut ext = Vec::new();
 		ietf::encode_object_time(
 			&mut Encoder::new(&mut ext, version.into()),
@@ -3249,7 +3270,7 @@ mod group_priority_test {
 		let mut old = track.append_group().unwrap();
 		let mut frame = old
 			.create_frame(frame::Info {
-				timestamp: crate::Timestamp::ZERO,
+				timestamp: Some(crate::Timestamp::ZERO),
 				size: 2,
 			})
 			.unwrap();

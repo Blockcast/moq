@@ -27,8 +27,8 @@ blocks. The quests that gated m0 lines moved under them.
 
 ## Required
 
-- [Untimed model](/quest/m1/untimed-model.md) - a track is all timed or all untimed (`Info.timescale` is optional, frames carry an optional timestamp), and an untimed track reaches every subscriber untimed; no receiver fills in arrival time
 - [One max_age meaning](/quest/m1/cache-max-age.md) - a superseded group goes stale on wall clock since its successor arrived or on media time, whichever is first, in Rust and js/net; fixes the untimed failover stall
+- [Untimed decisions](/quest/m1/untimed-decisions.md) - the maintainer decides whether moq-archive keeps refusing untimed tracks, and whether a malformed FETCH object ends its track
 - [JS untimed model](/quest/m1/js-untimed-model.md) - the untimed model in @moq/net
 - [CMAF frame timestamp](/quest/m1/cmaf-frame-timestamp.md) - CMAF decoders time samples from the moq-lite frame timestamp, using `tfdt` only within the fragment
 - [Shared import clock](/quest/m1/shared-clock.md) - an importer joining a clock already in use offsets its PTS instead of moving it, so captures and imports share one timeline

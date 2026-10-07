@@ -358,7 +358,9 @@ Every track gets its own timeline, stored in spans cut at group boundaries
 between 2s and 10s. The catalog and every text, JSON, and binary track are
 sparse data, so each of their groups is stored as soon as it finishes, and a
 group that never closes is stored in pieces as it grows. It refuses a rendition served
-from another broadcast, and one that returns after the catalog dropped it. The
+from another broadcast, one that returns after the catalog dropped it, and an
+untimed track, which has no timestamps to record (any track over moq-lite before
+05, or moq-transport without `TIMESCALE`, such as drafts 14–16). The
 stage ends once the broadcast does. A store URL that already holds a
 recording is continued: each track resumes after its newest stored span. `--retention 1h` keeps only the last hour (a DVR),
 deleting expired objects, and timeline objects no longer needed to recover it,

@@ -373,7 +373,7 @@ fn datagram_roundtrip() {
 	match recv_datagram(&mut pair.consumer) {
 		Event::Datagram(d) => {
 			assert_eq!(d.sequence, 0);
-			assert_eq!(d.timestamp, ms(5));
+			assert_eq!(d.timestamp, Some(ms(5)));
 			assert_eq!(&d.plaintext[..], b"opus");
 		}
 		other => panic!("{other:?}"),

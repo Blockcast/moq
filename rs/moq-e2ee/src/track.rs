@@ -65,7 +65,11 @@ impl Producer {
 	/// # Errors
 	///
 	/// [`Error::Identity`], [`Error::Exhausted`], [`Error::Oversize`], or a net write error.
-	pub fn append_datagram(&mut self, timestamp: moq_net::Timestamp, plaintext: &[u8]) -> Result<u64> {
+	pub fn append_datagram(
+		&mut self,
+		timestamp: impl Into<Option<moq_net::Timestamp>>,
+		plaintext: &[u8],
+	) -> Result<u64> {
 		let sequence = self.next;
 		self.insert_datagram(sequence, timestamp, plaintext)?;
 		Ok(sequence)
@@ -81,7 +85,12 @@ impl Producer {
 	///
 	/// [`Error::Reuse`] if `sequence` was already allocated, [`Error::Identity`],
 	/// [`Error::Exhausted`], [`Error::Oversize`], or a net write error.
-	pub fn insert_datagram(&mut self, sequence: u64, timestamp: moq_net::Timestamp, plaintext: &[u8]) -> Result<()> {
+	pub fn insert_datagram(
+		&mut self,
+		sequence: u64,
+		timestamp: impl Into<Option<moq_net::Timestamp>>,
+		plaintext: &[u8],
+	) -> Result<()> {
 		self.reserve(sequence)?;
 		let payload = self
 			.datagram_key
