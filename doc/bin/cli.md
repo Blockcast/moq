@@ -144,6 +144,12 @@ can name: a family 0 head, a family 1 head with the Vorbis mapping, or mono or
 stereo when the track has no OpusHead. Any other head is refused rather than
 written with a guessed channel code.
 
+An AAC layout without a channelConfiguration, such as quad, rides in a program
+config element. `export ts` repeats it in the first frame after each PAT/PMT, so a
+receiver tuning in mid-stream can decode. ffmpeg writes it in the first frame
+only, so `import ts` joining an ffmpeg source mid-stream publishes the rest of
+the program without that AAC track, and adds the track if an element arrives.
+
 A constant-rate MPEG-TS source records its multiplex rate in the catalog
 (`mpegts.muxRate`, measured off the PCR clock, null stuffing included), and
 `export ts` pads its output with null packets back to that rate so an IRD or
