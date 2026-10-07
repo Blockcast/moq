@@ -1082,20 +1082,14 @@ export class Subscriber {
 
 		try {
 			// FIRST_OBJECT clear says this stream starts partway through the group, which the
-			// draft lets a publisher do to answer a filter. Nothing above here can use it: the
-			// objects that would arrive are not decodable without the missing head, and a group
-			// is the unit an application resyncs on. Drop it and pick up at the next group, the
-			// same degradation as a publisher that no longer holds the head.
+			// draft lets a publisher do to answer a filter. The objects are delivered from the
+			// stream's true first Object ID rather than dropped: a mapping that rides in the
+			// ids (MPEG MMTP, an AL-FEC repair flow numbered against its source) is still
+			// readable without the head, and the consumer sees the ids it actually got.
 			//
-			// This only saves reading a stream we would throw away. The bit is the publisher's
-			// claim, so what is enforced is the object ids themselves: `Frame.decode` holds a
-			// stream that claims its head to starting at object 0, whatever the header said and
-			// on the drafts that have no such bit to read.
-			if (!group.flags.firstObject) {
-				console.debug(`dropping a group with no head: alias=${group.trackAlias} group=${group.groupId}`);
-				stream.stop(new Error("a group must start at object 0"));
-				return;
-			}
+			// The bit remains the publisher's claim, and what is enforced is the object ids
+			// themselves: `Frame.decode` still holds a stream that *claims* its head to
+			// starting at object 0, which is a contradiction rather than a gap.
 
 			// The alias binds after SUBSCRIBE_OK commits the track property; an omitted
 			// header priority inherits it (draft-21 section 10.4).

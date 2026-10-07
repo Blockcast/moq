@@ -987,23 +987,27 @@ test("early group waits for SUBSCRIBE_OK priority before track acceptance", asyn
  * frame off as the keyframe it opens with, so the group is dropped and the track resumes at
  * the next one. Our own publisher never opens such a stream; a draft-20 peer may.
  */
-test("a group served from partway through is dropped", async () => {
+/**
+ * FIRST_OBJECT clear is a publisher answering a filter from partway through a group. The
+ * objects are delivered from the stream's true first Object ID: a mapping that rides in the
+ * ids survives the missing head, and renumbering to zero would destroy it. The group is
+ * delivered rather than skipped in favour of the next one.
+ */
+test("a group served from partway through is delivered from its first object", async () => {
 	const { subscriber, track } = await subscribeTrack();
 
-	// FIRST_OBJECT clear, and the first object's delta is its absolute id.
+	// FIRST_OBJECT clear, and the first object's delta is its absolute id: 5, then 6, 7.
 	const flags = groupFlags(false);
 	const header = new GroupMessage({ trackAlias: ALIAS, groupId: 3, subGroupId: 0, publisherPriority: 0, flags });
 	await subscriber.handleGroup(header, new Reader(undefined, encodeObjects([5, 0, 0]), VERSION));
 
-	// The next group is served whole, and it is the one the track delivers.
-	const whole = groupFlags(true);
-	await subscriber.handleGroup(
-		new GroupMessage({ trackAlias: ALIAS, groupId: 4, subGroupId: 0, publisherPriority: 0, flags: whole }),
-		new Reader(undefined, encodeObjects([0, 0]), VERSION),
-	);
-
 	const group = await track.ordered().nextGroup();
-	expect(group?.sequence).toBe(4);
+	expect(group?.sequence).toBe(3);
+	if (!group) throw new Error("the headless group was dropped");
+
+	const received = await readObjects(group, 3);
+	expect(received.map((f) => f.object?.id)).toEqual([5, 6, 7]);
+	expect(received.map((f) => new TextDecoder().decode(f.payload))).toEqual(["object 5", "object 0", "object 0"]);
 
 	track.close();
 });
@@ -1371,3 +1375,4 @@ test("object properties reach the consumer, both parities and unknown ids", asyn
 
 	track.close();
 });
+
