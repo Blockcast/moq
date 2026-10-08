@@ -192,18 +192,12 @@ In addition to the WebCodecs fields, each rendition MAY carry the common renditi
 type VideoDecoderConfigExtensions = {
   "displayAspectWidth": number | undefined,
   "displayAspectHeight": number | undefined,
-  "stalled": boolean | undefined,
 }
 ~~~
 
 `displayAspectWidth` and `displayAspectHeight` give the display aspect ratio of the media, stretching or shrinking the coded pixels.
 A consumer that understands neither field MUST assume square pixels, a 1:1 ratio.
 Both MUST be present together; a consumer that sees only one MUST ignore it.
-
-`stalled` indicates that the publisher recommends temporarily avoiding the rendition.
-The track remains available when `stalled` is true.
-A consumer SHOULD select an unstalled rendition when it supports one, but MAY select a stalled rendition when no unstalled rendition is suitable.
-If absent, `stalled` defaults to false.
 
 For example:
 
@@ -217,7 +211,7 @@ For example:
       "codedWidth": 1280,
       "codedHeight": 720,
       "bitrate": 6000000,
-      "stalled": true,
+      "enabled": false,
       "framerate": 30.0,
       "jitter": 34
     },
@@ -308,7 +302,7 @@ type TextConfig = {
   "format": "vtt" | "ttml" | "utf8" | string,
   "role": "subtitle" | "caption" | string | undefined,
   "lang": string | undefined,
-  // plus the common rendition fields
+  // plus the common rendition fields, except `enabled`
 }
 ~~~
 
@@ -489,6 +483,7 @@ type CommonExtensions = {
   "container": Container,
   "jitter": number | undefined,
   "delay": number | undefined,
+  "enabled": boolean | undefined,
 }
 ~~~
 
@@ -552,6 +547,14 @@ A consumer SHOULD hold at least the largest `delay` plus `jitter` among the rend
 A consumer MUST NOT subtract one rendition's `delay` from another's: each is a maximum over the life of the stream, so two values need not share an origin.
 
 For example, a video encoder that flushes 200 milliseconds after the audio encoder for the same media time advertises a video `delay` of 200 and no audio `delay`.
+
+### enabled {#field-enabled}
+The `enabled` field says whether a consumer may select an audio or video rendition; a text rendition does not carry it.
+When `enabled` is false, no frames are coming, and a consumer MUST NOT select the rendition.
+If absent, `enabled` defaults to true; a publisher SHOULD only write it when false.
+
+Earlier versions defined a video `stalled` field instead.
+A publisher MUST NOT write `stalled`, and a consumer MUST ignore it.
 
 # Container {#container}
 Audio, video, and text tracks use a container to encapsulate the media payload.
@@ -1065,6 +1068,7 @@ This document has no IANA actions.
 ## moq-hang-04
 {:numbered="false"}
 
+- Replaced the video `stalled` field with an optional `enabled` field on audio and video renditions. A consumer MUST NOT select a disabled rendition and ignores `stalled`. A consumer that predates `enabled` keeps selecting a disabled rendition.
 - Replaced the broadcast's one aligned timeline with one timeline per track: the catalog `archive` entry's `track` became a `timelines` map from each indexed track, the catalog included, to its timeline track.
 - Replaced the segment record with a per-track record: `sequence`, `pts`, `duration`, and a `start`/`end` range of group and frame positions, dropping cross-track pacing and completeness.
 - One cutting rule for every track: a record ends at the first group boundary past a minimum (2 seconds RECOMMENDED, zero for sparse data such as a catalog) and splits a group between frames at a maximum (10 seconds RECOMMENDED), so a group that never closes is indexed as it grows and `durationMax` bounds every record.

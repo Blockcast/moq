@@ -192,7 +192,7 @@ fn normalize_video(config: &VideoConfig) -> VideoConfig {
 	config.jitter = None;
 	config.delay = None;
 	config.label = None;
-	config.stalled = None;
+	config.enabled = true;
 	// Publishers estimate it and republish once it settles. The rendition keeps the fMP4
 	// timescale it was built with, and the framerate is refreshed in place like the bitrate.
 	config.framerate = None;
@@ -206,6 +206,7 @@ fn normalize_audio(config: &AudioConfig) -> AudioConfig {
 	config.jitter = None;
 	config.delay = None;
 	config.label = None;
+	config.enabled = true;
 	config
 }
 
