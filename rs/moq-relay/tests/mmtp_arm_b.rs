@@ -33,6 +33,14 @@
 //! below therefore connects both ends, subscribes every flow, and only then
 //! publishes.
 
+// `test_relay()` exists only under `test-support`, so this file must compile to
+// nothing without it. The workspace-wide `just rs test` gets the feature by
+// unification (moq-cli dev-depends on moq-relay with it enabled), but the
+// scoped `uring-check` lane builds `-p moq-uring -p moq-relay --all-targets`,
+// where nothing pulls it in and the call would not resolve. Gating here keeps
+// the fix inside this file: arm B's diff against upstream stays zero.
+#![cfg(feature = "test-support")]
+
 use std::collections::BTreeMap;
 use std::time::Duration;
 
