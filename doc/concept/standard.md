@@ -31,7 +31,7 @@ subset drops. What a peer actually observes against this implementation:
 - **Strict SETUP and parameters.** Repeated unknown `SETUP` options, GREASE included, are accepted if well-formed; a repeated known option is rejected. On draft 17 and later, a `GROUP_ORDER` other than Ascending (1) or Descending (2) closes the session.
 - **One credential per session**, carried in `SETUP` and forwarded to the [auth server](/bin/relay/auth#the-contract) unverified. A token attached to an individual request is ignored. An alias reference, a second token, or a parameter the negotiated draft does not define closes the session.
 - **Refused, not fatal.** A legal request this stack does not serve is rejected on its own and the session stays up: `FORWARD=0`, range filters, `TRACK_STATUS`, `SUBSCRIBE_TRACKS`, and the fetch forms above. On draft 19 and later, and in Rust on drafts 14 through 16, a subscription update may change only priority; any other update ends that subscription.
-- **Datagrams** are a single normal object at object 0, forwarded without renumbering. Anything else is dropped. JavaScript does not carry datagrams on moq-transport.
+- **Datagrams** are a single normal object at object 0, forwarded without renumbering. Anything else is dropped, and a malformed one closes the session. Rust and JavaScript both carry them on every draft.
 - **Priority.** Higher is served first. The IETF default of 128 is this stack's 127, and a track that never sets one is 127.
 - **Size.** An object extension block larger than 64 KiB ends that subgroup stream. The session stays up. This cap is ours, not the draft's.
 
