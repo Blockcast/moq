@@ -693,3 +693,49 @@ async fn arm_b_fetch_group_under_contiguous_object_ids() {
 
 	h.shutdown().await;
 }
+
+/// The scope of every measurement above, pinned rather than assumed.
+///
+/// Both ends take `Versions::default()` == `Versions::all()`, whose preference
+/// order (`rs/moq-net/src/version.rs`, `ALL`) puts every `moq-lite` draft ahead
+/// of every IETF draft. So this harness negotiates **moq-lite**, and the IETF
+/// `moq-transport` path is never exercised.
+///
+/// That is load-bearing for how far `arm_b_fetch_group_under_contiguous_object_ids`
+/// transfers. On unmodified upstream `moq-net`, `ietf::publisher::run_fetch_stream`
+/// opens with
+///
+/// ```text
+/// // Draft-20 moved the range into LOCATION_FILTER, which decodes to
+/// // `FetchType::Filtered` but is not served yet.
+/// if Filter::is_draft20(self.version) { return self.reject_fetch(..) }
+/// ```
+///
+/// so at IETF draft-20 -- the target of the BLO-40652 cut -- there is no FETCH
+/// at all, and arm B's FETCH result does not carry over to it. The contiguous
+/// object-ID argument it supports is draft-independent and stands; the "relay
+/// serves it from cache" half is measured here only on moq-lite. See BLO-41181,
+/// which fills that gap upstream.
+///
+/// This asserts the protocol family, not the exact draft: a lite bump is a
+/// routine upstream change, but silently sliding onto the IETF path would
+/// change what every count above means.
+#[tokio::test]
+async fn arm_b_measurements_are_taken_on_a_moq_lite_session() {
+	let (h, _producers) = harness(&["video"]).await;
+
+	for (label, version) in [
+		("publisher", h._pub_connection.version()),
+		("subscriber", h._sub_connection.version()),
+	] {
+		let version = version.unwrap_or_else(|| panic!("{label} session reported no negotiated version"));
+		println!("[arm-b/version] {label}={version:?}");
+		assert!(
+			matches!(version, moq_net::Version::Lite(_)),
+			"{label} negotiated {version:?}; every count in this file is scoped to moq-lite, \
+			 and an IETF session would additionally refuse FETCH at draft-20"
+		);
+	}
+
+	h.shutdown().await;
+}
