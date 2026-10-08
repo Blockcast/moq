@@ -22,3 +22,25 @@ test("subscriber priority round trips", () => {
 test("an unset track priority is the draft's usual publisher priority", () => {
 	expect(toWire(infoDefaults().priority)).toBe(128);
 });
+
+// draft-ramadan-moq-fec section 10 bands, on the IETF wire's lower-first scale:
+// Source Media is 64..=191 and AL-FEC repair is 192..=255, ascending by repair
+// layer. The model ranks higher-first, so a repair priority that is COPIED here
+// rather than converted inverts both orderings at once: repair preempts the
+// source it repairs, and the highest repair layer outranks layer 0.
+test("converted repair bands yield to source and order by layer", () => {
+	// Both endpoints of the repair band.
+	expect(fromWire(192)).toBe(63);
+	expect(fromWire(255)).toBe(0);
+	// Both endpoints of the source media band.
+	expect(fromWire(64)).toBe(191);
+	expect(fromWire(191)).toBe(64);
+
+	// The adjacent boundary is the tightest case: the LEAST urgent source must
+	// still preempt the MOST urgent repair, or the bands overlap.
+	expect(fromWire(191)).toBeGreaterThan(fromWire(192));
+
+	// Repair layers ascend on the wire, so they must descend in the model.
+	expect(fromWire(240)).toBeGreaterThan(fromWire(241));
+	expect(fromWire(128)).toBeGreaterThan(fromWire(240));
+});
