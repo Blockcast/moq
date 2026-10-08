@@ -1681,3 +1681,42 @@ test("an object datagram is a datagram group", async () => {
 	).toBeInstanceOf(ProtocolViolation);
 	track.close();
 });
+
+/**
+ * The End-of-Group header bit and the terminal END_OF_GROUP object are two independent ways
+ * to state where a group ends, and the draft lets a publisher use both: the bit says this
+ * stream carries the group to its end, the object says which object that end is at.
+ *
+ * Accepting the object only when the bit was clear left a publisher that stated the end
+ * twice -- correctly, both times -- with the whole group stream torn down by
+ * `Unsupported object status: 3`. The test is at the subscriber rather than the codec
+ * because the loss is a group, not a parse: `Frame.decode` throwing propagates out of
+ * `handleGroup`'s read loop and the catch closes the group with that error, so the objects
+ * that already arrived on the stream go with it.
+ */
+test("a group whose header declares the end may also send END_OF_GROUP", async () => {
+	const { subscriber, track } = await subscribeTrack();
+
+	// groupFlags already sets hasEnd, which is the case under test. One real object, then an
+	// END_OF_GROUP: delta 0, zero payload length, status 0x03.
+	await subscriber.handleGroup(
+		new GroupMessage({
+			trackAlias: ALIAS,
+			groupId: 0,
+			subGroupId: 0,
+			publisherPriority: 0,
+			flags: groupFlags(true),
+		}),
+		new Reader(undefined, new Uint8Array([...encodeObjects([0]), 0, 0, 0x03]), VERSION),
+	);
+
+	const group = await track.ordered().nextGroup();
+	expect((await group?.readFrame())?.payload).toEqual(new TextEncoder().encode("object 0"));
+
+	// The group must close cleanly rather than merely stop producing frames: a torn-down
+	// group also stops producing frames, so asserting "nothing more arrives" would pass on
+	// the bug.
+	expect(await group?.readFrame()).toBeUndefined();
+	expect(group?.closed.peek() ?? null).toBeNull();
+	track.close();
+});

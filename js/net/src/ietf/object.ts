@@ -371,6 +371,19 @@ export class Frame {
 		if (flags.hasEnd) {
 			// Empty frame
 			if (status === 0) return new Frame({ payload: new Uint8Array(0), timestamp });
+
+			// A publisher may both set the End-of-Group header bit and terminate the subgroup
+			// with an explicit END_OF_GROUP object. Draft-20 makes neither conditional on the
+			// other, so the two are legal together. Without this branch that combination
+			// matches nothing below and throws, killing the whole group stream over a
+			// redundant -- not contradictory -- end marker.
+			//
+			// The payload-less Frame is what ends the group: the subscriber breaks its read
+			// loop on `frame.payload === undefined`, the same path the `else` branch below
+			// already takes for a header that does not mark the end. Note this stays distinct
+			// from the `status === 0` case above, which is an *empty* frame rather than a
+			// group end.
+			if (status === GROUP_END) return new Frame();
 		} else if (status === 0 || status === GROUP_END) {
 			// TODO status === 0 should be an empty frame, but moq-rs seems to be sending it incorrectly on group end.
 			return new Frame();
