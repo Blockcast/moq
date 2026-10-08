@@ -188,13 +188,11 @@ async fn harness(tracks: &[&str]) -> (Harness, Vec<moq_net::track::Producer>) {
 		.map(|name| broadcast.create_track(*name, None).expect("create track"))
 		.collect();
 
-	let (pub_client, pub_connection) = tokio::time::timeout(
-		TIMEOUT,
-		connect_once(client().with_publisher(&pub_origin), url.clone()),
-	)
-	.await
-	.expect("publisher connect timeout")
-	.expect("publisher connect");
+	let (pub_client, pub_connection) =
+		tokio::time::timeout(TIMEOUT, connect_once(client().with_publisher(&pub_origin), url.clone()))
+			.await
+			.expect("publisher connect timeout")
+			.expect("publisher connect");
 
 	// ── subscriber ──────────────────────────────────────────────────
 	let sub_origin = moq_tokio::origin::spawn();
@@ -658,8 +656,10 @@ async fn arm_b_fetch_group_under_contiguous_object_ids() {
 
 	// FETCH block 1 by group sequence, not by subscribing and waiting.
 	let track = h.consumer.track("video").expect("track announced");
-	let mut fetched = Flow::default();
-	fetched.sent = 4;
+	let mut fetched = Flow {
+		sent: 4,
+		..Default::default()
+	};
 	let mut group = tokio::time::timeout(TIMEOUT, track.fetch_group(1, None))
 		.await
 		.expect("fetch timeout")
