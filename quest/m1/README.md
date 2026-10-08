@@ -38,7 +38,6 @@ blocks. The quests that gated m0 lines moved under them.
 - [JS publishing never invents a timestamp](/quest/m1/js-publish-timestamp.md) - the same in @moq/json, @moq/flate, and @moq/net
 - [Hard fork](/quest/m1/quic/fork/README.md) - quinn hard-forked in-tree as `moq-quic`, ranked ahead of perf; the rest of the QUIC line follows it
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - any node routes toward a broadcast's origin over CDN and P2P links alike, with per-origin routes and path-less announces
-- [One route cost](/quest/m1/route-cost.md) - Warm and Cold collapse to one static route cost
 - [Track tail interop](/quest/m1/track-tail-interop.md) - a Rust publisher ending a track with a group in flight is read to its end by the JS subscriber, and the reverse, in `just test interop`
 - [moq-transport deviations](/quest/m1/ietf-deviations-doc.md) - `standard.md` lists the deviations Fastly's interop report flagged (one publisher per path, dropped object properties, OK before an old lite source answers) with their reasons
 - [Flat questlines](/quest/m1/quest-flat-lines.md) - moq pins the current quest CLI, lands its questline branches on main, and retires them
