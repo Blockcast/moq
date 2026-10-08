@@ -51,13 +51,16 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 // encodes its optional field fixed-width (see `vectors/fec-source-info`).
 //
 //     object_id_delta        u8      1 == contiguous with the previous object
-//     sbn                    u32 BE  \ FEC Source Info, the bytes that today
-//     esi                    u32 BE  / live in MoQT object extension 0x11
+//     sbn                    u32 BE  block identity, so a repair object on a
+//     esi                    u32 BE  second track still names what it repairs
 //     media                  bytes
 //
-// 9 bytes. The 12-byte FEC Source Info variant (with Original Object Length)
-// would make it 13; see the report for why the optional-field discrimination is
-// the one thing that does NOT survive the move for free.
+// 9 bytes. This is arm B's own object framing, NOT the current FEC Source Info:
+// since Blockcast/libmmt#516 (BLO-40702) extension 0x11 carries `SS_ID` only,
+// 4 bytes fixed, having dropped SBN, ESI and the optional Original Object
+// Length. The optional-field discrimination that earlier notes called the one
+// thing not surviving the move for free no longer exists to move. Whether any
+// of this moves into a payload prefix is gated on the pricing row BLO-41725.
 const PREFIX_LEN: usize = 9;
 
 fn encode(delta: u8, sbn: u32, esi: u32, media: &[u8]) -> Vec<u8> {
