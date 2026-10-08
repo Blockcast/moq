@@ -30,6 +30,7 @@ import * as Cluster from "./cluster.ts";
 import { ObjectDatagram } from "./datagram.ts";
 import { requestReason, toRequestCode } from "./error.ts";
 import { decodeObjectTime, Frame, type Group as GroupMessage, hasFirstObjectBit, ObjectIdGap } from "./object.ts";
+import type { MessageLocation } from "./parameters.ts";
 import { fromWire, toWire } from "./priority.ts";
 import { type Publish, PublishDone, PublishError, publishDoneClean } from "./publish.ts";
 import {
@@ -62,6 +63,31 @@ const SUBSCRIBE_OK_TIMEOUT_MS = 10_000;
 // candidate outranks it, while the route stays selectable as the last path. Matches Rust
 // Cost::DRAIN: cost is the whole mechanism, not a separate state.
 const DRAIN_COST: Cost = 2n ** 62n - 1n;
+/**
+ * SUBSCRIBE_OK's Largest Location, as the track's `largest` Info.
+ *
+ * The draft requires it once the publisher has content, and it is the only thing that can
+ * answer "where is the live edge" before the first group arrives: the subscriber's own
+ * `Subscriber.largest()` is derived from what it has buffered, so it is `undefined` until then.
+ *
+ * Both fields are u62 on the wire and the API carries them as numbers. A publisher past
+ * 2^53 groups is reporting a position no sequence number here can hold, so drop the field
+ * rather than surface a rounded one: `undefined` says "not stated", which is a value the
+ * caller already handles, and a silently wrong anchor is not.
+ */
+function largestLocation(largest: MessageLocation | undefined): track.PublishedLocation | undefined {
+	if (largest === undefined) return undefined;
+
+	const group = Number(largest.groupId);
+	const object = Number(largest.objectId);
+	if (!Number.isSafeInteger(group) || !Number.isSafeInteger(object)) {
+		console.debug(
+			`ignoring a largest location past the safe integer range: ${largest.groupId}/${largest.objectId}`,
+		);
+		return undefined;
+	}
+	return { group, object };
+}
 
 // A live subscription, as the track alias its data streams name resolves to.
 type Subscription = {
@@ -869,6 +895,7 @@ export class Subscriber {
 			timescale: ok.properties.timescale,
 			priority: fromWire(ok.properties.priority ?? 128),
 			maxAge: maxCacheDuration === undefined ? undefined : Milli(Number(maxCacheDuration)),
+			publisherLargest: largestLocation(ok.largest),
 		});
 
 		try {

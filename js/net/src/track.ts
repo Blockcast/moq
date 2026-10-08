@@ -50,11 +50,25 @@ export interface Location {
 }
 
 /**
+ * A position the publisher states it has published to, as a group and an Object ID.
+ *
+ * Deliberately not a {@link Location}: `object` is an Object ID, not a frame index. A
+ * publisher may number its objects with gaps, so this does not count what precedes it.
+ */
+export interface PublishedLocation {
+	/** The group's sequence number within the track. */
+	group: number;
+	/** The Object ID within that group. */
+	object: number;
+}
+
+/**
  * A track's immutable publisher properties, fixed for the lifetime of the track.
  *
  * A producer declares these once (via {@link Request.accept} or
  * {@link Producer.accept}); a consumer awaits them via {@link Subscriber.info}
- * (resolved from the wire TRACK_INFO on lite-05+). They map 1:1 onto TRACK_INFO.
+ * (resolved from the wire TRACK_INFO on lite-05+). They map 1:1 onto TRACK_INFO, except
+ * {@link Info.publisherLargest}, which only the moq-transport path carries.
  */
 export interface Info {
 	/**
@@ -80,6 +94,26 @@ export interface Info {
 	maxAge?: Milli;
 	/** Tie-break priority between subscriptions of equal subscriber priority (`0..=255`, higher first). Defaults to `127`. */
 	priority: number;
+	/**
+	 * Where the publisher had published to **at the moment it accepted this subscription**,
+	 * or `undefined` when it did not say.
+	 *
+	 * A snapshot, not a live edge: it is fixed at accept time and is never updated, which is
+	 * what lets it sit beside the other accept-time properties here. Read it as "where the
+	 * track was when I subscribed", and not as "where the track is now" — the publisher will
+	 * have moved past it by the time anything reads this.
+	 *
+	 * **Not {@link Subscriber.largest}, and deliberately not named the same.** That one is the
+	 * newest frame in *this subscriber's own buffer*: it reads `undefined` until something
+	 * arrives and again once the newest group is evicted. A `NEXT_GROUP_START` anchor needs
+	 * an answer in exactly the window where that returns `undefined`, so a caller who reached
+	 * for the wrong one would anchor against nothing and silently fall back.
+	 *
+	 * Carried on the moq-transport path from SUBSCRIBE_OK's Largest Location (draft-20
+	 * 8.4.2). The moq-lite path has no equivalent wire field and leaves it unset — so unlike
+	 * the fields above, this one is absent on a lite session rather than defaulted.
+	 */
+	publisherLargest?: PublishedLocation;
 }
 
 // Normalize a duration for the wire, which carries it as an unsigned varint.
@@ -106,12 +140,26 @@ function priorityByte(value: number): number {
 	return value;
 }
 
+/** Validate a publisher-stated Location, which arrives off the wire as two varints. */
+function publishedLocation({ group, object }: PublishedLocation): PublishedLocation {
+	for (const [name, value] of [
+		["group", group],
+		["object", object],
+	] as const) {
+		if (!Number.isSafeInteger(value) || value < 0) {
+			throw new RangeError(`publisherLargest ${name} must be a non-negative safe integer: ${value}`);
+		}
+	}
+	return { group, object };
+}
+
 /** Fill in any unset {@link Info} fields with their defaults. */
 export function infoDefaults(info: Partial<Info> = {}): Info {
 	return {
 		timescale: info.timescale == null ? undefined : Timescale(info.timescale),
 		maxAge: info.maxAge === undefined ? undefined : wireMillis("maxAge", info.maxAge),
 		priority: priorityByte(info.priority ?? DEFAULT_PRIORITY),
+		publisherLargest: info.publisherLargest === undefined ? undefined : publishedLocation(info.publisherLargest),
 	};
 }
 

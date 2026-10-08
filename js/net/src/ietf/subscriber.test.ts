@@ -946,9 +946,11 @@ function encodeObjects(deltas: number[]): Uint8Array {
 async function subscribeTrack({
 	version = VERSION,
 	properties = {},
+	largest,
 }: {
 	version?: IetfVersion;
 	properties?: Properties;
+	largest?: { groupId: bigint; objectId: bigint };
 } = {}): Promise<{ subscriber: Subscriber; track: track.Subscriber }> {
 	const pair = createMockTransportPair(version === Version.DRAFT_16 ? ALPN.DRAFT_16 : ALPN.DRAFT_19);
 	const session = new NativeSession(pair.server, version, true);
@@ -964,7 +966,10 @@ async function subscribeTrack({
 	expect(await peer.reader.u53()).toBe(Subscribe.id);
 	const request = await Subscribe.decode(peer.reader, version);
 	await peer.writer.u53(SubscribeOk.id);
-	await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS, properties }).encode(peer.writer, version);
+	await new SubscribeOk({ requestId: request.requestId, trackAlias: ALIAS, largest, properties }).encode(
+		peer.writer,
+		version,
+	);
 
 	return { subscriber, track };
 }
@@ -1679,5 +1684,28 @@ test("an object datagram is a datagram group", async () => {
 			(err: unknown) => err,
 		),
 	).toBeInstanceOf(ProtocolViolation);
+	track.close();
+});
+
+/**
+ * SUBSCRIBE_OK's Largest Location is the only thing that can answer "where is the publisher's
+ * live edge" before the first group arrives. Asserting `largest()` is still undefined in the
+ * same test is the point: the two are different values, and this is exactly the window where
+ * the subscriber's own buffered edge cannot answer.
+ */
+test("the publisher's largest location reaches the consumer before the first group", async () => {
+	const { track } = await subscribeTrack({ largest: { groupId: 42n, objectId: 7n } });
+
+	expect((await track.info()).publisherLargest).toEqual({ group: 42, object: 7 });
+	// Nothing has arrived, so the subscriber's own buffered edge still cannot answer this.
+	expect(track.largest()).toBeUndefined();
+
+	track.close();
+});
+
+/** A publisher with no content omits the field, and "not stated" stays distinguishable. */
+test("a SUBSCRIBE_OK with no largest location leaves it unset", async () => {
+	const { track } = await subscribeTrack();
+	expect((await track.info()).publisherLargest).toBeUndefined();
 	track.close();
 });
