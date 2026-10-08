@@ -523,9 +523,16 @@ async fn arm_b_subscriptions_starting_at_different_groups() {
 	);
 
 	// The receiver gets every source block, and repair only for the blocks whose
-	// repair subscription had started. Blocks below the repair floor are
-	// delivered unprotected rather than lost -- the failure mode is degraded
-	// protection, not a stall.
+	// repair subscription had started. Blocks below that floor are delivered
+	// WITHOUT repair, and the receiver must say so: counting them as covered
+	// claims protection that does not exist, and the lie only surfaces when a
+	// symbol goes missing and nothing can recover it.
+	//
+	// The refusal is libmmt's, not this harness's -- `mmt_fec::RepairJoin`
+	// reports 0 repair symbols below the repair track's first block and names
+	// the unprotected blocks to the host (BLO-41723). What is asserted here is
+	// the transport fact that rule is fed: which groups each flow actually
+	// delivered.
 	assert_eq!(src_groups, vec![0, 1, 2, 3], "source delivered every block");
 	assert_eq!(rep_groups, vec![2, 3], "repair floored at its start group");
 	assert_eq!(aligned, vec![2, 3], "blocks with both flows present");
