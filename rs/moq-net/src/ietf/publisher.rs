@@ -1409,11 +1409,24 @@ where
 				};
 
 				// The filter resolves against the live edge, which a lazy handle does not
-				// carry until the producer has accepted the track. A SUBSCRIBE gets that
-				// for free by subscribing first; a FETCH has to ask.
-				let largest = match track.query().await {
-					Ok(_) => live_edge(&track).largest,
-					Err(err) => return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await,
+				// carry until a route attaches: `query` resolves the track's Info, which
+				// carries no position, so on a relay's copy the edge would still read from
+				// the local cache — absent, or stale enough to resolve to the wrong group.
+				// A SUBSCRIBE gets the edge for free by subscribing first; a FETCH names no
+				// subscription, so it opens one purely to attach the route and drops it
+				// before serving. Same order as the SUBSCRIBE path above.
+				let largest = {
+					let mut subscription = match track.subscribe(serving_subscription(msg.subscriber_priority)).await {
+						Ok(subscription) => subscription,
+						Err(err) => return self.reject_fetch(stream, msg.request_id, &err, &err.to_string()).await,
+					};
+
+					// A relay's copy that went idle cannot say where its live edge is until
+					// its route answers again; answering from its cache would advertise a
+					// stale one.
+					kio::wait(|waiter| subscription.poll_live(waiter)).await;
+
+					live_edge(&track).largest
 				};
 
 				// A FETCH names no subscription to inherit from, and its absent filter
@@ -1457,9 +1470,12 @@ where
 					},
 					None => match sequence.checked_add(1) {
 						Some(group) => Location { group, object: 0 },
+						// Not an empty range: the whole of the last representable group was
+						// asked for and its exclusive end cannot be named. Say so, so the
+						// two refusals stay apart in a log.
 						None => {
 							return self
-								.reject_fetch(stream, msg.request_id, &Error::InvalidRange, "empty range")
+								.reject_fetch(stream, msg.request_id, &Error::InvalidRange, "end group overflows")
 								.await;
 						}
 					},
@@ -4857,6 +4873,47 @@ mod serve_tests {
 			let buf = filtered_fetch(&h, Filter::NextObject).await;
 			// InvalidRange, not Unsupported: the range is empty, not unservable.
 			assert_eq!(fetch_refusal(buf, version), 0x11, "{version}");
+		}
+	}
+
+	/// A relay's copy that went idle has no readable live edge until its route answers.
+	/// The track's Info resolves regardless — it carries a timescale, never a position —
+	/// so resolving the filter off that alone reads the local cache, which on a copy
+	/// nothing is subscribed to is empty: every filter shape is then refused as an empty
+	/// range while the content exists upstream. The edge snapshot has to wait for the
+	/// route, exactly as the SUBSCRIBE path does.
+	#[moq_net_sim::test]
+	async fn a_draft20_fetch_waits_for_a_routed_live_edge() {
+		for version in FILTERED_FETCH_DRAFTS {
+			let h = serve(version);
+
+			// The upstream subscription ended with this copy still held and nothing
+			// cached. A second handle on the same track stands in for the route, since
+			// the fetch below borrows the harness.
+			let mut route = h.track.clone();
+			route.set_idle();
+			settle().await;
+
+			// The route answers only after the fetch is already resolving its filter.
+			moq_net_sim::spawn(async move {
+				settle().await;
+				for sequence in 0..2 {
+					let mut group = route.create_group(group::Info { sequence }).unwrap();
+					for object in 0..2 {
+						group
+							.write_frame(timestamp(), format!("{sequence}-{object}").into_bytes())
+							.unwrap();
+					}
+					group.finish().unwrap();
+				}
+				route.set_live(Some(track::Position { group: 1, frame: 1 }));
+			});
+
+			// Refused `InvalidRange` without the wait, since the cache names no edge.
+			let (ok, objects) = fetch_answer(filtered_fetch(&h, Filter::Relative(1)).await, version);
+			// Capped at the Largest Object the route reported, not the group boundary.
+			assert_eq!(ok.end_location, Location { group: 1, object: 2 }, "{version}");
+			assert_eq!(objects, pairs([1]), "{version}");
 		}
 	}
 
