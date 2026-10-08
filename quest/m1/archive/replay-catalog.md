@@ -46,3 +46,7 @@ serve example.
 
 Cover a DVR recording whose catalog outlived its first video segment, and fail
 loudly on a recording with no catalog.
+
+## Required
+
+- [History from the start](/quest/m1/archive/replay-history.md) - history mode lists a recording from its start, which "lists the whole recording" needs
