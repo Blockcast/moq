@@ -834,6 +834,36 @@ test("Consumer skips an empty LOC payload", async () => {
 	consumer.close();
 });
 
+test("Consumer skips the duration marker the LOC producer writes", async () => {
+	const track = new Track.Producer("test");
+	const producer = new LocProducer(track);
+	producer.encode(new Uint8Array([0xde, 0xad]), 0 as Time.Micro, true);
+	producer.encode(new Uint8Array([0xbe, 0xef]), 10_000 as Time.Micro, false);
+	producer.encode(new Uint8Array([0xca, 0xfe]), 20_000 as Time.Micro, true);
+	producer.close();
+
+	const consumer = new Consumer(replay(track), { format: new LocFormat("video"), maxDelay: 500 as Time.Milli });
+	await settle();
+	const first = await consumer.next();
+	expect(first?.frame?.payload).toEqual(new Uint8Array([0xde, 0xad]));
+	expect(first?.frame?.keyframe).toBe(true);
+	const second = await consumer.next();
+	expect(second?.frame?.payload).toEqual(new Uint8Array([0xbe, 0xef]));
+	const boundary = await consumer.next();
+	expect(boundary?.frame).toBeUndefined();
+	expect(boundary?.end).toBe(20_000 as Time.Micro);
+	const keyframe = await consumer.next();
+	expect(keyframe?.frame).toBeUndefined();
+	expect(keyframe?.end).toBeUndefined();
+	const next = await consumer.next();
+	expect(next?.frame?.payload).toEqual(new Uint8Array([0xca, 0xfe]));
+	expect(next?.frame?.keyframe).toBe(true);
+	const tail = await consumer.next();
+	expect(tail?.frame).toBeUndefined();
+	expect(tail?.end).toBe(30_000 as Time.Micro);
+	consumer.close();
+});
+
 test("Consumer preserves empty Legacy and LOC data frames", async () => {
 	for (const kind of ["legacy", "loc"]) {
 		const track = new Track.Producer("data");
