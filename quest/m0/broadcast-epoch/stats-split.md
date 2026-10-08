@@ -19,7 +19,7 @@ Decided 2026-10-05 (planned from moq-dev/moq.pro#2202):
   reader undercounts. The maps also grow with every live broadcast, and
   readers like billing want only per-project sums.
 - **Totals.** Per group broadcast (`<prefix>[/<group>]/node/<node>`),
-  per tier and role, cumulative within the [stats epoch](/quest/m0/broadcast-epoch/stats-epoch.md).
+  per tier and role, cumulative within the [stats epoch](/doc/concept/stats.md#broadcasts).
   Every group announcement, and so every restart, starts a new epoch counted
   from zero; nothing is serialized to disk. `Registry`'s unpruned lifetime totals
   (`rs/moq-net/src/stats.rs`) are node-wide, per tier and role only, so they
@@ -32,7 +32,7 @@ Decided 2026-10-05 (planned from moq-dev/moq.pro#2202):
   ends. Today a path that left drops out of frames while the group lingers;
   with totals, a group that returns within the linger continues its totals. A zero linger is valid: a returning group then always
   takes a new epoch. After the linger it unannounces and drops its
-  totals; a return announces under a new [epoch](/quest/m0/broadcast-epoch/stats-epoch.md)
+  totals; a return announces under a new [epoch](/doc/concept/stats.md#broadcasts)
   counted from zero. Totals are cumulative and a lingering group's frames all
   repeat its final totals, so a reader that misses every frame across the
   linger loses that epoch's tail; billing under-bills by that tail,
@@ -105,10 +105,6 @@ MoQ Pro adopts it when it pins the release: billing reads totals, its
 Broadcasts page reads one prefix per visible row and group header, its `announced` probe
 reads totals only, and its customer stats feed serves this format summed
 across nodes.
-
-## Required
-
-- [Stats epochs](/quest/m0/broadcast-epoch/stats-epoch.md) - totals are cumulative within an epoch
 
 ## Related
 
