@@ -49,7 +49,6 @@ blocks. The quests that gated m0 lines moved under them.
 - [Early video demand](/quest/m1/catalog-early-demand.md) - a regression guards demand before the first keyframe after the detector removal
 - [Hang changelog](/quest/m1/hang-changelog-04.md) - the hang draft lists under -03 only what -03 published
 - [SUBSCRIBE_DROP](/quest/m1/subscribe-drop.md) - every stream group in a lite subscription arrives or is dropped by name, and lite-07 drops its stream count for it
-- [#2991](/quest/m1/2991-net-coalesce-dynamic-tracks-and-preserve-sequences-across.md) - one dynamic producer per track name in both languages, with the sequence namespace surviving a replacement
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - a lite-07 SUBSCRIBE asks for past and live ranges in either order and replaces FETCH; relays fill misses by range, including over moq-transport
 - [Cold relay Largest](/quest/m1/ietf-cold-largest.md) - a relay reports the larger of its upstream's Largest and the largest object it received, even with nothing cached, so a d14-19 joining FETCH through it gets the current group's head
 - [Live media time](/quest/m1/subscribe-live-time.md) - re-scoped against `set_live`: a lite-07 SUBSCRIBE_OK carries the publisher's current media time only if a reader still needs it
