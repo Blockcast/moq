@@ -3102,15 +3102,20 @@ mod group_priority_test {
 	/// `from_wire` doc names as the hazard -- leaves it and every other test in this
 	/// module green while inverting repair against source on every subscribe we serve.
 	///
-	/// Two exact values rather than an ordering: the copy still orders 191 against 192
-	/// correctly in the wrong direction's own terms, so only the magnitudes discriminate.
-	/// They are the adjacent band boundary, the tightest case section 10 allows.
+	/// Exact values rather than an ordering: the literals are not computed from
+	/// `from_wire`, so the assertion cannot go tautological the way
+	/// `assert_eq!(serving_subscription(191).priority, from_wire(191))` would. They are
+	/// the adjacent band boundary, the tightest case section 10 allows. (The ordering
+	/// form would discriminate too -- under the copy it reads `191 > 192`, which is
+	/// false -- so this is a choice of the stronger assertion, not the only one.)
 	///
-	/// This covers the SUBSCRIBE path (`:639`) and the joining FETCH's subscribe
-	/// (`:1419`). The two crossings that do not route through here -- the
-	/// SUBSCRIBE_UPDATE priority change and `run_fetch_stream`'s own conversion -- stay
-	/// unpinned; reaching either needs an accepted request on a scripted peer, which is
-	/// more harness than a one-call conversion earns.
+	/// This covers the SUBSCRIBE path and the joining FETCH's subscribe. The other
+	/// crossings in this file -- the SUBSCRIBE_UPDATE priority change and
+	/// `run_fetch_stream`'s own conversion -- stay unpinned; reaching either needs an
+	/// accepted request on a scripted peer, which is more harness than a one-call
+	/// conversion earns. `subscriber.rs` and both JS crossings are unpinned too. Every
+	/// one of them does route through `from_wire`; it is the assertions that are
+	/// missing, not the conversion. BLO-42129 carries the census.
 	#[test]
 	fn serving_subscription_converts_the_subscriber_priority() {
 		// Least urgent source media, which must stay above ...
