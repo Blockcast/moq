@@ -3103,19 +3103,27 @@ mod group_priority_test {
 	/// module green while inverting repair against source on every subscribe we serve.
 	///
 	/// Exact values rather than an ordering: the literals are not computed from
-	/// `from_wire`, so the assertion cannot go tautological the way
+	/// `from_wire`, so the assertion cannot go tautological under a mutation of
+	/// `from_wire` itself, the way
 	/// `assert_eq!(serving_subscription(191).priority, from_wire(191))` would. They are
-	/// the adjacent band boundary, the tightest case section 10 allows. (The ordering
-	/// form would discriminate too -- under the copy it reads `191 > 192`, which is
-	/// false -- so this is a choice of the stronger assertion, not the only one.)
+	/// the adjacent band boundary, the tightest case section 10 allows. Against the
+	/// other mutation class -- the call-site copy this test exists for -- every form
+	/// discriminates: the ordering reads `191 > 192`, and even the `from_wire`-computed
+	/// form reads `191 == 64`. So the literals are the choice that is strong against
+	/// both classes, not the only choice that works against either.
 	///
 	/// This covers the SUBSCRIBE path and the joining FETCH's subscribe. The other
 	/// crossings in this file -- the SUBSCRIBE_UPDATE priority change and
 	/// `run_fetch_stream`'s own conversion -- stay unpinned; reaching either needs an
 	/// accepted request on a scripted peer, which is more harness than a one-call
-	/// conversion earns. `subscriber.rs` and both JS crossings are unpinned too. Every
-	/// one of them does route through `from_wire`; it is the assertions that are
-	/// missing, not the conversion. BLO-42129 carries the census.
+	/// conversion earns. `subscriber.rs`'s SUBSCRIBE_OK conversion and all three JS
+	/// crossings -- `publisher.ts`'s SUBSCRIBE and its SUBSCRIBE_UPDATE, the mirror of
+	/// the Rust one just named, and `subscriber.ts`'s SUBSCRIBE_OK -- are unpinned too.
+	/// That is seven crossings, six of them unpinned. The bindings are four against
+	/// three rather than paired because JS `runFetch` refuses FETCH outright, so no JS
+	/// path ever reads a FETCH's subscriber priority. Every one of the seven does route
+	/// through `from_wire` / `fromWire`; it is the assertions that are missing, not the
+	/// conversion. BLO-42129 carries the census.
 	#[test]
 	fn serving_subscription_converts_the_subscriber_priority() {
 		// Least urgent source media, which must stay above ...
