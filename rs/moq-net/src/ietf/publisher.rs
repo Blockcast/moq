@@ -3087,6 +3087,42 @@ mod group_priority_test {
 	#[moq_net_sim::test]
 	async fn group_stream_preserves_model_priority() {
 		let log = crate::lite::test_transport::Log::default();
+		serve_group_at(&log, 200).await;
+
+		assert_eq!(
+			log.priorities(),
+			vec![200],
+			"model priority must pass through unchanged"
+		);
+	}
+
+	/// draft-ramadan-moq-fec section 10 puts Source Media at wire 64..=191 and AL-FEC
+	/// repair at 192..=255, ascending by repair layer, on the IETF wire's lower-first
+	/// scale. The transport sends the HIGHEST value first, so those bands only keep
+	/// their meaning if `from_wire` converts them. This serves the three groups that
+	/// compete -- the LEAST urgent source against the two MOST urgent repair layers,
+	/// the tightest case the bands allow -- and reads back the send orders the
+	/// transport was actually handed, rather than asserting the arithmetic alone.
+	#[moq_net_sim::test]
+	async fn repair_group_streams_yield_to_source_on_the_transport() {
+		let log = crate::lite::test_transport::Log::default();
+		serve_group_at(&log, priority::from_wire(191)).await;
+		serve_group_at(&log, priority::from_wire(240)).await;
+		serve_group_at(&log, priority::from_wire(241)).await;
+
+		// Higher is transmitted first, so this must descend: source, then repair
+		// layer 0, then layer 1. Copying the wire values instead of converting
+		// them yields [191, 240, 241] and inverts the whole order.
+		assert_eq!(
+			log.priorities(),
+			vec![64, 15, 14],
+			"source must outrank repair, and repair layer 0 must outrank layer 1"
+		);
+	}
+
+	/// Serve one group at model `priority` onto `log`, so a caller can serve several and
+	/// read back the send orders the transport was given, in call order.
+	async fn serve_group_at(log: &crate::lite::test_transport::Log, priority: u8) {
 		let session = SinkSession::new(log.clone());
 
 		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
@@ -3108,19 +3144,13 @@ mod group_priority_test {
 		let mut serve = GroupServe::new(
 			session,
 			msg,
-			200,
+			priority,
 			consumer,
 			Some(Timescale::default()),
 			Version::Draft14,
 			GroupSlice::default(),
 		);
 		kio::wait(|waiter| serve.poll_serve(waiter)).await.unwrap();
-
-		assert_eq!(
-			log.priorities(),
-			vec![200],
-			"model priority must pass through unchanged"
-		);
 	}
 
 	/// The publisher's own ranking of its tracks (`track::Info::priority`) is what a relay

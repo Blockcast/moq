@@ -34,11 +34,17 @@ mod tests {
 	/// priority that is COPIED here rather than converted inverts both
 	/// orderings at once: repair preempts the source it repairs, and the
 	/// highest repair layer outranks layer 0.
+	///
+	/// `ietf_priority_is_lower_first` already pins the orderings themselves,
+	/// over the whole domain. What it cannot carry is which concrete model
+	/// values section 10's band endpoints land on, or that those two bands do
+	/// not overlap after conversion -- so this test goes red with a named
+	/// reason where the generic one goes red with an arithmetic one.
 	#[test]
 	fn converted_repair_bands_yield_to_source_and_order_by_layer() {
-		// Both endpoints of the repair band.
+		// The repair band's most urgent value. Its least urgent, from_wire(255),
+		// is the same fact as from_wire(u8::MAX) above and is not restated.
 		assert_eq!(from_wire(192), 63);
-		assert_eq!(from_wire(255), 0);
 		// Both endpoints of the source media band.
 		assert_eq!(from_wire(64), 191);
 		assert_eq!(from_wire(191), 64);

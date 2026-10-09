@@ -28,10 +28,16 @@ test("an unset track priority is the draft's usual publisher priority", () => {
 // layer. The model ranks higher-first, so a repair priority that is COPIED here
 // rather than converted inverts both orderings at once: repair preempts the
 // source it repairs, and the highest repair layer outranks layer 0.
+//
+// "IETF subscriber priority is lower first" already pins the orderings
+// themselves, over the whole domain. What it cannot carry is which concrete
+// model values section 10's band endpoints land on, or that those two bands do
+// not overlap after conversion -- so this test goes red with a named reason
+// where the generic one goes red with an arithmetic one.
 test("converted repair bands yield to source and order by layer", () => {
-	// Both endpoints of the repair band.
+	// The repair band's most urgent value. Its least urgent, fromWire(255), is
+	// the same fact as fromWire(0xff) above and is not restated.
 	expect(fromWire(192)).toBe(63);
-	expect(fromWire(255)).toBe(0);
 	// Both endpoints of the source media band.
 	expect(fromWire(64)).toBe(191);
 	expect(fromWire(191)).toBe(64);
