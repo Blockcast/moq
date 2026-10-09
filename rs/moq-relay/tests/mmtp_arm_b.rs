@@ -39,6 +39,16 @@
 // scoped `uring-check` lane builds `-p moq-uring -p moq-relay --all-targets`,
 // where nothing pulls it in and the call would not resolve. Gating here keeps
 // the fix inside this file: arm B's diff against upstream stays zero.
+//
+// The cost of that choice: both these six tests and this file's lint coverage
+// hang on an unrelated crate's dev-dependency list, and editing
+// `rs/moq-cli/Cargo.toml` would silently zero them with every lane green. The
+// guard is that every test prints an `[arm-b/...]` line, so the ABSENCE of
+// those lines from a lane's output is the signal that this file compiled to
+// nothing. If the zero-diff constraint is ever relaxed, the real fix is a
+// `[[test]] required-features = ["test-support"]` stanza in
+// `rs/moq-relay/Cargo.toml`, which states the requirement where someone editing
+// the manifest will see it.
 #![cfg(feature = "test-support")]
 
 use std::collections::BTreeMap;
@@ -103,17 +113,29 @@ fn decode(buf: &[u8]) -> Decoded {
 struct Flow {
 	sent: usize,
 	received: usize,
-	/// Every object-ID delta observed on the receive side, in arrival order.
-	deltas: Vec<u8>,
+	/// Every object decoded off the wire, in arrival order. Whole `Decoded`
+	/// values rather than the two fields the headline assertions read, so a
+	/// byte-offset slip anywhere in the 9-byte prefix is visible to a test.
+	objects: Vec<Decoded>,
 	/// Group sequence -> objects received in it.
 	groups: BTreeMap<u64, usize>,
-	/// Every SBN observed, in arrival order.
-	sbns: Vec<u32>,
 }
 
 impl Flow {
+	fn deltas(&self) -> Vec<u8> {
+		self.objects.iter().map(|o| o.delta).collect()
+	}
+
+	fn sbns(&self) -> Vec<u32> {
+		self.objects.iter().map(|o| o.sbn).collect()
+	}
+
+	/// Every object-ID delta is 1 -- the condition kixelated's objection turns on.
+	fn contiguous(&self) -> bool {
+		self.objects.iter().all(|o| o.delta == 1)
+	}
+
 	fn report(&self, label: &str) -> String {
-		let contiguous = self.deltas.iter().all(|&d| d == 1);
 		format!(
 			"[arm-b/{label}] sent={} received={} dropped={} object_id_deltas={:?} contiguous={} groups={:?}",
 			self.sent,
@@ -121,8 +143,8 @@ impl Flow {
 			// Saturating: a flow whose `sent` was not populated must not panic
 			// in the middle of a measurement.
 			self.sent.saturating_sub(self.received),
-			self.deltas,
-			contiguous,
+			self.deltas(),
+			self.contiguous(),
 			self.groups,
 		)
 	}
@@ -140,10 +162,12 @@ struct Harness {
 	consumer: moq_net::broadcast::Consumer,
 	trigger: moq_relay::shutdown::Trigger,
 	running: tokio::task::JoinHandle<anyhow::Result<()>>,
-	// Dropping either connection tears the session down, so they are held for
-	// the lifetime of the test even though nothing reads them.
-	_pub_connection: moq_tokio::Connection,
-	_sub_connection: moq_tokio::Connection,
+	// The two connections are read by
+	// `arm_b_measurements_are_taken_on_a_moq_lite_session` for the negotiated
+	// version. Everything below is held only so the session outlives the test:
+	// dropping any of it tears the session down.
+	pub_connection: moq_tokio::Connection,
+	sub_connection: moq_tokio::Connection,
 	_pub_client: moq_tokio::Client,
 	_sub_client: moq_tokio::Client,
 	_pub_origin: moq_net::origin::Producer,
@@ -226,8 +250,8 @@ async fn harness(tracks: &[&str]) -> (Harness, Vec<moq_net::track::Producer>) {
 			consumer,
 			trigger,
 			running,
-			_pub_connection: pub_connection,
-			_sub_connection: sub_connection,
+			pub_connection,
+			sub_connection,
 			_pub_client: pub_client,
 			_sub_client: sub_client,
 			_pub_origin: pub_origin,
@@ -265,20 +289,34 @@ impl Harness {
 
 /// Read every object the subscription delivers until the track ends, decoding
 /// the arm-B prefix off each one.
-async fn drain(track: &mut moq_net::track::Subscriber, flow: &mut Flow) {
-	while let Ok(Some(mut group)) = tokio::time::timeout(TIMEOUT, track.recv_group())
-		.await
-		.unwrap_or(Ok(None))
-	{
+///
+/// A timeout and a transport error are panics, never a quiet end of track. This
+/// file's entire deliverable is counts offered as evidence for a design
+/// argument, so a silently truncated read is the one failure that produces a
+/// confident wrong number -- and it would be *invisible*, because
+/// `arm_b_burst_before_the_subscription_is_established` asserts
+/// `received < sent`, which a timeout satisfies.
+async fn drain(label: &str, track: &mut moq_net::track::Subscriber, flow: &mut Flow) {
+	loop {
+		let mut group = match tokio::time::timeout(TIMEOUT, track.recv_group()).await {
+			Ok(Ok(Some(group))) => group,
+			Ok(Ok(None)) => break,
+			Ok(Err(err)) => panic!("{label}: transport error after {} objects: {err}", flow.received),
+			Err(_) => panic!(
+				"{label}: timed out after {TIMEOUT:?} waiting for a group, {} objects in",
+				flow.received
+			),
+		};
 		let sequence = group.sequence;
-		while let Ok(Some(frame)) = tokio::time::timeout(TIMEOUT, group.read_frame())
-			.await
-			.unwrap_or(Ok(None))
-		{
-			let decoded = decode(&frame.payload);
+		loop {
+			let frame = match tokio::time::timeout(TIMEOUT, group.read_frame()).await {
+				Ok(Ok(Some(frame))) => frame,
+				Ok(Ok(None)) => break,
+				Ok(Err(err)) => panic!("{label}: transport error inside group {sequence}: {err}"),
+				Err(_) => panic!("{label}: timed out after {TIMEOUT:?} reading group {sequence}"),
+			};
 			flow.received += 1;
-			flow.deltas.push(decoded.delta);
-			flow.sbns.push(decoded.sbn);
+			flow.objects.push(decode(&frame.payload));
 			*flow.groups.entry(sequence).or_default() += 1;
 		}
 	}
@@ -293,10 +331,11 @@ async fn drain(track: &mut moq_net::track::Subscriber, flow: &mut Flow) {
 /// reports one group instead of all of them. See
 /// `arm_b_burst_before_the_subscription_is_established` for that case measured
 /// deliberately.
-fn spawn_drain(mut track: moq_net::track::Subscriber) -> tokio::task::JoinHandle<Flow> {
+fn spawn_drain(label: &str, mut track: moq_net::track::Subscriber) -> tokio::task::JoinHandle<Flow> {
+	let label = label.to_owned();
 	tokio::spawn(async move {
 		let mut flow = Flow::default();
-		drain(&mut track, &mut flow).await;
+		drain(&label, &mut track, &mut flow).await;
 		flow
 	})
 }
@@ -304,6 +343,13 @@ fn spawn_drain(mut track: moq_net::track::Subscriber) -> tokio::task::JoinHandle
 /// Time for a subscription to reach the publisher through the relay, and for
 /// one group to be picked up before the next is appended. A live publisher
 /// paces itself by frame cadence; these tests stand in for that.
+///
+/// These are wall-clock stand-ins for "the subscription reached the publisher",
+/// which is the one hazard in this file with no in-band signal behind it. The
+/// six tests run in 0.15-0.67 s each, so 300 ms has headroom today; on a
+/// heavily contended runner it would not, and the failure shape is a short
+/// count rather than a hang. A short count now panics in `drain` instead of
+/// being reported, so it cannot pass as a measurement.
 const SETTLE: Duration = Duration::from_millis(300);
 const GROUP_GAP: Duration = Duration::from_millis(50);
 
@@ -354,7 +400,7 @@ async fn arm_b_source_and_two_repair_tracks_round_trip() {
 	// the mapping and not of cache retention.
 	let mut drains = Vec::new();
 	for name in names {
-		drains.push(spawn_drain(h.subscribe(name, None).await));
+		drains.push(spawn_drain(name, h.subscribe(name, None).await));
 	}
 	tokio::time::sleep(SETTLE).await;
 
@@ -394,7 +440,7 @@ async fn arm_b_source_and_two_repair_tracks_round_trip() {
 	for (flow, label) in got.iter().zip(names) {
 		assert_eq!(flow.sent, flow.received, "{label}: no object lost end to end");
 		assert!(
-			flow.deltas.iter().all(|&d| d == 1),
+			flow.contiguous(),
 			"{label}: every object-ID delta must be 1 -- separate tracks mean no gaps"
 		);
 		assert_eq!(
@@ -403,6 +449,26 @@ async fn arm_b_source_and_two_repair_tracks_round_trip() {
 			"{label}: both FEC blocks delivered"
 		);
 	}
+
+	// The whole 9-byte schema round-trips, not just the two fields the
+	// assertions above read. `esi` occupies `buf[5..9]` and `media` everything
+	// past the prefix, so without this a byte-offset slip in either window --
+	// the exact failure the fixed-width BE encoding exists to rule out -- would
+	// pass every other test in this file.
+	let expected = |first_esi: u32, count: u32, tag: &[u8]| -> Vec<Decoded> {
+		(0..2u32)
+			.flat_map(|sbn| (first_esi..first_esi + count).map(move |esi| (sbn, esi)))
+			.map(|(sbn, esi)| Decoded {
+				delta: 1,
+				sbn,
+				esi,
+				media: tag.to_vec(),
+			})
+			.collect()
+	};
+	assert_eq!(got[0].objects, expected(0, 4, b"src"), "source payloads");
+	assert_eq!(got[1].objects, expected(4, 2, b"rep0"), "repair layer 0 payloads");
+	assert_eq!(got[2].objects, expected(6, 1, b"rep1"), "repair layer 1 payloads");
 
 	h.shutdown().await;
 }
@@ -427,7 +493,7 @@ async fn arm_b_repair_tracks_subscribe_and_prioritise() {
 	let plan: [(&str, u8); 2] = [("video", 200), ("video/fec/0", 100)];
 	let mut drains = Vec::new();
 	for (name, priority) in plan {
-		drains.push(spawn_drain(h.subscribe(name, Some(priority)).await));
+		drains.push(spawn_drain(name, h.subscribe(name, Some(priority)).await));
 	}
 	tokio::time::sleep(SETTLE).await;
 
@@ -498,8 +564,8 @@ async fn arm_b_subscriptions_starting_at_different_groups() {
 		.subscribe(Subscription::default().with_start(Position::group(2)))
 		.await
 		.expect("subscribe repair");
-	let src_drain = spawn_drain(src);
-	let rep_drain = spawn_drain(rep);
+	let src_drain = spawn_drain("race/source@group0", src);
+	let rep_drain = spawn_drain("race/repair@group2", rep);
 	tokio::time::sleep(SETTLE).await;
 
 	// Four FEC blocks, one MoQ group each, on both flows.
@@ -550,8 +616,8 @@ async fn arm_b_subscriptions_starting_at_different_groups() {
 	// The SBN in the payload prefix is what lets the receiver notice the
 	// misalignment at all: group sequence and SBN agree on both flows, so the
 	// application can align them without any moq-net support.
-	assert_eq!(src_flow.sbns, vec![0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3]);
-	assert_eq!(rep_flow.sbns, vec![2, 2, 3, 3]);
+	assert_eq!(src_flow.sbns(), vec![0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3]);
+	assert_eq!(rep_flow.sbns(), vec![2, 2, 3, 3]);
 
 	h.shutdown().await;
 }
@@ -597,14 +663,15 @@ async fn arm_b_burst_before_the_subscription_is_established() {
 		producer.finish().expect("finish track");
 	}
 
-	let mut src_flow = Flow::default();
-	let mut rep_flow = Flow::default();
-	{
-		let mut src = src;
-		let mut rep = rep;
-		drain(&mut src, &mut src_flow).await;
-		drain(&mut rep, &mut rep_flow).await;
-	}
+	// Both flows are drained CONCURRENTLY. Draining them in sequence would leave
+	// the repair subscription unread for however long the source drain takes, so
+	// the repair numbers would conflate burst loss with read-ordering loss --
+	// and no assertion below constrains the repair magnitude, so nothing would
+	// catch it. The burst is already over by this point; only the reads overlap.
+	let src_drain = spawn_drain("burst/source", src);
+	let rep_drain = spawn_drain("burst/repair", rep);
+	let mut src_flow = src_drain.await.expect("source drain");
+	let mut rep_flow = rep_drain.await.expect("repair drain");
 	src_flow.sent = sent[0].sent;
 	rep_flow.sent = sent[1].sent;
 
@@ -623,7 +690,7 @@ async fn arm_b_burst_before_the_subscription_is_established() {
 	// never a hole inside one.
 	assert!(!src_groups.is_empty(), "some source block arrived");
 	assert!(
-		src_flow.deltas.iter().all(|&d| d == 1) && rep_flow.deltas.iter().all(|&d| d == 1),
+		src_flow.contiguous() && rep_flow.contiguous(),
 		"loss is whole-group, never a gap inside a group"
 	);
 	assert!(
@@ -650,7 +717,7 @@ async fn arm_b_fetch_group_under_contiguous_object_ids() {
 
 	// A live subscription keeps the relay cache populated for the FETCH below.
 	let live = h.subscribe("video", None).await;
-	let live_drain = spawn_drain(live);
+	let live_drain = spawn_drain("fetch/live-subscription", live);
 	tokio::time::sleep(SETTLE).await;
 
 	let mut sent = [Flow::default()];
@@ -672,24 +739,29 @@ async fn arm_b_fetch_group_under_contiguous_object_ids() {
 		.await
 		.expect("fetch timeout")
 		.expect("fetch group 1");
-	while let Ok(Some(frame)) = tokio::time::timeout(TIMEOUT, group.read_frame())
-		.await
-		.unwrap_or(Ok(None))
-	{
+	loop {
+		let frame = match tokio::time::timeout(TIMEOUT, group.read_frame()).await {
+			Ok(Ok(Some(frame))) => frame,
+			Ok(Ok(None)) => break,
+			Ok(Err(err)) => panic!(
+				"fetch/group1: transport error after {} objects: {err}",
+				fetched.received
+			),
+			Err(_) => panic!(
+				"fetch/group1: timed out after {TIMEOUT:?}, {} objects in",
+				fetched.received
+			),
+		};
 		let decoded = decode(&frame.payload);
-		fetched.received += 1;
-		fetched.deltas.push(decoded.delta);
-		fetched.sbns.push(decoded.sbn);
-		*fetched.groups.entry(1).or_default() += 1;
 		assert_eq!(decoded.sbn, 1, "fetched block carries its own SBN");
+		fetched.received += 1;
+		fetched.objects.push(decoded);
+		*fetched.groups.entry(1).or_default() += 1;
 	}
 
 	println!("{}", fetched.report("fetch/group1"));
 	assert_eq!(fetched.received, 4, "FETCH served the whole block");
-	assert!(
-		fetched.deltas.iter().all(|&d| d == 1),
-		"no holes for the relay to query upstream for"
-	);
+	assert!(fetched.contiguous(), "no holes for the relay to query upstream for");
 
 	h.shutdown().await;
 }
@@ -711,11 +783,17 @@ async fn arm_b_fetch_group_under_contiguous_object_ids() {
 /// if Filter::is_draft20(self.version) { return self.reject_fetch(..) }
 /// ```
 ///
-/// so at IETF draft-20 -- the target of the BLO-40652 cut -- there is no FETCH
-/// at all, and arm B's FETCH result does not carry over to it. The contiguous
-/// object-ID argument it supports is draft-independent and stands; the "relay
-/// serves it from cache" half is measured here only on moq-lite. See BLO-41181,
-/// which fills that gap upstream.
+/// `Filter::is_draft20` (`rs/moq-net/src/ietf/filter.rs`) is a misnomer: it is
+/// `!matches!(version, Draft14..=Draft19)`, so it is true for **draft-20 and
+/// every later draft** -- 20, 21 and 22 alike. No IETF draft the default
+/// preference order would pick serves FETCH at all, and arm B's FETCH result
+/// does not carry over to any of them. That matters because `ALL` lists
+/// `Draft22` and `Draft21` *ahead* of `Draft20`: a session that did slide onto
+/// the IETF path would negotiate draft-22, and "target a later draft instead"
+/// is not an available move. The contiguous object-ID argument the FETCH result
+/// supports is draft-independent and stands; the "relay serves it from cache"
+/// half is measured here only on moq-lite. See BLO-41181, which fills that gap
+/// upstream.
 ///
 /// This asserts the protocol family, not the exact draft: a lite bump is a
 /// routine upstream change, but silently sliding onto the IETF path would
@@ -725,15 +803,15 @@ async fn arm_b_measurements_are_taken_on_a_moq_lite_session() {
 	let (h, _producers) = harness(&["video"]).await;
 
 	for (label, version) in [
-		("publisher", h._pub_connection.version()),
-		("subscriber", h._sub_connection.version()),
+		("publisher", h.pub_connection.version()),
+		("subscriber", h.sub_connection.version()),
 	] {
 		let version = version.unwrap_or_else(|| panic!("{label} session reported no negotiated version"));
 		println!("[arm-b/version] {label}={version:?}");
 		assert!(
 			matches!(version, moq_net::Version::Lite(_)),
 			"{label} negotiated {version:?}; every count in this file is scoped to moq-lite, \
-			 and an IETF session would additionally refuse FETCH at draft-20"
+			 and an IETF session would additionally refuse FETCH at draft-20 and later"
 		);
 	}
 
