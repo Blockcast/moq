@@ -3096,13 +3096,40 @@ mod group_priority_test {
 		);
 	}
 
+	/// The production entry for a SUBSCRIBE's priority, and the one link
+	/// `repair_group_streams_yield_to_source_on_the_transport` cannot see: that test
+	/// converts in its own body, so `priority: subscriber_priority` here -- the copy the
+	/// `from_wire` doc names as the hazard -- leaves it and every other test in this
+	/// module green while inverting repair against source on every subscribe we serve.
+	///
+	/// Two exact values rather than an ordering: the copy still orders 191 against 192
+	/// correctly in the wrong direction's own terms, so only the magnitudes discriminate.
+	/// They are the adjacent band boundary, the tightest case section 10 allows.
+	///
+	/// This covers the SUBSCRIBE path (`:639`) and the joining FETCH's subscribe
+	/// (`:1419`). The two crossings that do not route through here -- the
+	/// SUBSCRIBE_UPDATE priority change and `run_fetch_stream`'s own conversion -- stay
+	/// unpinned; reaching either needs an accepted request on a scripted peer, which is
+	/// more harness than a one-call conversion earns.
+	#[test]
+	fn serving_subscription_converts_the_subscriber_priority() {
+		// Least urgent source media, which must stay above ...
+		assert_eq!(serving_subscription(191).priority, 64);
+		// ... the most urgent repair.
+		assert_eq!(serving_subscription(192).priority, 63);
+	}
+
 	/// draft-ramadan-moq-fec section 10 puts Source Media at wire 64..=191 and AL-FEC
 	/// repair at 192..=255, ascending by repair layer, on the IETF wire's lower-first
 	/// scale. The transport sends the HIGHEST value first, so those bands only keep
-	/// their meaning if `from_wire` converts them. This serves the three groups that
-	/// compete -- the LEAST urgent source against the two MOST urgent repair layers,
-	/// the tightest case the bands allow -- and reads back the send orders the
+	/// their meaning if `from_wire` converts them. This serves the three groups whose
+	/// bands adjoin -- the LEAST urgent source against the two MOST urgent repair
+	/// layers, the tightest case the bands allow -- and reads back the send orders the
 	/// transport was actually handed, rather than asserting the arithmetic alone.
+	///
+	/// It enters the chain already converted, so it pins the bands against `set_priority`
+	/// and nothing upstream of `GroupServe`;
+	/// `serving_subscription_converts_the_subscriber_priority` pins the call site.
 	#[moq_net_sim::test]
 	async fn repair_group_streams_yield_to_source_on_the_transport() {
 		let log = crate::lite::test_transport::Log::default();
@@ -3122,6 +3149,13 @@ mod group_priority_test {
 
 	/// Serve one group at model `priority` onto `log`, so a caller can serve several and
 	/// read back the send orders the transport was given, in call order.
+	///
+	/// Each call must contribute exactly one entry, or a multi-call assertion reads a
+	/// vec whose length it did not choose: `test_transport`'s `set_priority` pushes
+	/// unconditionally, so a second call per serve would lengthen it silently.
+	/// `group_stream_preserves_model_priority`'s `vec![200]` is what holds that, which
+	/// makes it load-bearing for its siblings -- relaxing it to a `contains` or a
+	/// first-element check would quietly weaken them too.
 	async fn serve_group_at(log: &crate::lite::test_transport::Log, priority: u8) {
 		let session = SinkSession::new(log.clone());
 
