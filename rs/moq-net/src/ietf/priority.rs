@@ -27,4 +27,42 @@ mod tests {
 	fn priority_round_trips() {
 		assert!((0u8..=u8::MAX).all(|priority| from_wire(to_wire(priority)) == priority));
 	}
+
+	/// draft-ramadan-moq-fec section 10 bands, on the IETF wire's lower-first
+	/// scale: Source Media is 64..=191 and AL-FEC repair is 192..=255,
+	/// ascending by repair layer. The model ranks higher-first, so a repair
+	/// priority that is COPIED here rather than converted inverts both
+	/// orderings at once: repair preempts the source it repairs, and the
+	/// highest repair layer outranks layer 0.
+	///
+	/// `ietf_priority_is_lower_first` already pins the orderings themselves,
+	/// over the whole domain. What it cannot carry is which concrete model
+	/// values section 10's band endpoints land on, or that those two bands do
+	/// not overlap after conversion -- so this test goes red with a named
+	/// reason where the generic one goes red with an arithmetic one.
+	#[test]
+	fn converted_repair_bands_yield_to_source_and_order_by_layer() {
+		// The repair band's most urgent value. Its least urgent, from_wire(255),
+		// is the same fact as from_wire(u8::MAX) above and is not restated.
+		assert_eq!(from_wire(192), 63);
+		// Both endpoints of the source media band.
+		assert_eq!(from_wire(64), 191);
+		assert_eq!(from_wire(191), 64);
+
+		// The adjacent boundary is the tightest case: the LEAST urgent source
+		// must still preempt the MOST urgent repair, or the bands overlap.
+		assert!(
+			from_wire(191) > from_wire(192),
+			"the least urgent source media must preempt the most urgent repair"
+		);
+
+		// Repair layers ascend on the wire, so they must descend in the model.
+		let layer_0 = from_wire(240);
+		let layer_1 = from_wire(241);
+		assert!(layer_0 > layer_1, "repair layer 0 must preempt layer 1");
+		assert!(
+			from_wire(128) > layer_0,
+			"a source track must preempt the repair that protects it"
+		);
+	}
 }

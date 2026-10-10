@@ -3087,6 +3087,89 @@ mod group_priority_test {
 	#[moq_net_sim::test]
 	async fn group_stream_preserves_model_priority() {
 		let log = crate::lite::test_transport::Log::default();
+		serve_group_at(&log, 200).await;
+
+		assert_eq!(
+			log.priorities(),
+			vec![200],
+			"model priority must pass through unchanged"
+		);
+	}
+
+	/// The production entry for a SUBSCRIBE's priority, and the one link
+	/// `repair_group_streams_yield_to_source_on_the_transport` cannot see: that test
+	/// converts in its own body, so `priority: subscriber_priority` here -- the copy the
+	/// `from_wire` doc names as the hazard -- leaves it and every other test in this
+	/// module green while inverting repair against source on every subscribe we serve.
+	///
+	/// Exact values rather than an ordering: the literals are not computed from
+	/// `from_wire`, so the assertion cannot go tautological under a mutation of
+	/// `from_wire` itself, the way
+	/// `assert_eq!(serving_subscription(191).priority, from_wire(191))` would. They are
+	/// the adjacent band boundary, the tightest case section 10 allows. Against the
+	/// other mutation class -- the call-site copy this test exists for -- every form
+	/// discriminates: the ordering reads `191 > 192`, and even the `from_wire`-computed
+	/// form reads `191 == 64`. So the literals are the choice that is strong against
+	/// both classes, not the only choice that works against either.
+	///
+	/// This covers the SUBSCRIBE path and the joining FETCH's subscribe. The other
+	/// crossings in this file -- the SUBSCRIBE_UPDATE priority change and
+	/// `run_fetch_stream`'s own conversion -- stay unpinned; reaching either needs an
+	/// accepted request on a scripted peer, which is more harness than a one-call
+	/// conversion earns. `subscriber.rs`'s SUBSCRIBE_OK conversion and all three JS
+	/// crossings -- `publisher.ts`'s SUBSCRIBE and its SUBSCRIBE_UPDATE, the mirror of
+	/// the Rust one just named, and `subscriber.ts`'s SUBSCRIBE_OK -- are unpinned too.
+	/// That is seven crossings, six of them unpinned. The bindings are four against
+	/// three rather than paired because JS `runFetch` refuses FETCH outright, so no JS
+	/// path ever reads a FETCH's subscriber priority. Every one of the seven does route
+	/// through `from_wire` / `fromWire`; it is the assertions that are missing, not the
+	/// conversion. BLO-42129 carries the census.
+	#[test]
+	fn serving_subscription_converts_the_subscriber_priority() {
+		// Least urgent source media, which must stay above ...
+		assert_eq!(serving_subscription(191).priority, 64);
+		// ... the most urgent repair.
+		assert_eq!(serving_subscription(192).priority, 63);
+	}
+
+	/// draft-ramadan-moq-fec section 10 puts Source Media at wire 64..=191 and AL-FEC
+	/// repair at 192..=255, ascending by repair layer, on the IETF wire's lower-first
+	/// scale. The transport sends the HIGHEST value first, so those bands only keep
+	/// their meaning if `from_wire` converts them. This serves the three groups whose
+	/// bands adjoin -- the LEAST urgent source against the two MOST urgent repair
+	/// layers, the tightest case the bands allow -- and reads back the send orders the
+	/// transport was actually handed, rather than asserting the arithmetic alone.
+	///
+	/// It enters the chain already converted, so it pins the bands against `set_priority`
+	/// and nothing upstream of `GroupServe`;
+	/// `serving_subscription_converts_the_subscriber_priority` pins the call site.
+	#[moq_net_sim::test]
+	async fn repair_group_streams_yield_to_source_on_the_transport() {
+		let log = crate::lite::test_transport::Log::default();
+		serve_group_at(&log, priority::from_wire(191)).await;
+		serve_group_at(&log, priority::from_wire(240)).await;
+		serve_group_at(&log, priority::from_wire(241)).await;
+
+		// Higher is transmitted first, so this must descend: source, then repair
+		// layer 0, then layer 1. Copying the wire values instead of converting
+		// them yields [191, 240, 241] and inverts the whole order.
+		assert_eq!(
+			log.priorities(),
+			vec![64, 15, 14],
+			"source must outrank repair, and repair layer 0 must outrank layer 1"
+		);
+	}
+
+	/// Serve one group at model `priority` onto `log`, so a caller can serve several and
+	/// read back the send orders the transport was given, in call order.
+	///
+	/// Each call must contribute exactly one entry, or a multi-call assertion reads a
+	/// vec whose length it did not choose: `test_transport`'s `set_priority` pushes
+	/// unconditionally, so a second call per serve would lengthen it silently.
+	/// `group_stream_preserves_model_priority`'s `vec![200]` is what holds that, which
+	/// makes it load-bearing for its siblings -- relaxing it to a `contains` or a
+	/// first-element check would quietly weaken them too.
+	async fn serve_group_at(log: &crate::lite::test_transport::Log, priority: u8) {
 		let session = SinkSession::new(log.clone());
 
 		let track = track::Producer::new(std::sync::Arc::new(crate::broadcast::Info::default()), "test", None);
@@ -3108,19 +3191,13 @@ mod group_priority_test {
 		let mut serve = GroupServe::new(
 			session,
 			msg,
-			200,
+			priority,
 			consumer,
 			Some(Timescale::default()),
 			Version::Draft14,
 			GroupSlice::default(),
 		);
 		kio::wait(|waiter| serve.poll_serve(waiter)).await.unwrap();
-
-		assert_eq!(
-			log.priorities(),
-			vec![200],
-			"model priority must pass through unchanged"
-		);
 	}
 
 	/// The publisher's own ranking of its tracks (`track::Info::priority`) is what a relay
