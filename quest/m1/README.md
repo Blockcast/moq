@@ -144,7 +144,6 @@ session outcomes, and embedder refusals inside session outcomes.
 - [Cache expiry growth](/quest/m1/cache-expiry-growth.md) - with the default pool, relay memory plateaus at the expiry window on every version
 - [Front deadlines](/quest/m1/front-deadline-index.md) - a front's per-event cost stops growing with its track count: an expiry index and per-track wakes, proven by a churn benchmark
 - [io_uring handshake deadline](/quest/m1/listener-deadlines.md) - the io_uring workers apply `listen.timeout` to the handshake
-- [HTTP listener deadlines](/quest/m1/listener-deadlines-http.md) - the HTTPS and internal listeners drop a connection with no request in flight for `listen.timeout`
 - [iroh keep-alive](/quest/m1/iroh-keep-alive.md) - the iroh backend honors `quic.keep_alive`
 - [Rust papercuts](/quest/m1/papercuts-rs.md) - HTTP refusals are counted, and a `u64::MAX` resume is unbounded
 - [JS papercuts](/quest/m1/papercuts-js.md) - IETF status 0 keeps the subgroup open, a muted rendition change settles, and bad element attributes warn
