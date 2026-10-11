@@ -26,21 +26,47 @@
 //! ## This branch is NOT a stock checkout, so that claim has to be re-run
 //!
 //! The file lives on `Blockcast/moq`'s `main`, which is upstream `0574f5b60`
-//! plus Blockcast/moq#2 -- `rs/moq-net/src/ietf/publisher.rs +292 -34`, the
-//! draft-20 FETCH work from BLO-41181. So "zero diff against upstream" is a
-//! claim about `0574f5b60`, not about the tree this file is read in, and a
-//! green run here does not on its own establish it. Re-establish it with:
+//! plus two Blockcast changes under `rs/moq-net`, together `priority.rs +38`
+//! and `publisher.rs +417 -41` (two files, +414 -41):
+//!
+//! * Blockcast/moq#2 -- `publisher.rs +292 -34`, the draft-20 FETCH work from
+//!   BLO-41181;
+//! * Blockcast/moq#3 -- `priority.rs +38`, `publisher.rs +91 -7`, the
+//!   repair-band ordering pins from BLO-41724.
+//!
+//! Neither is an arm-B carried patch -- both are Blockcast's own `moq-net`
+//! work that this harness merely sits beside -- so "zero diff against
+//! upstream" is a claim about `0574f5b60`, not about the tree this file is
+//! read in, and a green run here does not on its own establish it.
+//! Re-establish it with:
 //!
 //! ```text
 //! git checkout 0574f5b60 -- rs/moq-net
 //! RUSTUP_TOOLCHAIN=stable cargo test -p moq-relay --features test-support \
 //!     --test mmtp_arm_b -- --nocapture
+//! git checkout HEAD -- rs/moq-net           # put #2 and #3 back; see below
 //! ```
 //!
-//! Verified green that way on 2026-10-09 at `45cd0856`: 6/6, same counts as
-//! the unreverted tree. Anything cut from this branch inherits #2 -- see the
-//! scope note on `arm_b_measurements_are_taken_on_a_moq_lite_session`, where
-//! #2 changes what the IETF half of the FETCH result would mean.
+//! The last line is not optional, and plain `git restore rs/moq-net` is not a
+//! substitute: `git checkout <commit> -- <path>` stages into the index as
+//! well, so an index-sourced restore just rewrites the reverted tree. Skip it
+//! either way and the checkout is left with both changes removed while nothing
+//! on screen says so: anything run next there -- #2's own `a_draft20_fetch_*`
+//! tests and #3's priority pins most of all -- would silently measure a tree
+//! with the draft-20 FETCH deleted.
+//! That is this file's own subject one level down, a reader holding a tree
+//! that is not the tree they think they hold.
+//!
+//! Verified green that way on 2026-10-11 at `a6bac516` -- `main` at the time
+//! this note was written, i.e. the parent of the commit carrying it: 6/6 both
+//! reverted and unreverted, same counts. The SHA is recorded so a reader can
+//! diff forward from it. A later commit does not invalidate the run; it only
+//! means the run is older than the tree, and `git diff a6bac516..HEAD --
+//! rs/moq-net rs/moq-relay/tests/mmtp_arm_b.rs` is the whole question of
+//! whether it still speaks for this tree. Anything cut from this branch
+//! inherits both -- see the scope note on
+//! `arm_b_measurements_are_taken_on_a_moq_lite_session`, where #2 changes what
+//! the IETF half of the FETCH result would mean.
 //!
 //! ## Ordering matters, and getting it wrong measures the cache instead
 //!
@@ -748,11 +774,17 @@ async fn arm_b_fetch_group_under_contiguous_object_ids() {
 	let live_drain = spawn_drain("fetch/live-subscription", live);
 	tokio::time::sleep(SETTLE).await;
 
-	// Every count below is derived from these two, not restated: a hand-written
-	// literal that drifts from the layout shows up as a delivery failure, after
-	// the `[arm-b/fetch/...]` line has already printed the wrong `dropped=`.
+	// Every count and group selector below is derived from these three, not
+	// restated: a hand-written literal that drifts from the layout shows up as a
+	// delivery failure, after the `[arm-b/fetch/...]` line has already printed
+	// the wrong `dropped=`. `FETCH_BLOCK` is the one with no count to check it,
+	// so its coupling to `BLOCKS` is asserted at compile time instead -- out of
+	// range, it would fetch a group that was never published and surface as the
+	// `fetch timeout` below rather than as the edit that caused it.
 	const BLOCKS: u32 = 3;
 	const SYMBOLS_PER_BLOCK: u32 = 4;
+	const FETCH_BLOCK: u32 = 1;
+	const _: () = assert!(FETCH_BLOCK < BLOCKS, "FETCH_BLOCK must name a published block");
 
 	let mut sent = [Flow::default()];
 	publish_blocks(BLOCKS, &[(&producers[0], 0, SYMBOLS_PER_BLOCK, b"src")], &mut sent).await;
@@ -767,37 +799,34 @@ async fn arm_b_fetch_group_under_contiguous_object_ids() {
 		"every object reached the relay cache"
 	);
 
-	// FETCH block 1 by group sequence, not by subscribing and waiting.
+	// FETCH one block by group sequence, not by subscribing and waiting.
 	let track = h.consumer.track("video").expect("track announced");
 	let mut fetched = Flow {
 		sent: SYMBOLS_PER_BLOCK as usize,
 		..Default::default()
 	};
-	let mut group = tokio::time::timeout(TIMEOUT, track.fetch_group(1, None))
+	let mut group = tokio::time::timeout(TIMEOUT, track.fetch_group(FETCH_BLOCK as u64, None))
 		.await
 		.expect("fetch timeout")
-		.expect("fetch group 1");
+		.expect("fetch group");
+	// The report label names the block too, so it cannot mislabel the
+	// `[arm-b/fetch/...]` evidence line if `FETCH_BLOCK` is edited.
+	let label = format!("fetch/group{FETCH_BLOCK}");
 	loop {
 		let frame = match tokio::time::timeout(TIMEOUT, group.read_frame()).await {
 			Ok(Ok(Some(frame))) => frame,
 			Ok(Ok(None)) => break,
-			Ok(Err(err)) => panic!(
-				"fetch/group1: transport error after {} objects: {err}",
-				fetched.received
-			),
-			Err(_) => panic!(
-				"fetch/group1: timed out after {TIMEOUT:?}, {} objects in",
-				fetched.received
-			),
+			Ok(Err(err)) => panic!("{label}: transport error after {} objects: {err}", fetched.received),
+			Err(_) => panic!("{label}: timed out after {TIMEOUT:?}, {} objects in", fetched.received),
 		};
 		let decoded = decode(&frame.payload);
-		assert_eq!(decoded.sbn, 1, "fetched block carries its own SBN");
+		assert_eq!(decoded.sbn, FETCH_BLOCK, "fetched block carries its own SBN");
 		fetched.received += 1;
 		fetched.objects.push(decoded);
-		*fetched.groups.entry(1).or_default() += 1;
+		*fetched.groups.entry(FETCH_BLOCK as u64).or_default() += 1;
 	}
 
-	println!("{}", fetched.report("fetch/group1"));
+	println!("{}", fetched.report(&label));
 	assert_eq!(
 		fetched.received, SYMBOLS_PER_BLOCK as usize,
 		"FETCH served the whole block"
