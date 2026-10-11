@@ -23,6 +23,25 @@
 //! Blockcast addition. If this file passes against a stock checkout, arm B's
 //! carried patch is zero files and zero lines.
 //!
+//! ## This branch is NOT a stock checkout, so that claim has to be re-run
+//!
+//! The file lives on `Blockcast/moq`'s `main`, which is upstream `0574f5b60`
+//! plus Blockcast/moq#2 -- `rs/moq-net/src/ietf/publisher.rs +292 -34`, the
+//! draft-20 FETCH work from BLO-41181. So "zero diff against upstream" is a
+//! claim about `0574f5b60`, not about the tree this file is read in, and a
+//! green run here does not on its own establish it. Re-establish it with:
+//!
+//! ```text
+//! git checkout 0574f5b60 -- rs/moq-net
+//! RUSTUP_TOOLCHAIN=stable cargo test -p moq-relay --features test-support \
+//!     --test mmtp_arm_b -- --nocapture
+//! ```
+//!
+//! Verified green that way on 2026-10-09 at `45cd0856`: 6/6, same counts as
+//! the unreverted tree. Anything cut from this branch inherits #2 -- see the
+//! scope note on `arm_b_measurements_are_taken_on_a_moq_lite_session`, where
+//! #2 changes what the IETF half of the FETCH result would mean.
+//!
 //! ## Ordering matters, and getting it wrong measures the cache instead
 //!
 //! The publisher must write **into a live subscription**. An earlier draft of
@@ -483,6 +502,15 @@ async fn arm_b_source_and_two_repair_tracks_round_trip() {
 /// This is the behaviour the Blockcast catalog already models with
 /// `packaging: "fec-repair"` + `priority` 192..255 and the `joinedRepairCount`
 /// vs `fecTotalRepairCount` split.
+///
+/// Scope, because the name reads wider than the assertions: this measures that
+/// stock `moq-net` **accepts** a distinct per-track `Subscription::priority` and
+/// still delivers each joined flow in full. It does **not** measure that the
+/// priority is honoured -- both assertions are totals, and nothing here
+/// constrains interleaving or preemption between the 200 and 100 flows. The
+/// `priority=` suffix on each printed line is the value asked for, not a value
+/// observed. Ordering under contention would need a congested link and belongs
+/// to whatever row measures it; do not cite this test for it.
 #[tokio::test]
 async fn arm_b_repair_tracks_subscribe_and_prioritise() {
 	let names = ["video", "video/fec/0", "video/fec/1"];
@@ -720,19 +748,29 @@ async fn arm_b_fetch_group_under_contiguous_object_ids() {
 	let live_drain = spawn_drain("fetch/live-subscription", live);
 	tokio::time::sleep(SETTLE).await;
 
+	// Every count below is derived from these two, not restated: a hand-written
+	// literal that drifts from the layout shows up as a delivery failure, after
+	// the `[arm-b/fetch/...]` line has already printed the wrong `dropped=`.
+	const BLOCKS: u32 = 3;
+	const SYMBOLS_PER_BLOCK: u32 = 4;
+
 	let mut sent = [Flow::default()];
-	publish_blocks(3, &[(&producers[0], 0, 4, b"src")], &mut sent).await;
+	publish_blocks(BLOCKS, &[(&producers[0], 0, SYMBOLS_PER_BLOCK, b"src")], &mut sent).await;
 	producers[0].finish().expect("finish track");
 
 	let mut live_flow = live_drain.await.expect("live drain");
 	live_flow.sent = sent[0].sent;
 	println!("{}", live_flow.report("fetch/live-subscription"));
-	assert_eq!(live_flow.received, 12, "every object reached the relay cache");
+	assert_eq!(
+		live_flow.received,
+		(BLOCKS * SYMBOLS_PER_BLOCK) as usize,
+		"every object reached the relay cache"
+	);
 
 	// FETCH block 1 by group sequence, not by subscribing and waiting.
 	let track = h.consumer.track("video").expect("track announced");
 	let mut fetched = Flow {
-		sent: 4,
+		sent: SYMBOLS_PER_BLOCK as usize,
 		..Default::default()
 	};
 	let mut group = tokio::time::timeout(TIMEOUT, track.fetch_group(1, None))
@@ -760,7 +798,10 @@ async fn arm_b_fetch_group_under_contiguous_object_ids() {
 	}
 
 	println!("{}", fetched.report("fetch/group1"));
-	assert_eq!(fetched.received, 4, "FETCH served the whole block");
+	assert_eq!(
+		fetched.received, SYMBOLS_PER_BLOCK as usize,
+		"FETCH served the whole block"
+	);
 	assert!(fetched.contiguous(), "no holes for the relay to query upstream for");
 
 	h.shutdown().await;
@@ -785,14 +826,29 @@ async fn arm_b_fetch_group_under_contiguous_object_ids() {
 ///
 /// `Filter::is_draft20` (`rs/moq-net/src/ietf/filter.rs`) is a misnomer: it is
 /// `!matches!(version, Draft14..=Draft19)`, so it is true for **draft-20 and
-/// every later draft** -- 20, 21 and 22 alike. No IETF draft the default
-/// preference order would pick serves FETCH at all, and arm B's FETCH result
-/// does not carry over to any of them. That matters because `ALL` lists
-/// `Draft22` and `Draft21` *ahead* of `Draft20`: a session that did slide onto
-/// the IETF path would negotiate draft-22, and "target a later draft instead"
-/// is not an available move. The contiguous object-ID argument the FETCH result
-/// supports is draft-independent and stands; the "relay serves it from cache"
-/// half is measured here only on moq-lite. See BLO-41181, which fills that gap
+/// every later draft** -- 20, 21 and 22 alike. No IETF draft **at or above 20**
+/// serves FETCH upstream, so arm B's FETCH result does not carry over to the
+/// drafts a fresh negotiation would actually reach. Not "no IETF draft at all":
+/// `ALL` continues past `Draft20` through `Draft19 ..= Draft14`, where
+/// `is_draft20` is false and `run_fetch_stream` does serve -- those six are
+/// simply last in preference. What makes the gap real is the other end of the
+/// list: `ALL` puts `Draft22` and `Draft21` *ahead* of `Draft20`, so a session
+/// that did slide onto the IETF path would negotiate draft-22, and "target a
+/// later draft instead" is not an available move.
+///
+/// This branch is the exception that proves the point, and it is why the module
+/// header insists the zero-diff claim be re-run rather than read off a green
+/// lane: `Blockcast/moq#2` serves a **single-group** draft-20 FETCH from its
+/// LOCATION_FILTER (`a_draft20_fetch_serves_one_whole_group`), which is the
+/// shape our repair FETCH emits. Multi-group stays refused
+/// (`a_draft20_fetch_of_several_groups_is_refused`). So on this tree the
+/// upstream paragraph above describes `0574f5b60`, not what is compiled beside
+/// it -- and the assertion below is what stops that difference from quietly
+/// changing the meaning of a count.
+///
+/// The contiguous object-ID argument the FETCH result supports is
+/// draft-independent and stands; the "relay serves it from cache" half is
+/// measured here only on moq-lite. See BLO-41181, which fills that gap
 /// upstream.
 ///
 /// This asserts the protocol family, not the exact draft: a lite bump is a
@@ -811,7 +867,8 @@ async fn arm_b_measurements_are_taken_on_a_moq_lite_session() {
 		assert!(
 			matches!(version, moq_net::Version::Lite(_)),
 			"{label} negotiated {version:?}; every count in this file is scoped to moq-lite, \
-			 and an IETF session would additionally refuse FETCH at draft-20 and later"
+			 and an IETF session would serve FETCH on different terms -- refused at \
+			 draft-20 and later upstream, single-group only under Blockcast/moq#2"
 		);
 	}
 
