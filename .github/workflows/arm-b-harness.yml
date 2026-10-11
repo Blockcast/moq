@@ -1,23 +1,35 @@
 name: Arm-B harness
 
 # BLO-41723 condition 1: the arm-B MMTP->MoQ harness is the evidence for the
-# arm B ruling, so it has to be *run*, not merely committed. Before this lane
-# it was committed and run by nothing:
+# arm B ruling, so it has to be *run*, not merely committed. The `Check` lane
+# does run it today -- `rs: selecting moq-cli moq-relay`, six for six -- but
+# only through two couplings that can each stop holding with every lane green:
 #
 #   * `rs/moq-relay/tests/mmtp_arm_b.rs` opens `#![cfg(feature =
 #     "test-support")]`, and `test-support` is not in moq-relay's `default`.
-#   * The PR lane (`Check` -> `just ci test` -> `rs/justfile` `check-test`)
-#     runs `cargo nextest run --locked --all-targets --no-tests=pass` with no
-#     `--all-features`, so the file compiles to an *empty* test binary and
-#     `--no-tests=pass` makes that silently green.
-#   * The only recipe that enables it is `just rs features` (`--all-features`),
-#     wired solely to `nightly.yml`'s cron -- and GitHub does not run scheduled
-#     workflows on a fork, so Nightly has never run here (0 runs, workflow
-#     `active`).
+#     What enables it is feature unification from an unrelated crate:
+#     `rs/moq-cli/Cargo.toml` dev-depends on moq-relay with that feature, and
+#     `sh/rs/select.sh` walks dependents over `cargo metadata`'s
+#     `.dependencies[]`, which includes dev edges -- so any selection of
+#     moq-relay drags moq-cli in and the feature arrives with it. Edit that one
+#     dev-dependency line and the file compiles to an *empty* test binary,
+#     which `--no-tests=pass` reports green. The comment above that file's
+#     `#![cfg(...)]` attribute says the same.
+#   * `sh/dispatch.sh`'s impact map puts `rs` in scope only for a diff that
+#     touches it, and `sh/rs/select.sh` then prints `no crates affected;
+#     skipping` for a diff carrying no `rs/` path. A change that breaks the
+#     harness from outside `rs/` -- this pull request's own tree, for one --
+#     is never run against it at all.
 #
-# So this lane runs the harness directly, and `--no-tests=fail` is the point:
-# if the feature ever stops pulling the file in, or the file moves, this goes
-# red instead of passing on nothing. That silent-skip is the defect above.
+# So this lane runs the harness directly, naming the feature and the test
+# target on the command line rather than inheriting either. `--no-tests=fail`
+# is the point: if the feature ever stops pulling the file in, or the file
+# moves, this goes red instead of passing on nothing.
+#
+# `just rs features` (`--all-features`) would enable it too, but it is wired
+# solely to `nightly.yml`'s cron, and GitHub does not run scheduled workflows
+# on a fork, so Nightly has never run here (0 runs, workflow `active`). That is
+# why `main` needs the standing `push:` guard below rather than inheriting one.
 #
 # `RUSTUP_TOOLCHAIN=stable` is deliberately NOT set here. It is the workaround
 # for a disposable clone where `rust-toolchain.toml`'s 1.98.1 pin is not
@@ -30,6 +42,8 @@ permissions:
 on:
   pull_request:
     types: [opened, synchronize, reopened]
+  merge_group:
+    types: [checks_requested]
   # Nightly never fires on a fork, so `main` needs its own standing guard: this
   # harness backs a claim *about* `main`.
   push:
@@ -37,14 +51,21 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: arm-b-harness-${{ github.ref }}
-  cancel-in-progress: true
+  # Keyed by event as well as ref so a manual re-run cannot displace a queued
+  # `main` push: with cancelling off, Actions keeps only the newest pending run
+  # per group, and the push run is the standing guard.
+  group: arm-b-harness-${{ github.event_name }}-${{ github.ref }}
+  # Pushes queue rather than cancel, as in `platform.yml` and `obs.yml`:
+  # `main` merges faster than this job finishes, and a cancelled run is a
+  # commit with no verdict, which `alert.yml` excludes by design. Actions keeps
+  # only the newest pending run, so queued merges still coalesce.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   harness:
     name: Arm-B harness
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
@@ -69,6 +90,16 @@ jobs:
 
       - name: Rust cache
         uses: ./.github/actions/rust-cache
+        with:
+          # Its own key space, as `release-rs` has. `moq-relay --features
+          # test-support` under plain cargo fingerprints differently from
+          # `check-test`'s clippy-driver build, so this builds a different set
+          # of artifacts -- and the action saves on every push to the default
+          # branch, which this lane now is. Sharing `shared` would make a
+          # docs-only merge (which `cache.yml` and `obs.yml` both filter out,
+          # and this lane does not) the newest entry under the restore-key
+          # prefix every pull request reads.
+          scope: arm-b
 
       # The command the harness's own module docs tell a reader to run, so the
       # doc and the gate cannot drift. One crate, one test target -- not the
