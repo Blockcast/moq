@@ -1067,6 +1067,8 @@ export class Subscriber {
 					update = await PublishNamespaceUpdate.decode(stream.reader, version);
 				} catch (err) {
 					if (!(err instanceof MalformedAuthToken)) throw err;
+					// A refused update still spends its own request ID.
+					if (err.requestId !== undefined) this.#session.spendRequest(err.requestId);
 					// Section 8.9 rejects the update, which withdraws the advertisement as any
 					// refused update does. Only draft-17+ updates arrive here, so no Request ID.
 					await stream.writer.u53(RequestError.id);
@@ -1077,6 +1079,7 @@ export class Subscriber {
 					stream.close();
 					break;
 				}
+				this.#session.spendRequest(update.requestId);
 
 				// The parameters exist only on a session that negotiated the extension;
 				// anywhere else they are the peer's violation.

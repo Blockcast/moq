@@ -532,7 +532,7 @@ export class Publisher {
 					let params: Parameters;
 					try {
 						params = await Message.decode(stream.reader, async (r) => {
-							await r.u62();
+							this.#session.spendRequest(await r.u62());
 							if (version === Version.DRAFT_17) await r.u62();
 							return Parameters.decode(r, version, "request-update");
 						});
