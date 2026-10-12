@@ -1,5 +1,6 @@
 import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.ts";
-import { asIetf, type Cursor, type Reader, Writer } from "../stream.ts";
+import type { ObjectProperty } from "../group.ts";
+import { asIetf, Cursor, type Reader, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
@@ -71,7 +72,15 @@ async function encodeObjectExtensions(
 	timestamp: Timestamp | undefined,
 	timescale: Timescale,
 	version: IetfVersion,
+	properties?: Uint8Array,
 ): Promise<Uint8Array> {
+	// A caller holding the block verbatim (a relay, or a test pinning what a peer sent)
+	// already has every property in it, including the Timestamp. Re-deriving one would
+	// write a second copy and break the ascending type deltas, so the block wins.
+	if (properties !== undefined) {
+		return properties;
+	}
+
 	if (timestamp === undefined) {
 		return new Uint8Array();
 	}
@@ -99,36 +108,69 @@ async function encodeObjectExtensions(
 	return result;
 }
 
-function decodeObjectTime(c: Cursor, timescale: Timescale): Timestamp | undefined {
+/** A decoded properties block: its bytes, every property in it, and the timestamp if one was there. */
+interface ObjectProperties {
+	raw: Uint8Array;
+	list: ObjectProperty[];
+	timestamp?: Timestamp;
+}
+
+/**
+ * Decode a whole object properties block.
+ *
+ * Every property reaches {@link ObjectProperties.list}, whatever its id: an even type with
+ * its varint value, an odd type with its bytes. Only Timestamp and Timescale are read a
+ * second time to build the frame's {@link Timestamp}, and that is a convenience over the
+ * list, not a filter on it — a registry addition needs no change here.
+ *
+ * `c` must span exactly the block (see {@link Cursor.exact}); the raw bytes are taken from
+ * it before parsing so a consumer can forward the block unchanged.
+ */
+function decodeObjectProperties(c: Cursor, timescale: Timescale | undefined): ObjectProperties {
+	const raw = c.read(c.remaining);
+	const e = new Cursor(raw, c.version);
+
+	const list: ObjectProperty[] = [];
 	let timestamp: bigint | undefined;
 	let overrideScale: bigint | undefined;
 	let prevType = 0n;
 	let first = true;
 
-	while (c.remaining > 0) {
-		const step = c.u62();
-		const id = !hasDeltaObjectPropertyTypes(asIetf(c.version)) || first ? step : prevType + step;
+	while (e.remaining > 0) {
+		const step = e.u62();
+		const id = !hasDeltaObjectPropertyTypes(asIetf(e.version)) || first ? step : prevType + step;
 		first = false;
 		prevType = id;
 
 		if (id % 2n === 0n) {
-			const value = c.u62();
+			const value = e.u62();
+			list.push({ type: id, value });
 			if (id === PROP_TIMESTAMP || id === PROP_TIMESTAMP_DRAFT03) {
 				timestamp = value;
 			} else if (id === PROP_TIMESCALE) {
 				overrideScale = value;
 			}
 		} else {
-			c.read(c.u53());
+			list.push({ type: id, bytes: e.read(e.u53()) });
 		}
 	}
 
-	if (timestamp === undefined) {
-		return undefined;
+	// A track that declared no timescale opted out of timestamps, so its objects are stamped
+	// on arrival even if one carries a Timestamp we cannot interpret. The properties still
+	// reach the consumer.
+	if (timestamp === undefined || timescale === undefined) {
+		return { raw, list };
 	}
 
 	// An object-scope Timescale (which LOC permits) overrides the track's for this object.
-	return new Timestamp(Number(timestamp), overrideScale !== undefined ? Timescale(Number(overrideScale)) : timescale);
+	return {
+		raw,
+		list,
+		timestamp: new Timestamp(
+			Number(timestamp),
+			overrideScale !== undefined ? Timescale(Number(overrideScale)) : timescale,
+		),
+	};
 }
 
 export interface GroupFlags {
@@ -263,28 +305,57 @@ export class Frame {
 	 * does not exist either, so the track ends at that group; later in a group it ends after it.
 	 */
 	endOfTrack: boolean;
+	/**
+	 * This object's Object ID within its group, resolved from the deltas on the stream.
+	 *
+	 * `undefined` on a frame built to encode, where the caller supplies the delta instead.
+	 */
+	objectId?: number;
+	/** The Object Status on the wire: 0 for a normal object. */
+	status: number;
+	/** The object's properties block, verbatim, as a view onto the stream's bytes. */
+	properties?: Uint8Array;
+	/** The same block parsed into its properties, both parities, in wire order. */
+	propertyList?: ObjectProperty[];
 
 	constructor({
 		payload,
 		timestamp,
 		endOfTrack = false,
-	}: { payload?: Uint8Array; timestamp?: Timestamp; endOfTrack?: boolean } = {}) {
+		objectId,
+		status = 0,
+		properties,
+		propertyList,
+	}: {
+		payload?: Uint8Array;
+		timestamp?: Timestamp;
+		endOfTrack?: boolean;
+		objectId?: number;
+		status?: number;
+		properties?: Uint8Array;
+		propertyList?: ObjectProperty[];
+	} = {}) {
 		this.payload = payload;
 		this.timestamp = timestamp;
 		this.endOfTrack = endOfTrack;
+		this.objectId = objectId;
+		this.status = status;
+		this.properties = properties;
+		this.propertyList = propertyList;
 	}
 
 	/**
 	 * Encode this frame using the group flags and negotiated IETF version.
 	 *
-	 * `idDelta` is the first object's absolute Object ID and zero for every later one, so a
-	 * group whose head was trimmed by a filter still puts the true numbering on the wire.
+	 * `idDelta` is the first object's absolute Object ID, and for every later one the count of
+	 * Object IDs skipped before it, so a group whose head was trimmed by a filter and one
+	 * carrying a deliberate gap both put their true numbering on the wire.
 	 */
 	async encode(w: Writer, flags: GroupFlags, timescale: Timescale, version: IetfVersion, idDelta = 0): Promise<void> {
 		await w.u53(idDelta);
 
 		if (flags.hasExtensions) {
-			const extensions = await encodeObjectExtensions(this.timestamp, timescale, version);
+			const extensions = await encodeObjectExtensions(this.timestamp, timescale, version, this.properties);
 			await w.u53(extensions.byteLength);
 			await w.write(extensions);
 		}
@@ -306,50 +377,62 @@ export class Frame {
 		}
 	}
 
-	/** Decode a frame using the group flags, at the cursor's negotiated IETF version. */
-	static decode(c: Cursor, flags: GroupFlags, timescale: Timescale | undefined): Frame {
+	/**
+	 * Decode a frame using the group flags, at the cursor's negotiated IETF version.
+	 *
+	 * `prior` is the Object ID of the object before this one on the same stream, and
+	 * `undefined` for the stream's first object.
+	 */
+	static decode(c: Cursor, flags: GroupFlags, timescale: Timescale | undefined, prior?: number): Frame {
 		// The first object's delta is its absolute Object ID; every later one is the prior ID
-		// plus the delta plus one. moq-lite groups start at object 0 and never skip one, so
-		// a sequential group is a zero delta throughout, and any other value means the group
-		// either starts partway through or has a gap that would renumber the frames after it.
+		// plus the delta plus one, so a non-zero delta is a gap the publisher left on purpose.
+		// A gap is data: moq-transport numbers an object, and a mapping that rides in that
+		// numbering (an AL-FEC repair flow against its source flow) is destroyed by renumbering
+		// it. The object id travels with the frame instead.
 		const delta = c.u53();
-		if (delta !== 0) {
+		const objectId = prior === undefined ? delta : prior + delta + 1;
+
+		// The one case that is still a contradiction rather than a gap: a header claiming it
+		// carries the group from its first published object, whose first object is not 0. The
+		// head is missing and nothing downstream can tell which objects it held.
+		if (prior === undefined && flags.firstObject && objectId !== 0) {
 			throw new Error(`object IDs must start at 0 and increment by 1, got a delta of ${delta}`);
 		}
 
 		let timestamp: Timestamp | undefined;
+		let properties: Uint8Array | undefined;
+		let propertyList: ObjectProperty[] | undefined;
 		if (flags.hasExtensions) {
 			const extensionsLength = c.u53();
 			if (extensionsLength > MAX_OBJECT_EXTENSIONS) {
 				throw new StreamError(StreamCode.MalformedTrack, { message: "object extensions exceed 64 KiB" });
 			}
-			// A track that declared no timescale opted out of timestamps, so its objects
-			// are stamped on arrival even if one carries a Timestamp we cannot interpret.
-			if (timescale !== undefined) {
-				timestamp = c.exact(extensionsLength, (e) => decodeObjectTime(e, timescale));
-			} else {
-				c.read(extensionsLength);
-			}
+			const decoded = c.exact(extensionsLength, (e) => decodeObjectProperties(e, timescale));
+			timestamp = decoded.timestamp;
+			properties = decoded.raw;
+			propertyList = decoded.list;
 		}
 
 		const payloadLength = c.u53();
 
 		if (payloadLength > 0) {
 			const payload = c.read(payloadLength);
-			return new Frame({ payload, timestamp });
+			return new Frame({ payload, timestamp, objectId, properties, propertyList });
 		}
 
 		const status = c.u53();
 
 		// Defined on every implemented draft, whether or not the header marks the group's end.
-		if (status === END_OF_TRACK) return new Frame({ endOfTrack: true });
+		if (status === END_OF_TRACK) return new Frame({ endOfTrack: true, objectId, status, properties, propertyList });
 
 		if (flags.hasEnd) {
 			// Empty frame
-			if (status === 0) return new Frame({ payload: new Uint8Array(0), timestamp });
+			if (status === 0) {
+				return new Frame({ payload: new Uint8Array(0), timestamp, objectId, status, properties, propertyList });
+			}
 		} else if (status === 0 || status === GROUP_END) {
 			// TODO status === 0 should be an empty frame, but moq-rs seems to be sending it incorrectly on group end.
-			return new Frame();
+			return new Frame({ objectId, status, properties, propertyList });
 		}
 
 		throw new Error(`Unsupported object status: ${status}`);

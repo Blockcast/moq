@@ -1542,6 +1542,7 @@ export class Subscriber {
 					frame: next.sequence,
 					payload: next.payload,
 					timestamp: next.timestamp,
+					object: next.object,
 				};
 			}
 

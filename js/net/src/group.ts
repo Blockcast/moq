@@ -15,6 +15,45 @@ export const MAX_GROUP_CACHE_BYTES = 32 * 1024 * 1024;
 export const MAX_GROUP_FRAMES = 8192;
 
 /**
+ * One MOQ Object Property, exactly as it appeared on the wire.
+ *
+ * No property id is interpreted here: an even type carries a varint {@link value} and an
+ * odd type carries a length-prefixed {@link bytes}, which is the whole of what the encoding
+ * says. A consumer that knows a codepoint reads it from this list; a registry change moves
+ * nothing in this file.
+ */
+export interface ObjectProperty {
+	/** The property type id, after delta decoding. */
+	type: bigint;
+	/** An even-typed property's integer value. */
+	value?: bigint;
+	/** An odd-typed property's bytes, as a view onto the properties block. */
+	bytes?: Uint8Array;
+}
+
+/**
+ * A moq-transport object's own identity, for a frame that arrived as one.
+ *
+ * moq-lite identifies a frame by its position in the group, which is all a moq-lite peer
+ * ever sends. A moq-transport object additionally names its subgroup, its Object ID, its
+ * status and its properties, and a mapping that rides in those (MPEG MMTP, AL-FEC repair)
+ * is lost if the model keeps only the position. Absent on every frame a moq-lite peer or a
+ * local publisher wrote.
+ */
+export interface ObjectInfo {
+	/** The Subgroup ID of the stream that carried this object. */
+	subgroup: number;
+	/** The Object ID within the group, which may skip values. */
+	id: number;
+	/** The Object Status: 0 for a normal object. */
+	status: number;
+	/** The object's properties block, verbatim, as a view onto the stream's bytes. */
+	properties?: Uint8Array;
+	/** The same block parsed into its properties, both parities, in wire order. */
+	propertyList?: ObjectProperty[];
+}
+
+/**
  * A frame buffered in a group: its presentation {@link Timestamp} and payload bytes.
  *
  * The timestamp carries its own scale, so a track can pick its units; the wire layer
@@ -28,6 +67,13 @@ export interface Frame {
 	 * (a JSON catalog, control state) pass {@link Timestamp.now} explicitly.
 	 */
 	timestamp: Timestamp;
+	/**
+	 * The moq-transport object identity this frame arrived with, when it arrived as one.
+	 *
+	 * Optional and never required to produce a frame: the moq-lite path neither sets nor
+	 * reads it.
+	 */
+	object?: ObjectInfo;
 }
 
 /** Options for a sequence-aware frame read. */
@@ -563,7 +609,12 @@ export class Consumer {
 		const read = this.#readBufferedFrame();
 		if (!read) return undefined;
 		read.complete();
-		return { sequence: read.sequence, payload: read.frame.payload, timestamp: read.frame.timestamp };
+		return {
+			sequence: read.sequence,
+			payload: read.frame.payload,
+			timestamp: read.frame.timestamp,
+			object: read.frame.object,
+		};
 	}
 
 	/** Resolves once {@link readFrame} would not block. */
@@ -624,7 +675,12 @@ export class Consumer {
 	async readFrameSequence(options?: ReadOptions): Promise<({ sequence: number } & Frame) | undefined> {
 		const read = await this.#readFramePosition(false, options?.from ?? 0);
 		if (!read) return undefined;
-		return { sequence: read.sequence, payload: read.frame.payload, timestamp: read.frame.timestamp };
+		return {
+			sequence: read.sequence,
+			payload: read.frame.payload,
+			timestamp: read.frame.timestamp,
+			object: read.frame.object,
+		};
 	}
 
 	/** Reads the next frame and decodes its payload as a UTF-8 string. */
