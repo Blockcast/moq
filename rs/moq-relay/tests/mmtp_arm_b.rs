@@ -27,11 +27,11 @@
 //!
 //! The file lives on `Blockcast/moq`'s `main`, which is upstream `0574f5b60`
 //! plus two Blockcast changes under `rs/moq-net`, together `priority.rs +38`
-//! and `publisher.rs +417 -41` (two files, +414 -41):
+//! and `publisher.rs +376 -41` (two files, +414 -41):
 //!
 //! * Blockcast/moq#2 -- `publisher.rs +292 -34`, the draft-20 FETCH work from
 //!   BLO-41181;
-//! * Blockcast/moq#3 -- `priority.rs +38`, `publisher.rs +91 -7`, the
+//! * Blockcast/moq#3 -- `priority.rs +38`, `publisher.rs +84 -7`, the
 //!   repair-band ordering pins from BLO-41724.
 //!
 //! Neither is an arm-B carried patch -- both are Blockcast's own `moq-net`
@@ -51,20 +51,21 @@
 //! substitute: `git checkout <commit> -- <path>` stages into the index as
 //! well, so an index-sourced restore just rewrites the reverted tree. Skip it
 //! either way and the checkout is left with both changes removed while nothing
-//! on screen says so: anything run next there -- #2's own `a_draft20_fetch_*`
-//! tests and #3's priority pins most of all -- would silently measure a tree
-//! with the draft-20 FETCH deleted.
+//! in the test output says so: anything run next there -- #2's own
+//! `a_draft20_fetch_*` tests and #3's priority pins most of all -- would
+//! silently measure a tree with the draft-20 FETCH deleted.
 //! That is this file's own subject one level down, a reader holding a tree
 //! that is not the tree they think they hold.
 //!
 //! Verified green that way on 2026-10-11 at `a6bac516` -- `main` at the time
-//! this note was written, i.e. the parent of the commit carrying it: 6/6 both
-//! reverted and unreverted, same counts. The SHA is recorded so a reader can
-//! diff forward from it. A later commit does not invalidate the run; it only
-//! means the run is older than the tree, and `git diff a6bac516..HEAD --
-//! rs/moq-net rs/moq-relay/tests/mmtp_arm_b.rs` is the whole question of
-//! whether it still speaks for this tree. Anything cut from this branch
-//! inherits both -- see the scope note on
+//! this note was written: 6/6 both reverted and unreverted, same counts. The
+//! SHA is recorded so a reader can diff forward from it. A later commit does
+//! not invalidate the run; it only means the run is older than the tree, and
+//! `git diff a6bac516..HEAD -- rs/ Cargo.lock` is the first question of
+//! whether it still speaks for this tree (the run also depends on
+//! `moq-relay`'s own source and `moq-lite`, so narrowing the pathspec to
+//! `rs/moq-net` would hide a change that matters). Anything cut from this
+//! branch inherits both -- see the scope note on
 //! `arm_b_measurements_are_taken_on_a_moq_lite_session`, where #2 changes what
 //! the IETF half of the FETCH result would mean.
 //!
