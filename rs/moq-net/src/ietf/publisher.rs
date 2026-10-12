@@ -13,7 +13,7 @@ use std::{
 use crate::transport::poll::SendStream as _;
 
 use crate::{
-	AsPath, Error, Timescale, Timestamp,
+	AsPath, DecodeError, Error, Timescale, Timestamp,
 	coding::{Encode as _, Encoder, Stream, Writer},
 	ietf::{self, Control, EndLocation, FetchHeader, FetchType, Filter, GroupOrder, Location, RequestId},
 	track::Subscription,
@@ -540,7 +540,12 @@ where
 		});
 		let task = match id {
 			ietf::Subscribe::ID => {
-				let msg = ietf::Subscribe::decode_msg(&mut data, this.version)?;
+				let msg = match ietf::Subscribe::decode_msg(&mut data, this.version) {
+					Err(DecodeError::MalformedAuthToken) => {
+						return Ok(this.reject_token(stream, request::Kind::Subscribe, body.clone(), serve));
+					}
+					msg => msg?,
+				};
 				if !data.is_empty() {
 					return Err(Error::WrongSize);
 				}
@@ -555,7 +560,12 @@ where
 				.maybe_boxed()
 			}
 			ietf::Fetch::ID => {
-				let msg = ietf::Fetch::decode_msg(&mut data, this.version)?;
+				let msg = match ietf::Fetch::decode_msg(&mut data, this.version) {
+					Err(DecodeError::MalformedAuthToken) => {
+						return Ok(this.reject_token(stream, request::Kind::Fetch, body.clone(), serve));
+					}
+					msg => msg?,
+				};
 				if !data.is_empty() {
 					return Err(Error::WrongSize);
 				}
@@ -572,17 +582,25 @@ where
 			// to the same request_id + namespace. We never send PUBLISH, so a legacy
 			// request for PUBLISH alone is refused, and one for both gets only NAMESPACE.
 			ietf::SubscribeNamespace::ID | ietf::SubscribeNamespaceLegacy::ID => {
-				let (msg, options) = if id == ietf::SubscribeNamespace::ID {
-					let msg = ietf::SubscribeNamespace::decode_msg(&mut data, this.version)?;
-					(msg, ietf::SubscribeOptions::Namespace)
+				let decoded = if id == ietf::SubscribeNamespace::ID {
+					ietf::SubscribeNamespace::decode_msg(&mut data, this.version)
+						.map(|msg| (msg, ietf::SubscribeOptions::Namespace))
 				} else {
-					let legacy = ietf::SubscribeNamespaceLegacy::decode_msg(&mut data, this.version)?;
-					let msg = ietf::SubscribeNamespace {
-						request_id: legacy.request_id,
-						namespace: legacy.namespace,
-						hidden: legacy.hidden,
-					};
-					(msg, legacy.subscribe_options)
+					ietf::SubscribeNamespaceLegacy::decode_msg(&mut data, this.version).map(|legacy| {
+						let msg = ietf::SubscribeNamespace {
+							request_id: legacy.request_id,
+							namespace: legacy.namespace,
+							hidden: legacy.hidden,
+						};
+						(msg, legacy.subscribe_options)
+					})
+				};
+				let (msg, options) = match decoded {
+					Err(DecodeError::MalformedAuthToken) => {
+						let kind = request::Kind::SubscribeNamespace;
+						return Ok(this.reject_token(stream, kind, body.clone(), serve));
+					}
+					decoded => decoded?,
 				};
 				if !data.is_empty() {
 					return Err(Error::WrongSize);
@@ -623,7 +641,12 @@ where
 				.maybe_boxed()
 			}
 			ietf::TrackStatus::ID => {
-				let msg = ietf::TrackStatus::decode_msg(&mut data, this.version)?;
+				let msg = match ietf::TrackStatus::decode_msg(&mut data, this.version) {
+					Err(DecodeError::MalformedAuthToken) => {
+						return Ok(this.reject_token(stream, request::Kind::TrackStatus, body.clone(), serve));
+					}
+					msg => msg?,
+				};
 				if !data.is_empty() {
 					return Err(Error::WrongSize);
 				}
@@ -641,6 +664,25 @@ where
 			}
 		};
 		Ok(task)
+	}
+
+	/// Refuse a request whose AUTHORIZATION TOKEN repeats (section 8.9), which unlike any
+	/// other decode error leaves the session open.
+	fn reject_token(
+		&self,
+		stream: Stream<S, Version>,
+		kind: request::Kind,
+		body: ietf::Body,
+		serve: Option<Serve>,
+	) -> MaybeSendBox<'static, ()> {
+		let version = self.version;
+		async move {
+			let _serve = serve;
+			if let Err(err) = super::token::reject(stream, kind, body, version).await {
+				tracing::debug!(%err, "token refusal failed");
+			}
+		}
+		.maybe_boxed()
 	}
 
 	/// Handle a SUBSCRIBE on its bidi stream.
@@ -976,6 +1018,15 @@ where
 			match event {
 				Ok(None) => return Some(Ok(())),
 				Err(Error::Cancel) => return None,
+				// An update the draft answers by closing the session, such as one whose
+				// AUTHORIZATION TOKEN names an alias, closes it rather than only ending this
+				// subscription, as the same token on the request itself would.
+				Err(err @ Error::Decode(crate::coding::DecodeError::Session(_))) => {
+					self.session
+						.clone()
+						.close(crate::SessionError::from(&err).to_code(), &err.to_string());
+					return Some(Err(err));
+				}
 				Err(err) => return Some(Err(err)),
 				Ok(Some(update)) => {
 					// Draft 14 answers no update. Drafts 15 and 16 answer on the control
@@ -983,18 +1034,18 @@ where
 					let answer = self.version != Version::Draft14;
 					let answer_id =
 						matches!(self.version, Version::Draft15 | Version::Draft16).then_some(update.request_id);
-					if update.unsupported {
+					if let Some(err) = update.refused {
+						let reason = match err {
+							Error::Unsupported => "REQUEST_UPDATE parameters not supported",
+							_ => "repeated AUTHORIZATION TOKEN",
+						};
 						let result = if answer {
-							self.write_subscribe_error(
-								&mut stream.writer,
-								update.request_id,
-								&Error::Unsupported,
-								"REQUEST_UPDATE parameters not supported",
-							)
-							.await
+							self.write_subscribe_error(&mut stream.writer, update.request_id, &err, reason)
+								.await
 						} else {
 							Ok(())
 						};
+						// Either way the update failed, which ends the subscription.
 						return Some(result.and(Err(Error::Unsupported)));
 					}
 					if let Some(priority) = update.priority
@@ -4527,8 +4578,8 @@ mod serve_tests {
 		)
 		.await;
 
-		// REQUEST_UPDATE, Request ID 2, one AUTHORIZATION TOKEN (0x03) parameter.
-		request.push(&[0x02, 0, 5, 2, 1, 0x03, 1, 0x00]);
+		// REQUEST_UPDATE, Request ID 2, one AUTHORIZATION TOKEN (0x03): USE_VALUE, type 0.
+		request.push(&[0x02, 0, 6, 2, 1, 0x03, 2, 0x03, 0x00]);
 		moq_net_sim::timeout(std::time::Duration::from_secs(10), serve)
 			.await
 			.expect("the failed update ends the subscription")
@@ -4674,6 +4725,156 @@ mod serve_tests {
 					"{version}: {written:?}"
 				),
 			}
+		}
+	}
+
+	/// An update whose only parameters are AUTHORIZATION TOKENs holding `tokens`, framed for
+	/// the subscription's stream.
+	fn update_with_tokens(version: Version, tokens: &[&[u8]]) -> Vec<u8> {
+		let mut body = match version {
+			Version::Draft14 => {
+				let mut body = Vec::new();
+				ietf::SubscribeUpdate {
+					request_id: RequestId(2),
+					subscription_request_id: Some(RequestId(0)),
+					start_location: Location { group: 0, object: 0 },
+					end_group: 0,
+					subscriber_priority: 10,
+					forward: true,
+				}
+				.encode_msg(&mut Encoder::new(&mut body, version.into()), version)
+				.unwrap();
+				// Replace the empty parameter block with the token.
+				assert_eq!(body.pop(), Some(0));
+				body
+			}
+			// Then the request it updates, through draft 16. Every parameter but the token is
+			// left as it is.
+			Version::Draft15 | Version::Draft16 => vec![2, 0],
+			_ => vec![2],
+		};
+		body.extend(token_params(version, tokens));
+		let mut frame = vec![ietf::SubscribeUpdate::ID as u8, 0, body.len() as u8];
+		frame.extend(body);
+		frame
+	}
+
+	/// An update's AUTHORIZATION TOKEN that this endpoint cannot use closes the session with
+	/// the draft's code, as it would on the SUBSCRIBE, not only the subscription.
+	#[moq_net_sim::test]
+	async fn an_update_token_that_cannot_be_used_closes_the_session() {
+		for version in [Version::Draft14, Version::Draft22] {
+			for (token, expected, why) in [
+				(
+					&[0x01, 0x07, 0x00][..],
+					crate::SessionError::AuthTokenCacheOverflow,
+					"REGISTER",
+				),
+				(&[0x00, 0x07][..], crate::SessionError::UnknownAuthTokenAlias, "DELETE"),
+				(
+					&[0x02, 0x07][..],
+					crate::SessionError::UnknownAuthTokenAlias,
+					"USE_ALIAS",
+				),
+				(
+					&[0x03][..],
+					crate::SessionError::KeyValueFormatting,
+					"USE_VALUE without a type",
+				),
+			] {
+				let h = serve(version);
+				let mut session = ScriptedSession::per_stream(vec![update_with_tokens(version, &[token])]);
+				let mut stream = Stream::open(&mut session, version).await.unwrap();
+				let mut serving = TrackServe::new(
+					h.session.clone(),
+					h.track.subscribe(None),
+					RequestId(0),
+					version,
+					ServeRange::default(),
+					None,
+				);
+				let mut finished = false;
+				let served = h
+					.publisher
+					.run_subscription(&mut stream, &mut serving, &mut finished, async {})
+					.await;
+				assert!(matches!(served, Some(Err(_))), "{version} {why}: {served:?}");
+				let codes: Vec<u32> = h.log.closes().into_iter().map(|(code, _)| code).collect();
+				assert_eq!(codes, vec![expected.to_code()], "{version} {why}");
+			}
+		}
+	}
+
+	/// A parameter block of AUTHORIZATION TOKENs. Draft-16 on codes each key as a delta from
+	/// the one before, so a repeat is 0.
+	fn token_params(version: Version, tokens: &[&[u8]]) -> Vec<u8> {
+		let mut params = vec![tokens.len() as u8];
+		for (i, token) in tokens.iter().enumerate() {
+			let delta = i > 0 && !matches!(version, Version::Draft14 | Version::Draft15);
+			params.extend([if delta { 0 } else { 0x03 }, token.len() as u8]);
+			params.extend(*token);
+		}
+		params
+	}
+
+	/// USE_VALUE, type 0, value 0xAA.
+	const TOKEN: &[u8] = &[0x03, 0x00, 0xAA];
+
+	/// Section 8.9: a request whose tokens repeat is rejected MALFORMED_AUTH_TOKEN, which
+	/// draft-15 moved from 0x10 to 0x4, and the session stays open. A token with another
+	/// value is not a repeat.
+	#[moq_net_sim::test]
+	async fn a_repeated_request_token_rejects_only_the_request() {
+		for (version, malformed) in [(Version::Draft14, 0x10), (Version::Draft22, 0x4)] {
+			let request = |tokens: &[&[u8]]| {
+				let mut body = track_status("room", true, version);
+				assert_eq!(body.pop(), Some(0), "{version}");
+				body.extend(token_params(version, tokens));
+				body
+			};
+
+			let code = refusal(version, ietf::TrackStatus::ID, request(&[TOKEN, TOKEN])).await;
+			assert_eq!(code, malformed, "{version}");
+
+			let h = serve(version);
+			let other = [0x03, 0x00, 0xBB];
+			assert_eq!(
+				answer_code(&h, request(&[TOKEN, &other]), version).await,
+				None,
+				"{version}"
+			);
+		}
+	}
+
+	/// An update whose tokens repeat is answered MALFORMED_AUTH_TOKEN rather than
+	/// NOT_SUPPORTED, and fails only its subscription.
+	#[moq_net_sim::test]
+	async fn a_repeated_update_token_is_malformed() {
+		for version in [Version::Draft16, Version::Draft22] {
+			let h = serve(version);
+			let mut session = ScriptedSession::per_stream(vec![update_with_tokens(version, &[TOKEN, TOKEN])]);
+			let mut stream = Stream::open(&mut session, version).await.unwrap();
+			let mut serving = TrackServe::new(
+				h.session.clone(),
+				h.track.subscribe(None),
+				RequestId(0),
+				version,
+				ServeRange::default(),
+				None,
+			);
+			let mut finished = false;
+			let served = h
+				.publisher
+				.run_subscription(&mut stream, &mut serving, &mut finished, async {})
+				.await;
+			assert!(matches!(served, Some(Err(Error::Unsupported))), "{version}: {served:?}");
+			assert!(h.log.closes().is_empty(), "{version}: the session closed");
+
+			let wire = session.log.writes.lock().unwrap().clone();
+			let mut buf = Decoder::new(&wire, version.into());
+			assert_eq!(buf.varint().unwrap(), ietf::RequestError::ID, "{version}");
+			let error = ietf::RequestError::decode(&mut buf, version).unwrap();
+			assert_eq!(error.error_code, 0x4, "{version}");
 		}
 	}
 
@@ -4958,6 +5159,31 @@ mod serve_tests {
 
 			let code = refusal_code(&h.log.writes.lock().unwrap()[mark..], version);
 			assert_eq!(code, Some(unauthorized(version)), "{version}: narrowed while resolving");
+		}
+	}
+
+	/// A request's USE_VALUE token decodes but grants nothing yet, so a TRACK_STATUS outside
+	/// the session grant is still refused.
+	#[moq_net_sim::test]
+	async fn a_request_token_does_not_widen_the_grant() {
+		let nothing = crate::auth::Grant {
+			publish: Default::default(),
+			subscribe: Default::default(),
+			expires: None,
+		};
+		for version in [Version::Draft14, Version::Draft22] {
+			let mut h = serve(version);
+			let auth = crate::auth::Handle::new(false);
+			auth.authorize(&nothing);
+			h.publisher = h.publisher.clone().with_auth(auth);
+
+			let mut body = track_status("room", true, version);
+			// Replace the empty parameter block with an AUTHORIZATION TOKEN: USE_VALUE, type 0.
+			assert_eq!(body.pop(), Some(0), "{version}");
+			body.extend([0x01, 0x03, 0x03, 0x03, 0x00, 0xAA]);
+
+			let unauthorized = request::to_code(&Error::Unauthorized, request::Kind::TrackStatus, version);
+			assert_eq!(answer_code(&h, body, version).await, Some(unauthorized), "{version}");
 		}
 	}
 
