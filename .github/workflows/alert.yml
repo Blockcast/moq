@@ -28,6 +28,7 @@ on:
     # request.
     workflows:
       - apt-repo
+      - Arm-B harness
       - Back-merge
       - Cache
       - Cachix
