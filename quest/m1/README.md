@@ -50,7 +50,6 @@ session outcomes, and embedder refusals inside session outcomes.
 - [FETCH max-delay](/quest/m1/fetch-max-delay.md) - historical readers obey publisher max-age and an optional tighter reader budget, including while holding a group
 - [Upstream position regression](/quest/m1/largest-regression.md) - a relay copy that sees upstream's largest group go backwards on moq-transport or epochless lite-07 fails loud instead of serving the old instance's cache
 - [Untimed decisions](/quest/m1/untimed-decisions.md) - the maintainer decides whether moq-archive keeps refusing untimed tracks, and whether a malformed FETCH object ends its track
-- [Untimed by default in Rust](/quest/m1/rust-untimed-default.md) - an undeclared Rust timescale means untimed, and shared-clock publishers declare milliseconds
 - [FFI shape](/quest/m1/ffi-shape/README.md) - the bindings mirror Rust's layers: net at the root, then media, json, flate, audio, and video namespaces built from the handle below
 - [Publishing never invents a timestamp](/quest/m1/publish-timestamp.md) - no Rust or binding publish API fills in a timestamp; an untimed payload goes out untimed
 - [moq-net's async feature](/quest/m1/net-async-feature.md) - async helpers and both sessions sit behind a default `async` feature, and CI builds moq-net without it; Controlled time's net migration requires it
