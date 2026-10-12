@@ -23,6 +23,7 @@
 		"release": "bun ../common/release.ts"
 	},
 	"dependencies": {
+		"@blockcast/mmt-container": "0.1.0-main.00b4b0b04934",
 		"@kixelated/libavjs-webcodecs-polyfill": "^0.5.5",
 		"@libav.js/variant-opus-af": "^6.10.9",
 		"@moq/json": "workspace:^",
