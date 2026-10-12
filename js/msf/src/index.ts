@@ -5,3 +5,5 @@
  * @module
  */
 export * from "./catalog";
+export * from "./fec";
+export * from "./multicast";

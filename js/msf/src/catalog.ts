@@ -1,9 +1,11 @@
 import type * as Moq from "@moq/net";
 import * as z from "@zod/mini";
+import { AltaSchema, FecSchema, repairTrackShape } from "./fec";
+import { MulticastSchema } from "./multicast";
 
 /** Zod schema for a track's wire packaging. Accepts known values or any future string. */
 export const PackagingSchema = z.union([
-	z.enum(["loc", "cmaf", "legacy", "mediatimeline", "eventtimeline"]),
+	z.enum(["loc", "cmaf", "legacy", "mediatimeline", "eventtimeline", "mmtp", "fec-repair"]),
 	z.string(),
 ]);
 
@@ -12,12 +14,18 @@ export type Packaging = z.infer<typeof PackagingSchema>;
 
 /** Zod schema for a track's role. Accepts known values or any future string. */
 export const RoleSchema = z.union([
-	z.enum(["video", "audio", "audiodescription", "caption", "subtitle", "signlanguage"]),
+	z.enum(["video", "audio", "audiodescription", "caption", "subtitle", "signlanguage", "repair"]),
 	z.string(),
 ]);
 
 /** The semantic role a track plays in the presentation (e.g. "video", "audio", "caption"). */
 export type Role = z.infer<typeof RoleSchema>;
+
+/** Zod schema for how an MMTP track's payloads are delimited on the wire. */
+export const MmtpModeSchema = z.enum(["mpu", "mfu"]);
+
+/** How an MMTP track's payloads are delimited: whole MPUs, or MFUs within them. */
+export type MmtpMode = z.infer<typeof MmtpModeSchema>;
 
 // Shared track fields. This is the version-agnostic shape callers see: init data
 // is exposed inline via `initData`, regardless of how it was carried on the wire.
@@ -54,6 +62,53 @@ const trackShape = {
 	// Non-standard: how far this rendition trails the broadcast's earliest, in milliseconds.
 	// Mirrors hang `delay`. A player holds `delay + jitter` and does not subtract across renditions.
 	delay: z.optional(z.number()),
+
+	// --- MMTP (`packaging: "mmtp"`) -------------------------------------------
+	//
+	// Additive and optional: a track of any other packaging simply declares none
+	// of them. None is defaulted — a receiver that needs a value it was not given
+	// fails closed rather than inferring one, because every field below is
+	// geometry a publisher knows exactly and a receiver cannot recover from
+	// timing, cadence or arrival order.
+
+	/** Namespace qualifying this track's name. */
+	namespace: z.optional(z.string()),
+
+	/** How this MMTP track's payloads are delimited. */
+	mmtpMode: z.optional(MmtpModeSchema),
+
+	// Tick rate the track's MMTP timestamps and `groupDurationTicks` are
+	// denominated in. Not the frame-timestamp unit, which stays microseconds.
+	timescale: z.optional(z.number().check(z.int(), z.positive())),
+
+	// Group duration, in milliseconds and in `timescale` ticks. Both are carried
+	// because neither alone is exact: a cadence like 1001/30000 has no exact
+	// millisecond form, and ticks are meaningless without the timescale. A
+	// consumer that has the timescale prefers the tick form.
+	groupDurationMs: z.optional(z.number().check(z.positive())),
+	groupDurationTicks: z.optional(z.number().check(z.int(), z.positive())),
+
+	/** Nominal interval between random access points, in milliseconds. */
+	keyframeIntervalMs: z.optional(z.number().check(z.positive())),
+
+	/** AL-FEC block geometry protecting this track. */
+	fec: z.optional(FecSchema),
+
+	/** ALTA source authentication for this track. */
+	alta: z.optional(AltaSchema),
+
+	// MoQ Transport subscriber priority for this track (0 highest). Subscribers
+	// request the track at this value and omit SUBSCRIBER_PRIORITY when absent
+	// (draft-ramadan-moq-fec §11.4.5). Declared per track; there is no
+	// catalog-level inheritance. A repair track's priority sits in 192..255, but
+	// that band is a property of the repair role rather than of the field, so it
+	// is not narrowed here.
+	priority: z.optional(z.number().check(z.int(), z.nonnegative(), z.lte(255))),
+
+	// --- Repair tracks (`packaging: "fec-repair"`) ----------------------------
+	//
+	// A repair track describes itself. See `./fec`.
+	...repairTrackShape,
 };
 
 /** Zod schema describing a single track entry in an MSF catalog. */
@@ -65,6 +120,11 @@ export type Track = z.infer<typeof TrackSchema>;
 /** Zod schema for the top-level MSF catalog: a version-agnostic snapshot of tracks. */
 export const CatalogSchema = z.object({
 	tracks: z.array(TrackSchema),
+	// Multicast delivery for the catalog's MMTP tracks. A root section rather than
+	// a per-track one: one group carries several tracks, and the group's identity
+	// is the thing a receiver joins. Modelled rather than left to `ext` so the
+	// packet-ID range is actually enforced — see `./multicast`.
+	multicast: z.optional(MulticastSchema),
 	// The application extension: root members beyond the ones MSF defines, kept
 	// verbatim. An extension adds a section here, e.g. the `mpegts` section of
 	// draft-lcurley-moq-mpegts. Mirrors `Catalog::ext` in `moq-msf`, which is typed;
@@ -77,7 +137,7 @@ export const CatalogSchema = z.object({
 export type Catalog = z.infer<typeof CatalogSchema>;
 
 /** Root member names MSF itself defines, which an extension section must not reuse. */
-const RESERVED_ROOT = ["version", "generatedAt", "isComplete", "tracks", "initDataList"];
+const RESERVED_ROOT = ["version", "generatedAt", "isComplete", "tracks", "initDataList", "multicast"];
 
 /** The newest MSF draft version string this package emits on the wire. */
 export const VERSION = "draft-01";
@@ -104,6 +164,7 @@ const WireCatalogSchema = z.object({
 	version: z.union([z.literal(1), z.string()]),
 	tracks: z.optional(z.array(WireTrackSchema)),
 	initDataList: z.optional(z.array(InitDataSchema)),
+	multicast: z.optional(MulticastSchema),
 });
 
 /** Serialize a catalog to its JSON wire representation (draft-01). */
@@ -132,6 +193,7 @@ export function encode(catalog: Catalog): Uint8Array {
 	// the member from the encoded catalog.
 	const wire: Record<string, unknown> = Object.assign(Object.create(null), { version: VERSION, tracks });
 	if (initDataList.length > 0) wire.initDataList = initDataList;
+	if (catalog.multicast !== undefined) wire.multicast = catalog.multicast;
 
 	// Extension members are written flat, so one named after a field MSF defines would
 	// emit a duplicate key and lose one of the two on re-parse. Refuse instead. The Rust
@@ -178,7 +240,10 @@ export function decode(raw: Uint8Array): Catalog {
 			return track;
 		});
 
-		return Object.keys(ext).length > 0 ? { tracks, ext } : { tracks };
+		const catalog: Catalog = { tracks };
+		if (wire.multicast !== undefined) catalog.multicast = wire.multicast;
+		if (Object.keys(ext).length > 0) catalog.ext = ext;
+		return catalog;
 	} catch (error) {
 		console.warn("invalid MSF catalog", str);
 		throw error;

@@ -1,0 +1,65 @@
+{
+	"version": 1,
+	"tracks": [
+		{
+			"name": "video/1080p",
+			"packaging": "mmtp",
+			"mmtpMode": "mfu",
+			"timescale": 90000,
+			"groupDurationMs": 1000,
+			"isLive": true,
+			"role": "video",
+			"codec": "avc1.640028",
+			"fec": {
+				"algorithm": "raptorq",
+				"sourceSymbols": 4,
+				"repairSymbols": 2,
+				"symbolSize": 1320,
+				"interleaveDepthMs": 1000,
+				"repairTrack": "video/1080p/repair",
+				"repairContainer": "native"
+			},
+			"keyframeIntervalMs": 1000,
+			"renderGroup": 1
+		},
+		{
+			"name": "audio/main",
+			"packaging": "mmtp",
+			"mmtpMode": "mfu",
+			"timescale": 48000,
+			"groupDurationMs": 1000,
+			"isLive": true,
+			"role": "audio",
+			"codec": "mp4a.40.2",
+			"fec": {
+				"algorithm": "raptorq",
+				"sourceSymbols": 4,
+				"repairSymbols": 2,
+				"symbolSize": 1320,
+				"interleaveDepthMs": 1000,
+				"repairTrack": "audio/main/repair",
+				"repairContainer": "native"
+			},
+			"keyframeIntervalMs": 1000,
+			"renderGroup": 1
+		},
+		{
+			"name": "video/1080p/repair",
+			"packaging": "fec-repair",
+			"timescale": 90000,
+			"groupDurationMs": 1000,
+			"isLive": true,
+			"role": "repair",
+			"renderGroup": 1
+		},
+		{
+			"name": "audio/main/repair",
+			"packaging": "fec-repair",
+			"timescale": 48000,
+			"groupDurationMs": 1000,
+			"isLive": true,
+			"role": "repair",
+			"renderGroup": 1
+		}
+	]
+}
