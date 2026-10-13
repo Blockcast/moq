@@ -58,6 +58,11 @@ Added 2026-10-12 as PR follow-ups: fake timers for the JS pool
 tests (#5355), duration parser defaults (#5350), and cancelled origin
 demand (#5214), each ranked beside the work it shares code with.
 
+Added 2026-10-12 from the Codex review of #5386: native egress skipping
+disabled renditions, ranked just above simulcast rung disable, which
+publishes them. Rung disable does not wait on it, but until it lands a
+disabled rung strands WHEP, HLS, and moq-mux export viewers.
+
 ## Required
 
 - [Interop close logs](/quest/m1/interop-close-log.md) - logging fix landed; delete once the required Interop run is green
@@ -136,6 +141,7 @@ demand (#5214), each ranked beside the work it shares code with.
 - [GPU CI](/quest/m1/gpu-ci.md) - NVIDIA tests run nightly on a self-hosted GPU runner, and `just rs nvidia` runs them locally instead of skipping
 - [A failed rendition fails alone](/quest/m1/rendition-failure.md) - when one `@moq/publish` rendition's encoder fails, only that rendition ends, loudly, while the others and the broadcast keep running under the same epoch
 - [Rendition preference](/quest/m1/rendition-preference.md) - automatic selection by `<moq-watch>`, `Video::ranked`, and WHEP keeps the highest `preference` that decodes, so a compatibility transcode is only picked when nothing preferred decodes
+- [Native egress skips disabled renditions](/quest/m1/egress-enabled.md) - WHEP, HLS and DASH export, and the moq-mux exports skip `enabled: false` renditions and follow a rendition when it flips
 - [Simulcast rung disable](/quest/m1/simulcast-rung-disable.md) - JS, Rust/FFI, and OBS publishers stop encoding the top renditions their grant cannot fund, advertise `enabled: false`, and re-enable with hysteresis
 - [Discover media headroom](/quest/m1/quic-probe.md) - test useful-media pacing before adding redundant probe traffic
 - [Viewer up-switch](/quest/m1/viewer-upswitch.md) - a viewer capped by its small rendition finds headroom through PROBE and moves up
