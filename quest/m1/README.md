@@ -186,7 +186,6 @@ demand (#5214), each ranked beside the work it shares code with.
 - [Open-GOP leading pictures](/quest/m1/open-gop-leading-pictures.md) - a viewer joining at a recovery point drops the leading pictures it cannot decode; continuous viewers keep them
 - [Audio warmup](/quest/m1/audio-warmup.md) - a viewer joining an Opus rendition mid-stream never hears the unconverged first 80 ms
 - [#3021](/quest/m1/3021-moq-gst-anchor-generated-media-timelines-to-wall-clock.md) - moq-gst picks the broadcast wall epoch; a restarted source is a new epoch, not a forward re-anchor
-- [TS stitch catalog bound](/quest/m1/ts-follow-catalog-bound.md) - `--linger` bounds a mid-stream `--stitch` until the replacement's catalog arrives, so it ends loudly instead of stalling
 - [moqsink first catalog](/quest/m1/gst-first-catalog.md) - a restarted `moqsink` lists every requested pad in its first catalog, so `moqsrc` resumes each on its held pad
 - [moqsrc A/V alignment](/quest/m1/gst-src-av-sync.md) - every `moqsrc` pad of a run shares one timestamp reference and segment base
 - [TS passthrough export](/quest/m1/ts-passthrough-export.md) - `export ts --passthrough` writes the `m2ts` track back byte-identical (less late drops) on a fixed delay
