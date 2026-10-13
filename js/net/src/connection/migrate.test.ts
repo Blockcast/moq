@@ -271,3 +271,118 @@ test("a redirect onto an already pooled key leaves both entries to their handles
 		resident.close();
 	}
 });
+
+/**
+ * A fleet where every session redirects to the other address once it has outlived `life`,
+ * so each hop looks healthy to the initial-delay damping.
+ */
+function bouncing(life: number): { dials: Dial[]; stop: () => void } {
+	const { dials } = fleet();
+	const timers = new Set<ReturnType<typeof setTimeout>>();
+	const stub = globalThis.WebTransport as unknown as (url: string | URL) => WebTransport;
+	globalThis.WebTransport = function BouncingWebTransport(target: string | URL) {
+		const client = stub(target);
+		const dial = dials[dials.length - 1] as Dial;
+		const other = new URL(target).href === url.href ? moved.href : url.href;
+		const timer = setTimeout(() => {
+			timers.delete(timer);
+			if (!dial.closed) void goaway(dial.server, other).catch(() => {});
+		}, life);
+		timers.add(timer);
+		return client;
+	} as unknown as typeof WebTransport;
+	return {
+		dials,
+		stop: () => {
+			for (const timer of timers) clearTimeout(timer);
+		},
+	};
+}
+
+test("two peers redirecting to each other escalate the backoff instead of cycling", async () => {
+	const { dials, stop } = bouncing(40);
+	const reload = new Reload({
+		url,
+		websocket: { enabled: false },
+		goaway: { handover },
+		// Every session outlives this, so the immediate-redirect damping never applies.
+		delay: { initial: Time.Milli(10), multiplier: 4, max: Time.Milli(1000) },
+	});
+
+	try {
+		await new Promise((resolve) => setTimeout(resolve, 1000));
+		// Without escalation this alternates roughly every session lifetime (~16 dials).
+		expect(dials.length).toBeLessThanOrEqual(6);
+		// The ping-pong is a loop to slow down, not a failure: the redirects are honoured.
+		expect(dials.slice(0, 3).map((dial) => dial.url)).toEqual([url.href, moved.href, url.href]);
+		expect(reload.error.peek()).toBeUndefined();
+	} finally {
+		stop();
+		reload.close();
+	}
+});
+
+test("a redirect loop stops at the retry window", async () => {
+	const { stop } = bouncing(40);
+	const reload = new Reload({
+		url,
+		websocket: { enabled: false },
+		goaway: { handover },
+		delay: { initial: Time.Milli(10), multiplier: 4, max: Time.Milli(1000), timeout: Time.Milli(150) },
+	});
+
+	try {
+		await waitUntil(() => reload.error.peek() !== undefined, 3000);
+		expect(reload.error.peek()?.message).toContain("redirect loop");
+	} finally {
+		stop();
+		reload.close();
+	}
+});
+
+test("a one-way rolling restart migrates without backing off", async () => {
+	const { dials } = fleet();
+	const reload = new Reload({
+		url,
+		websocket: { enabled: false },
+		goaway: { handover },
+		// Long enough that any backoff would be visible.
+		delay: { initial: Time.Milli(1000) },
+	});
+
+	try {
+		await waitUntil(() => reload.status.peek() === "connected");
+		await new Promise((resolve) => setTimeout(resolve, 1100));
+		const started = performance.now();
+		await goaway(dials[0]?.server as WebTransport, moved.href);
+		await waitUntil(() => dials.length === 2, 500);
+		expect(performance.now() - started).toBeLessThan(500);
+	} finally {
+		reload.close();
+	}
+});
+
+test("repeated GOAWAYs back to the same place are restarts, not a loop", async () => {
+	const { dials } = fleet();
+	const reload = new Reload({
+		url,
+		websocket: { enabled: false },
+		goaway: { handover },
+		// Long enough that any backoff would be visible.
+		delay: { initial: Time.Milli(300) },
+	});
+
+	try {
+		for (let i = 1; i <= 3; i++) {
+			await waitUntil(() => dials.length === i && reload.status.peek() === "connected");
+			// Outlive the initial delay so only loop detection could slow this down.
+			await new Promise((resolve) => setTimeout(resolve, 350));
+			const started = performance.now();
+			await goaway(dials[i - 1]?.server as WebTransport, "");
+			await waitUntil(() => dials.length === i + 1, 1000);
+			expect(performance.now() - started).toBeLessThan(150);
+		}
+	} finally {
+		reload.close();
+	}
+});

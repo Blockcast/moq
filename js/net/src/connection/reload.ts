@@ -201,6 +201,11 @@ export class Reload {
 	// dials. Retired when it closes, at its handover cap, or when the sequence ends.
 	#draining: Draining | undefined;
 
+	// The endpoints that sent us away during the current run of migrations. A redirect back to
+	// one of them is a loop, however healthy each session looked. Cleared when a session ends
+	// without a GOAWAY or a new sequence starts.
+	#departed = new Set<string>();
+
 	// Whether a connect attempt is in flight, so a retiring predecessor reports the right status.
 	#dialing = false;
 
@@ -404,6 +409,7 @@ export class Reload {
 					if (ended === undefined) return;
 					if (ended === null || ended instanceof Error) {
 						console.warn("connection closed, reconnecting");
+						this.#departed.clear();
 						if (this.established.peek() === connection) this.established.set(undefined);
 						this.#retry(effect, connected, ended ?? undefined);
 						return;
@@ -414,6 +420,20 @@ export class Reload {
 					// redirect against that endpoint, not the primary we never reached.
 					const socket = this.#redirect.peek() ? undefined : this.websocket?.url;
 					if (!this.#migrate(connection, dialed(dialing, connection.transport, socket), ended)) return;
+
+					// Two peers that each outlive the initial delay can still bounce us between
+					// them forever. Returning to an endpoint that already sent us elsewhere in this
+					// run of migrations escalates the backoff, which never resets mid-loop, so the
+					// retry window still applies. A one-way rolling restart never revisits one, and
+					// a GOAWAY back to the same place is a restart, not a move, so it never counts.
+					const next = (this.#redirect.peek() ?? url).href;
+					const moved = next !== dialing.href;
+					const loop = moved && this.#departed.has(next);
+					if (moved) this.#departed.add(dialing.href);
+					if (loop) {
+						this.#retry(effect, undefined, new Error("redirect loop"));
+						return;
+					}
 
 					// A session that outlived the initial delay was healthy, so its handover is not a
 					// failure. One redirected almost at once still migrates, but through the backoff,
@@ -560,6 +580,7 @@ export class Reload {
 		this.#delay = undefined;
 		this.#deadline = undefined;
 		this.#sequenceHref = undefined;
+		this.#departed.clear();
 		this.#draining?.retire();
 	}
 
