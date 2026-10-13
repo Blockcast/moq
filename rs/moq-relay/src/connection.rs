@@ -120,6 +120,7 @@ impl Connection {
 		if let Some(publisher) = publisher {
 			request = request.with_subscriber(publisher);
 		}
+		let lease = lease.preparing(request.auth(), request.role())?;
 		// Bounded too: a peer that stalls the SETUP reply must not outlive the relay.
 		let session = self
 			.shutdown
@@ -151,7 +152,7 @@ impl Connection {
 		if self.request.peer_identity().is_some() {
 			tracing::debug!("client certificate verified; reported to the auth server");
 		}
-		let admitted = self.cluster.admit(&self.auth, request.clone()).await?;
+		let admitted = self.cluster.admit_session(&self.auth, request.clone()).await?;
 		let registration = self.sessions.as_ref().map(|sessions| sessions.register(request));
 		Ok((admitted, registration))
 	}

@@ -15,7 +15,7 @@ use axum::{
 use moq_net::origin;
 use moq_net::stats::Session;
 
-use crate::{auth, refusals::Refusal, web::MtlsPeer, web::WebState, web::landing_response};
+use crate::{auth, web::MtlsPeer, web::WebState, web::landing_response};
 
 // One axum extractor per fact the upgrade needs; there is no struct to fold them into.
 #[allow(clippy::too_many_arguments)]
@@ -69,24 +69,15 @@ pub(crate) async fn serve_ws(
 		.await
 		.inspect_err(|err| state.cluster.refusals.record(err.into()))?;
 	let limits = state.cluster.limits(&lease);
-	let token = lease.token();
-	let publish = state.cluster.publisher(token);
-	// A verified client certificate marks a cluster peer, which discovers hidden
-	// routes; see `Cluster::scope`.
-	let subscribe = state
+	let crate::cluster::Admitted {
+		lease,
+		publisher: publish,
+		subscriber: subscribe,
+		stats,
+	} = state
 		.cluster
-		.subscriber(token)
-		.map(|subscribe| subscribe.consume().with_hidden(request.tls.is_some()));
-
-	if publish.is_none() && subscribe.is_none() {
-		// Bad token, we can't publish or subscribe.
-		state.cluster.refusals.record(Refusal::Forbidden);
-		return Err(StatusCode::UNAUTHORIZED.into());
-	}
-
-	// Only an admitted session counts as present, as on the native path.
-	let stats = state.cluster.stats.tier(token.tier.clone()).session(&token.root);
-	let lease = lease.with_stats(stats.clone());
+		.scope_session(lease, &request)
+		.inspect_err(|err| state.cluster.refusals.record(err.into()))?;
 
 	Ok(ws.on_upgrade(async move |socket| {
 		let _active = active;
@@ -215,24 +206,33 @@ where
 	// Keep the driver in this task so cancellation tears down the transport.
 	let ws = moq_tokio::transport::Session::new(ws);
 	let mut refused = ws.clone();
-	let accept = server.accept(tokio::time::Instant::now().into_std(), ws);
-	let accept = async move {
+	let handshake = async move {
+		let request = server
+			.accept_request(tokio::time::Instant::now().into_std(), ws)
+			.await?;
+		let lease = lease.preparing(request.auth(), request.role())?;
+		let (session, driver) = request.ok().await?;
+		Ok::<_, moq_net::Error>((lease, session, driver))
+	};
+	// The handshake timeout covers the SETUP reply too, so a peer that sends SETUP
+	// and then withholds flow-control credit is dropped like one that never sends it.
+	let handshake = async move {
 		match timeout {
-			None => Ok(accept.await),
-			Some(timeout) => tokio::time::timeout(timeout, accept)
+			None => handshake.await,
+			Some(timeout) => tokio::time::timeout(timeout, handshake)
 				.await
-				.map_err(|_| moq_net::Error::Timeout),
+				.unwrap_or(Err(moq_net::Error::Timeout)),
 		}
 	};
-	// The drain deadline bounds SETUP too, so a peer that never sends it cannot
-	// outlive the relay.
-	let accepted = shutdown
-		.until_deadline(accept)
+	// The drain deadline bounds the handshake too, so a stalled peer cannot outlive
+	// the relay.
+	let handshake = shutdown
+		.until_deadline(handshake)
 		.await
 		.unwrap_or(Err(moq_net::Error::GoawayTimeout));
-	let (session, driver) = match accepted {
-		Ok(accepted) => accepted?,
-		// A peer that upgraded and never sent SETUP in time; tell it why it is dropped.
+	let (lease, session, driver) = match handshake {
+		Ok(handshake) => handshake,
+		// Tell the peer why it is dropped.
 		Err(err) => {
 			use web_transport_trait::poll::Session as _;
 			refused.close(moq_net::SessionError::from(&err).to_code(), &err.to_string());
