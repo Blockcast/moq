@@ -62,6 +62,14 @@ released wire-compat step aborts on planned breaks the last release made
 stale. Both stay in m0 (maintainer, 2026-10-13) and rank with TS duration
 fidelity: a red Interop hides real regressions.
 
+Nightly on main (triaged 2026-10-13): two build breaks from 2026-10-11 get
+quests here. The nixpkgs bump broke the Linux zigbuild release builds, and
+fat LTO in the release profile broke the fuzz build. Audio quality has been
+red since it landed, against budgets recorded locally; re-measuring them on
+the runner moved here from Watch (maintainer, 2026-10-13). The other red jobs
+have fixes on `main`: macOS tests (#5335), drill-sensitivity (#5338), loom
+(#5389) and Windows tests (#5339).
+
 ## Required
 
 - [Self-hosted CI](/quest/m0/self-hosted-ci.md) - same-repo Check and Test run on a self-hosted NixOS runner with a main-written local cache, behind a `CI_RUNNER` kill switch
@@ -70,6 +78,9 @@ fidelity: a red Interop hides real regressions.
 - [TS duration fidelity](/quest/m0/ts-duration-fidelity.md) - Interop's TS compliance captures the whole round-tripped stream again, fixing a regression that turns Interop red on main
 - [Upgrade restarts epochless broadcasts](/quest/m0/upgrade-unroutable.md) - a WebSocket-to-QUIC upgrade retires epochless handles only once their `Restart` is delivered, and first-party consumers follow it, fixing Interop's `unroutable` rounds
 - [Wire compat on main](/quest/m0/wire-compat-green.md) - the nightly released-wire step runs again: planned breaks re-measured against the new releases, and a released-API client for the released JS lanes
+- [Release builds link](/quest/m0/release-link.md) - the Linux zigbuild release binaries and moq-gst packages link again after the 2026-10-11 nixpkgs bump, so the next release cut can publish
+- [Fuzz builds under LTO](/quest/m0/fuzz-lto.md) - the nightly fuzz targets build again despite the release profile's fat LTO
+- [Audio quality budgets](/quest/m0/audio-quality-budgets.md) - the nightly Audio quality job grades against ceilings measured on its own runner, so a breach means a regression again
 - [web-transport releases the qmux fixes](/quest/m0/qmux-credit-upstream.md) - waiting on moq-dev/web-transport#412 and #413 to merge and ship, which qmux credit bumps to
 - [qmux credit](/quest/m0/qmux-credit.md) - qmux returns connection credit for dropped and stopped streams and delivers its close frame, on both lines
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - every first-party publisher that can restart mints a fresh route epoch, the newest wins a path, and only routes with the same epoch resume a subscription
