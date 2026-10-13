@@ -18,6 +18,7 @@ import { Producer as ArrivalProducer, type Arrivals, gap } from "../arrivals";
 import { base64ToBytes } from "../base64";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
 import type { Sync } from "../sync";
+import type { GroupObservation } from "./abr";
 import {
 	type DecoderConfig,
 	decoderConfigKey,
@@ -302,6 +303,12 @@ export class Decoder {
 
 		effect.cleanup(() => active.close());
 
+		// Only the playing rendition is evidence about the path: a pending one overlaps it.
+		active.onGroup = (observation) => this.source.observeGroup({ ...observation, rendition: active.track });
+		effect.cleanup(() => {
+			active.onGroup = undefined;
+		});
+
 		effect.run((inner) => {
 			const error = inner.get(active.error);
 			if (!error) return;
@@ -331,6 +338,8 @@ export class Decoder {
 	}
 
 	#recordError(track: DecoderTrack, error: Error): void {
+		// A rendition that fails before it plays refutes the switch to it.
+		if (track !== this.#active.peek()) this.source.abandonRendition(track.track);
 		// An outgoing failure must not replace the selected rendition's failure latch.
 		if (track !== this.#selected && this.#selected?.error.peek()) return;
 		this.#failed = {
@@ -412,6 +421,9 @@ interface DecoderTrackProps {
 	stats: Signal<Stats | undefined>;
 }
 
+// Distinguishes subscriptions and timelines in group observations.
+let epochs = 0;
+
 class DecoderTrack {
 	error = new Signal<Error | undefined>(undefined);
 	sync: Sync;
@@ -436,6 +448,16 @@ class DecoderTrack {
 
 	// Decoded frames waiting to be rendered.
 	#buffered = new Signal<Container.BufferedRanges>([]);
+
+	// Called at each group start while this track is the one playing.
+	onGroup?: (observation: Omit<GroupObservation, "rendition">) => void;
+
+	// Group-start accounting for `onGroup`. The epoch changes with the subscription and with each
+	// break, so delivery is only compared within one timeline.
+	#epoch = ++epochs;
+	#groups = 0;
+	#bytes = 0;
+	#groupStart?: number;
 
 	// Codec description from the last configure, reused after a playhead reset.
 	#description?: Uint8Array;
@@ -608,6 +630,9 @@ class DecoderTrack {
 					frameCount: (current?.frameCount ?? 0) + (accepted ? 1 : 0),
 					bytesReceived: (current?.bytesReceived ?? 0) + frame.payload.byteLength,
 				}));
+				// Delivery is evidence about the path whether or not recovery accepts the frame.
+				if (!stale)
+					this.#observe(next.group, frame.keyframe, frame.timestamp, frame.arrival, frame.payload.byteLength);
 				if (!accepted) continue;
 
 				// Classify ingress before decoder backpressure changes the delivery clock.
@@ -693,6 +718,9 @@ class DecoderTrack {
 					frameCount: (current?.frameCount ?? 0) + (accepted ? 1 : 0),
 					bytesReceived: (current?.bytesReceived ?? 0) + frame.payload.byteLength,
 				}));
+				// Delivery is evidence about the path whether or not recovery accepts the frame.
+				if (!stale)
+					this.#observe(next.group, frame.keyframe, frame.timestamp, frame.arrival, frame.payload.byteLength);
 				if (!accepted) continue;
 
 				// Classify ingress before decoder backpressure changes the delivery clock.
@@ -722,11 +750,29 @@ class DecoderTrack {
 		});
 	}
 
+	// Report a group start (its keyframe) with the bytes delivered before it, then count this frame.
+	#observe(group: number, keyframe: boolean, timestamp: number, arrival: Milli, bytes: number): void {
+		if (keyframe && group !== this.#groupStart) {
+			this.#groupStart = group;
+			this.#groups += 1;
+			this.onGroup?.({
+				epoch: this.#epoch,
+				groups: this.#groups,
+				bytes: this.#bytes,
+				mediaTime: timestamp / 1000,
+				arrivedAt: arrival,
+			});
+		}
+		this.#bytes += bytes;
+	}
+
 	// The container read a gap or a declared end after media. Re-anchor and let the next decoded
 	// frame decide the decoder reset (see #resetAtKeyframe). Clearing `timestamp` keeps a stale
 	// high value from late-rejecting the following frames, which may overlap the previous group's
 	// tail. The held picture stays until the new keyframe renders.
 	#onBreak(): void {
+		this.#epoch = ++epochs;
+		this.#groupStart = undefined;
 		this.timestamp.set(undefined);
 		this.#buffered.set([]);
 		this.sync.reset();

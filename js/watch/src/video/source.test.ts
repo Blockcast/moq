@@ -179,9 +179,11 @@ describe("Source disabled rendition selection", () => {
 			low: config("avc1.64001e", { bitrate: 1_000_000 }),
 			high: config("avc1.640028", { bitrate: 2_000_000 }),
 		});
+		// A capacity estimate admitting both rungs: with none, a costed ladder starts on its floor.
 		const source = new Source({
 			broadcast: state.broadcast,
 			supported: async () => true,
+			probe: new Signal({ estimatedRecvRate: 10_000_000 } as never),
 		});
 
 		await settle();
@@ -248,6 +250,7 @@ describe("Source disabled rendition selection", () => {
 				high: config("avc1.640028", { bitrate: 2_000_000, stalled: true }),
 			}),
 			supported: async () => true,
+			probe: new Signal({ estimatedRecvRate: 10_000_000 } as never),
 		});
 
 		await settle();
@@ -451,6 +454,133 @@ describe("Source rendition preference", () => {
 
 		await settle();
 		expect(source.out.track.peek()).toBe("video/360p");
+		source.close();
+	});
+});
+
+describe("Source selection without a PROBE estimate", () => {
+	const ladder = () => ({
+		low: config("avc1.64001e", { codedWidth: 640, codedHeight: 360, bitrate: 500_000 }),
+		mid: config("avc1.64001f", { codedWidth: 1280, codedHeight: 720, bitrate: 1_500_000 }),
+		high: config("avc1.640028", { codedWidth: 1920, codedHeight: 1080, bitrate: 4_000_000 }),
+	});
+
+	// Feed whole 1 s groups on `source`'s selected rendition. `lag(g)` is how late group g's keyframe
+	// arrives behind its authored time; the encoder fills 90% of the catalog bitrate.
+	function deliver(source: Source, groups: number, lag: (group: number) => number = () => 0): string[] {
+		const path: string[] = [];
+		let bytes = 0;
+		for (let group = 0; group < groups; group++) {
+			const rendition = source.out.track.peek();
+			if (!rendition) throw new Error("nothing selected");
+			path.push(rendition);
+			const mediaTime = group * 1000;
+			source.observeGroup({
+				rendition,
+				epoch: 1,
+				groups: group + 1,
+				bytes,
+				mediaTime,
+				arrivedAt: mediaTime + lag(group),
+			});
+			bytes += Math.round(((ladder()[rendition as "low"].bitrate ?? 0) * 0.9) / 8);
+		}
+		return path;
+	}
+
+	it("keeps the PROBE selection when an estimate exists and ignores group evidence", async () => {
+		const source = new Source({
+			broadcast: mockBroadcast(ladder()),
+			supported: async () => true,
+			probe: new Signal({ estimatedRecvRate: 2_500_000 } as never),
+		});
+		await settle();
+		// 80% of 2.5 Mbps admits only `mid`, exactly as before.
+		expect(source.out.track.peek()).toBe("mid");
+		deliver(source, 10, (group) => group * 2000);
+		await settle();
+		expect(source.out.track.peek()).toBe("mid");
+		source.close();
+	});
+
+	it("starts a costed ladder on the floor rather than the top rung", async () => {
+		const source = new Source({ broadcast: mockBroadcast(ladder()), supported: async () => true });
+		await settle();
+		expect(source.out.track.peek()).toBe("low");
+		source.close();
+	});
+
+	it("falls back to the preference rank when the renditions are not a ladder", async () => {
+		const renditions = ladder();
+		const source = new Source({
+			broadcast: mockBroadcast({
+				...renditions,
+				high: config("avc1.640028", { codedWidth: 1920, codedHeight: 1080 }),
+			}),
+			supported: async () => true,
+		});
+		await settle();
+		expect(source.out.track.peek()).toBe("high");
+		source.observeGroup({ rendition: "high", epoch: 1, groups: 1, bytes: 0, mediaTime: 0, arrivedAt: 0 });
+		await settle();
+		expect(source.out.track.peek()).toBe("high");
+		source.close();
+	});
+
+	it("climbs on on-schedule delivery and steps down on a whole group of backlog", async () => {
+		const source = new Source({ broadcast: mockBroadcast(ladder()), supported: async () => true });
+		await settle();
+
+		const climb: string[] = [];
+		for (let i = 0; i < 12 && source.out.track.peek() !== "high"; i++) {
+			climb.push(...deliver(source, 3));
+			await settle();
+		}
+		expect(climb[0]).toBe("low");
+		expect(source.out.track.peek()).toBe("high");
+
+		// Each keyframe arrives 600 ms later than the last: one group of backlog after two groups.
+		deliver(source, 4, (group) => group * 600);
+		await settle();
+		expect(source.out.track.peek()).not.toBe("high");
+		source.close();
+	});
+
+	it("reverts a switch whose target fails before it plays", async () => {
+		const source = new Source({ broadcast: mockBroadcast(ladder()), supported: async () => true });
+		await settle();
+		for (let i = 0; i < 12 && source.out.track.peek() === "low"; i++) {
+			deliver(source, 3);
+			await settle();
+		}
+		const target = source.out.track.peek();
+		expect(target).not.toBe("low");
+
+		source.abandonRendition(target ?? "");
+		await settle();
+		expect(source.out.track.peek()).toBe("low");
+		source.close();
+	});
+
+	it("honors a manual choice over the controller", async () => {
+		const target = new Signal<{ name?: string } | undefined>(undefined);
+		const source = new Source({ broadcast: mockBroadcast(ladder()), supported: async () => true, target });
+		await settle();
+		expect(source.out.track.peek()).toBe("low");
+		target.set({ name: "mid" });
+		await settle();
+		expect(source.out.track.peek()).toBe("mid");
+		// On-schedule delivery that would make a live controller probe upward.
+		for (let i = 0; i < 4; i++) {
+			deliver(source, 3);
+			await settle();
+		}
+		expect(source.out.track.peek()).toBe("mid");
+
+		// Releasing the choice restarts from the floor: nothing seen under it was ABR evidence.
+		target.set(undefined);
+		await settle();
+		expect(source.out.track.peek()).toBe("low");
 		source.close();
 	});
 });
