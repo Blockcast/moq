@@ -18,24 +18,45 @@ use tokio::{sync::watch, time::Instant};
 /// signal path; an embedder clones one to stop the relay from its own task.
 #[derive(Clone)]
 pub struct Trigger {
-	tx: watch::Sender<Option<Instant>>,
+	tx: watch::Sender<Option<Started>>,
 	drain_timeout: Duration,
 }
 
 impl Trigger {
 	/// Start the drain: every [`Observer`] handle's [`started`](Observer::started)
 	/// resolves and sessions begin sending GOAWAY, including any accepted later.
-	/// Calling it again keeps the first deadline.
+	/// The GOAWAY carries an empty URI: "reconnect to me", for a relay that is
+	/// restarting or has been withdrawn from DNS. Calling it again, or
+	/// [`redirect`](Self::redirect) after it, keeps the first drain.
 	pub fn start(&self) {
+		self.fire(String::new());
+	}
+
+	/// Start the drain like [`start`](Self::start), but name `uri` in every
+	/// GOAWAY as the session to move to, for a relay that is leaving and knows
+	/// its successor. Following it is the client's call: `moq_tokio::Connection`
+	/// refuses a cross-host redirect unless its redirect policy allows one.
+	pub fn redirect(&self, uri: impl Into<String>) {
+		self.fire(uri.into());
+	}
+
+	fn fire(&self, uri: String) {
 		let deadline = Instant::now() + self.drain_timeout;
 		self.tx.send_if_modified(|started| {
 			let first = started.is_none();
 			if first {
-				*started = Some(deadline);
+				*started = Some(Started { deadline, uri });
 			}
 			first
 		});
 	}
+}
+
+/// A started drain: when its window ends, and the URI its GOAWAYs name.
+#[derive(Clone, Debug)]
+struct Started {
+	deadline: Instant,
+	uri: String,
 }
 
 /// The sessions a drain is waiting on.
@@ -56,7 +77,7 @@ pub(crate) struct Tally {
 #[derive(Clone)]
 pub struct Observer {
 	pub(crate) activity: moq_net::server::Activity,
-	rx: watch::Receiver<Option<Instant>>,
+	rx: watch::Receiver<Option<Started>>,
 	tally: Arc<watch::Sender<Tally>>,
 	/// How long a drained session may keep running before it is force-closed.
 	pub drain_timeout: Duration,
@@ -79,7 +100,7 @@ impl Observer {
 		Self::from(rx, crate::DEFAULT_DRAIN_TIMEOUT)
 	}
 
-	fn from(rx: watch::Receiver<Option<Instant>>, drain_timeout: Duration) -> Self {
+	fn from(rx: watch::Receiver<Option<Started>>, drain_timeout: Duration) -> Self {
 		Self {
 			rx,
 			tally: Arc::new(watch::channel(Tally::default()).0),
@@ -124,7 +145,7 @@ impl Observer {
 	async fn expired(&self) {
 		let mut rx = self.rx.clone();
 		let deadline = match rx.wait_for(Option::is_some).await {
-			Ok(deadline) => *deadline,
+			Ok(started) => started.as_ref().map(|started| started.deadline),
 			Err(_) => None,
 		};
 		match deadline {
@@ -140,7 +161,16 @@ impl Observer {
 
 	/// When the drain window ends, if [`Trigger::start`] has fired.
 	pub(crate) fn deadline(&self) -> Option<Instant> {
-		*self.rx.borrow()
+		self.rx.borrow().as_ref().map(|started| started.deadline)
+	}
+
+	/// The URI the drain's GOAWAYs name, empty for "reconnect to me".
+	fn redirect_uri(&self) -> String {
+		self.rx
+			.borrow()
+			.as_ref()
+			.map(|started| started.uri.clone())
+			.unwrap_or_default()
 	}
 
 	/// Count an established session until the returned guard drops, so the drain
@@ -174,8 +204,9 @@ impl Observer {
 		}
 	}
 
-	/// Drain `session` with an empty-URI GOAWAY ("reconnect to me"), waiting for
-	/// the peer to leave.
+	/// Drain `session` with a GOAWAY naming the trigger's URI (empty, "reconnect
+	/// to me", unless [`Trigger::redirect`] started the drain), waiting for the
+	/// peer to leave.
 	///
 	/// The driver force-closes with [`moq_net::Error::GoawayTimeout`] at the
 	/// drain's deadline: [`drain_timeout`](Self::drain_timeout) after the trigger
@@ -202,13 +233,15 @@ impl Observer {
 			return;
 		}
 
-		// "Reconnect to me": the relay is restarting, not moving. An empty URI is
-		// legal from either side and this runs once per session, so neither error
-		// is reachable; the deadline closes the session regardless.
-		if let Err(err) = session
-			.drain()
-			.send(moq_net::goaway::Goaway::new().with_timeout(remaining))
-		{
+		// An empty URI ("reconnect to me": the relay is restarting, not moving) is
+		// legal from either side, and a server may name one. This runs once per
+		// session, so the only reachable error is a URI over the wire limit; the
+		// deadline closes the session regardless.
+		let goaway = match self.redirect_uri() {
+			uri if uri.is_empty() => moq_net::goaway::Goaway::new(),
+			uri => moq_net::goaway::Goaway::redirect(uri),
+		};
+		if let Err(err) = session.drain().send(goaway.with_timeout(remaining)) {
 			tracing::warn!(%err, "failed to drain session");
 		}
 
@@ -419,6 +452,38 @@ mod tests {
 		let connection = connecting.await.unwrap().unwrap();
 		let goaway = connection.draining().unwrap().recv().await.unwrap();
 		assert_eq!(goaway.uri(), "");
+		connection.closed().await.unwrap();
+		running.await.unwrap().unwrap();
+	}
+
+	#[tokio::test]
+	async fn a_redirect_drain_names_the_successor() {
+		let mut config = crate::Config::default();
+		config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		let mut relay = crate::Relay::load(config).await.unwrap().with_signals(false);
+		let url: url::Url = format!("tcp://{}/room", relay.tcp_addr().unwrap()).parse().unwrap();
+		// Same host, other port: moq_tokio's default policy refuses a cross-host redirect.
+		let successor = format!("tcp://{}:1/room", url.host_str().unwrap());
+		let mut admissions = relay.admissions().unwrap();
+		let trigger = relay.shutdown_trigger().clone();
+		let running = tokio::spawn(relay.run());
+		let connecting = tokio::spawn(async move {
+			moq_tokio::connect::Config::default()
+				.init(Default::default())
+				.unwrap()
+				.with_reconnect(false)
+				.connect(url)
+				.established()
+				.await
+		});
+		let admission = admissions.next().await.unwrap();
+		trigger.redirect(successor.clone());
+		let all = || [moq_auth::Pattern::all()].into_iter().collect();
+		let (_lease, consumer) = moq_auth::lease::Producer::new(moq_auth::Grant::new(all(), all()));
+		admission.grant(consumer);
+		let connection = connecting.await.unwrap().unwrap();
+		let goaway = connection.draining().unwrap().recv().await.unwrap();
+		assert_eq!(goaway.uri(), successor);
 		connection.closed().await.unwrap();
 		running.await.unwrap().unwrap();
 	}
