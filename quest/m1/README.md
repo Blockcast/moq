@@ -37,6 +37,11 @@ upgrade and identity guides carry migrations; feature docs change inline.
 Keep generic proofs in this repository; deployments and their operational
 acceptance belong to the downstream operator.
 
+The 2026-10-13 clustering interview brings P2P back to m1 with a required
+consumer: application-selected peer paths alongside persistent CDN sessions.
+Routing proofs precede the shared wire; federation and P2P ship independently,
+while epoch-only active/passive route health follows in m2.
+
 Keep one owner per shared code area. Order each prerequisite before its
 consumer; targeted benchmarks and controlled-time regressions remain part of
 the feature that needs them.
@@ -53,11 +58,13 @@ above them.
 - [Release builds](/quest/m0/release-link.md) - package artifacts can be built
 - [qmux credit](/quest/m0/qmux-credit.md) - dropped/stopped streams return credit and close is delivered
 
-- [Cluster routing](/quest/m1/cluster-routing/README.md) - any node routes toward a broadcast's origin over CDN and P2P links alike, with per-origin routes and path-less announces
+- [Cross-node flapping](/quest/m1/cross-node-flapping.md) - incident-sensitive baseline and residual stale-revival counterexamples before the route rewrite
+- [Cluster routing](/quest/m1/cluster-routing/README.md) - prove shared routing contracts, implement per-origin routes, and connect outbound local clusters
+- [P2P](/quest/m1/p2p/README.md) - application-selected peer sessions use shared priorities, routing, and same-epoch handover
+- [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation/P2P setup
 - [Controlled time](/quest/m1/time/README.md) - every crate and package reads time through moq-time or @moq/time, with regression tests for the changed contracts; ranks above the fork, whose switch adopts its instant
 - [Hard fork](/quest/m1/quic/fork/README.md) - quinn hard-forked in-tree as `moq-quic`, ranked ahead of perf; the rest of the QUIC line follows it
 - [Own the QUIC stack](/quest/m1/quic/README.md) - quinn hard-forked in-tree as `moq-quic`, carrying BBR, reliable reset, hierarchical scheduling, peer limits, and endpoint sharding
-- [Reproduce cross-node announce flapping](/quest/m1/cross-node-flapping.md) - a clean close reaches a client on another node as one retraction, checked by a 3+ relay drill on main
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Interop close logs](/quest/m1/interop-close-log.md) - logging fix landed; delete once the required Interop run is green
 - [One max_age meaning](/quest/m1/cache-max-age.md) - a superseded group goes stale on wall clock since its successor arrived or on media time, whichever is first, in Rust and js/net; fixes the untimed failover stall
