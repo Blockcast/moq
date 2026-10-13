@@ -18,6 +18,7 @@ import { base64ToBytes } from "../base64";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
 
 import type { Sync } from "../sync";
+import type { GroupObservation } from "./abr";
 import {
 	type DecoderConfig,
 	decoderConfigKey,
@@ -289,6 +290,12 @@ export class Decoder {
 
 		effect.cleanup(() => active.close());
 
+		// Only the playing rendition is evidence about the path: a pending one overlaps it.
+		active.onGroup = (observation) => this.source.observeGroup({ ...observation, rendition: active.track });
+		effect.cleanup(() => {
+			active.onGroup = undefined;
+		});
+
 		effect.run((inner) => {
 			const error = inner.get(active.error);
 			if (!error) return;
@@ -318,6 +325,8 @@ export class Decoder {
 	}
 
 	#recordError(track: DecoderTrack, error: Error): void {
+		// A rendition that fails before it plays refutes the switch to it.
+		if (track !== this.#active.peek()) this.source.abandonRendition(track.track);
 		// An outgoing failure must not replace the selected rendition's failure latch.
 		if (track !== this.#selected && this.#selected?.error.peek()) return;
 		this.#failed = {
@@ -388,6 +397,9 @@ interface DecoderTrackProps {
 	stats: Signal<Stats | undefined>;
 }
 
+// Distinguishes subscriptions and timelines in group observations.
+let epochs = 0;
+
 class DecoderTrack {
 	error = new Signal<Error | undefined>(undefined);
 	sync: Sync;
@@ -412,6 +424,16 @@ class DecoderTrack {
 
 	// The last discontinuity count seen from the container consumer.
 	#discontinuity = 0;
+
+	// Called at each group start while this track is the one playing.
+	onGroup?: (observation: Omit<GroupObservation, "rendition">) => void;
+
+	// Group-start accounting for `onGroup`. The epoch changes with the subscription and with each
+	// discontinuity, so delivery is only compared within one timeline.
+	#epoch = ++epochs;
+	#groups = 0;
+	#bytes = 0;
+	#groupStart?: number;
 
 	// Codec description from the last configure, reused after a playhead reset.
 	#description?: Uint8Array;
@@ -558,6 +580,7 @@ class DecoderTrack {
 					bytesReceived: (current?.bytesReceived ?? 0) + frame.payload.byteLength,
 				}));
 				if (stale) continue;
+				this.#observe(next.group, frame.keyframe, frame.timestamp, frame.payload.byteLength);
 
 				// Mark that we received this frame right now.
 				const timestamp = Time.Milli.fromMicro(frame.timestamp as Time.Micro);
@@ -638,6 +661,7 @@ class DecoderTrack {
 					bytesReceived: (current?.bytesReceived ?? 0) + frame.payload.byteLength,
 				}));
 				if (stale) continue;
+				this.#observe(next.group, frame.keyframe, frame.timestamp, frame.payload.byteLength);
 
 				// Mark that we received this frame right now.
 				const timestamp = Time.Milli.fromMicro(frame.timestamp);
@@ -665,6 +689,22 @@ class DecoderTrack {
 		});
 	}
 
+	// Report a group start (its keyframe) with the bytes delivered before it, then count this frame.
+	#observe(group: number, keyframe: boolean, timestamp: number, bytes: number): void {
+		if (keyframe && group !== this.#groupStart) {
+			this.#groupStart = group;
+			this.#groups += 1;
+			this.onGroup?.({
+				epoch: this.#epoch,
+				groups: this.#groups,
+				bytes: this.#bytes,
+				mediaTime: timestamp / 1000,
+				arrivedAt: performance.now(),
+			});
+		}
+		this.#bytes += bytes;
+	}
+
 	// The container bumped its playhead (a marker, a hole, or a latency skip). Re-anchor and
 	// let the next decoded frame decide the decoder reset (see #resetAtKeyframe). Clearing
 	// `timestamp` keeps a stale high value from late-rejecting the following frames, which may
@@ -673,6 +713,8 @@ class DecoderTrack {
 	#onDiscontinuity(count: number): boolean {
 		if (count === this.#discontinuity) return false;
 		this.#discontinuity = count;
+		this.#epoch = ++epochs;
+		this.#groupStart = undefined;
 		this.timestamp.set(undefined);
 		this.#buffered.set([]);
 		this.sync.reset();
