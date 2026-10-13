@@ -51,7 +51,9 @@ Settled shape:
   the wrappers supply real namespaces in each language's idiom: Python
   submodules, Go subpackages (`moq.dev/moq/json`, aliased on import next to
   `encoding/json`), Kotlin packages, Dart libraries, Swift caseless-enum
-  namespaces.
+  namespaces. Reopened 2026-10-13:
+  [One UniFFI crate per binding layer](/quest/m2/ffi-crate-split.md) spikes
+  a per-layer split that would move the namespaces below the wrappers.
 - `demand()` is the one way to watch subscribers; producers drop their
   `name`/`is_used`/`used`/`unused` duplicates.
 - moq-ffi and its generated consumers, including `cpp/obs` (above). The
