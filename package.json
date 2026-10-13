@@ -30,6 +30,7 @@
 		"doc",
 		"js/net",
 		"js/clock",
+		"js/media-sync",
 		"js/pattern",
 		"js/auth",
 		"js/flate",
