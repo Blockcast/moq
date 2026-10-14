@@ -75,6 +75,8 @@ above them.
 - [Quiet latest group test](/quest/m1/quiet-edge-test.md) - pins on `main` that a quiet track's latest group survives rejoin, expiry, and takeover
 - [FETCH max-delay](/quest/m1/fetch-max-delay.md) - historical readers obey publisher max-age and an optional tighter reader budget, including while holding a group
 - [Draft-20 FETCH edge cases](/quest/m1/fetch-edge-cases.md) - an exact-final range reports End of Track and a FETCH_OK past the requested group closes the session, on main then release
+- [A local close never throws](/quest/m1/subscribe-close-throw.md) - closing a `@moq/net` lite subscription never raises ProtocolViolation for the end of stream it caused, on main
+- [Subscribe-close backport](/quest/m1/subscribe-close-backport.md) - the same fix and the `race` loser fix on `release`, so closing a subscription during setup leaves no unhandled rejection in a later 0.17 patch
 - [Main live-feed check](/quest/m1/fetch-live-feed.md) - tests pin that a fetch-only or parked warm cache never supplies Largest Object on main, fixing it if it does
 - [Claim answer epochs](/quest/m1/claim-answer-epochs.md) - a claim answers each output by publishing it at its exact path under its own epoch, so a restarted output never reaches a returning reader as the old one's cache
 - [Untimed decisions](/quest/m1/untimed-decisions.md) - the maintainer decides whether moq-archive keeps refusing untimed tracks, and whether a malformed FETCH object ends its track
