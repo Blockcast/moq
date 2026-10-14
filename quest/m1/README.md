@@ -72,7 +72,6 @@ above them.
 - [Interop close logs](/quest/m1/interop-close-log.md) - logging fix landed; delete once the required Interop run is green
 - [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - subgroups, object IDs, properties, end status, datagram objects, and unknown track properties survive moq-transport -> moq-relay (and a relay cluster) -> moq-transport; moxygen's moq-test passes nightly
 - [One max_age meaning](/quest/m1/cache-max-age.md) - a superseded group goes stale on wall clock since its successor arrived or on media time, whichever is first, in Rust and js/net; fixes the untimed failover stall
-- [Quiet latest group test](/quest/m1/quiet-edge-test.md) - pins on `main` that a quiet track's latest group survives rejoin, expiry, and takeover
 - [FETCH max-delay](/quest/m1/fetch-max-delay.md) - historical readers obey publisher max-age and an optional tighter reader budget, including while holding a group
 - [Draft-20 FETCH edge cases](/quest/m1/fetch-edge-cases.md) - an exact-final range reports End of Track and a FETCH_OK past the requested group closes the session, on main then release
 - [A local close never throws](/quest/m1/subscribe-close-throw.md) - closing a `@moq/net` lite subscription never raises ProtocolViolation for the end of stream it caused, on main
