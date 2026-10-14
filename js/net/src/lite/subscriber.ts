@@ -291,6 +291,11 @@ export class Subscriber {
 			announced.close(error(err));
 			return;
 		}
+		// The consumer left while the open waited for a slot: give the slot back unused.
+		if (announced.closed.peek() !== undefined) {
+			stream.close();
+			return;
+		}
 
 		// Every advertisement the peer currently has live, keyed by suffix (at most one
 		// per path is current, and every announce on this stream shares `prefix`).
@@ -319,7 +324,12 @@ export class Subscriber {
 			// keep the reflected-announce loop check seeing the full chain.
 			let responderOrigin: Hop | undefined;
 			if (hasAnnounceOk(this.version)) {
-				const ok = await AnnounceOk.decode(stream.reader, this.version);
+				const ok = await race([AnnounceOk.decode(stream.reader, this.version), announced.closed]);
+				// A consumer that leaves before the peer answers ends the request now, not on the answer.
+				if (!(ok instanceof AnnounceOk)) {
+					stream.close();
+					return;
+				}
 				// Keep a withheld 0: it names nobody for loop detection, but it is the
 				// anonymous mark and must travel the reconstructed chain. Assigned identities
 				// stay off this hop and are never forwarded.
@@ -330,7 +340,11 @@ export class Subscriber {
 				case Version.DRAFT_01:
 				case Version.DRAFT_02: {
 					// Receive ANNOUNCE_INIT first
-					const init = await AnnounceInit.decode(stream.reader, this.version);
+					const init = await race([AnnounceInit.decode(stream.reader, this.version), announced.closed]);
+					if (!(init instanceof AnnounceInit)) {
+						stream.close();
+						return;
+					}
 
 					// Process initial announcements. These are advertisements like any other, so
 					// they go on record and obey the same one-per-path rule: the initial set
@@ -565,6 +579,9 @@ export class Subscriber {
 			}
 
 			announced.close();
+			// Either side ending the interest ends the stream, or the peer keeps it open, still
+			// discovering into it and holding a stream slot.
+			stream.close();
 		} catch (err: unknown) {
 			const e = error(err);
 			// Reaches here on a protocol violation the peer committed (a second
