@@ -108,7 +108,6 @@ above them.
 - [Exact catalog wall clock](/quest/m1/catalog-wall-clock-precision.md) - `hang::catalog::Clock::wall_clock` keeps sub-millisecond precision
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - browser publishers answer IETF FETCH through the JS ranges request surface
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - native FILL_TIMEOUT bounds upstream waiting on drafts 18-22, alongside local content-age enforcement
-- [IETF ingest refuses a malformed group](/quest/m1/ietf-ingest-refusal.md) - a peer's malformed group is refused with STOP_SENDING rather than dropped at debug
 - [JS identity enforcement](/quest/m1/catalog-identity-js.md) - `@moq/publish` republishes under a new epoch instead of redefining a served track, and probes the Opus description before advertising it
 - [Rust identity enforcement](/quest/m1/catalog-identity-rs.md) - `moq-mux` refuses a redefined rendition, and every Rust publisher resizes in band below its ceiling or mints a new rendition or epoch
 - [Archive](/quest/m1/archive/README.md) - record selected tracks to any object_store and replay them over FETCH or derived HLS; the catalog entry and format may break in place, since no archives exist

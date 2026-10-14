@@ -1120,7 +1120,7 @@ where
 }
 
 /// Stop a refused data stream, propagating a session-scoped error to session teardown.
-fn stop_on_error<R: crate::transport::poll::RecvStream>(
+pub(super) fn stop_on_error<R: crate::transport::poll::RecvStream>(
 	reader: &mut Reader<R, Version>,
 	res: Result<(), Error>,
 ) -> Result<(), Error> {
