@@ -110,7 +110,6 @@ above them.
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - browser publishers answer IETF FETCH through the JS ranges request surface
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - native FILL_TIMEOUT bounds upstream waiting on drafts 18-22, alongside local content-age enforcement
 - [IETF ingest refuses a malformed group](/quest/m1/ietf-ingest-refusal.md) - a peer's malformed group is refused with STOP_SENDING rather than dropped at debug
-- [Draft 17-18 withdraw by reset](/quest/m1/ietf-withdraw-reset.md) - withdrawing a PUBLISH_NAMESPACE on drafts 17 and 18 resets the request instead of FIN-ing it
 - [JS identity enforcement](/quest/m1/catalog-identity-js.md) - `@moq/publish` republishes under a new epoch instead of redefining a served track, and probes the Opus description before advertising it
 - [Rust identity enforcement](/quest/m1/catalog-identity-rs.md) - `moq-mux` refuses a redefined rendition, and every Rust publisher resizes in band below its ceiling or mints a new rendition or epoch
 - [Archive](/quest/m1/archive/README.md) - record selected tracks to any object_store and replay them over FETCH or derived HLS; the catalog entry and format may break in place, since no archives exist
