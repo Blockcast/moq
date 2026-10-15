@@ -85,6 +85,7 @@ above them.
 - [Live largest location](/quest/m1/largest.md) - `largest()` replaces `latest()` in Rust and JS as a live stream of the track's largest location, known before the first group from the publisher's report
 - [Live TS clock validation](/quest/m1/ts-live-clock.md) - resolve the local PCR-rate failure with reproducible timing evidence and CI controls
 - [Binding panic supervision](/quest/m1/ffi-panic-supervision.md) - a panic in any moq-c or moq-ffi background task reaches the host as a panic, never a lost callback or Cancel
+- [Kotlin destroyed arguments](/quest/m1/kt-destroyed-arg.md) - a destroyed object passed to a generated Kotlin call throws instead of aborting the process
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the second round of load-only failures, one quest per flake, fixed at the cause
 - [Plan: a public model](/quest/m1/model-public-surface.md) - every crate-private model item is made public or unnecessary, so a custom publisher or subscriber builds from the public model alone
 - [Lazy discovery](/quest/m1/lazy-discovery/README.md) - a `consume` session requests announcements only for prefixes the origin is watching, in JS then Rust; `follow`, `broadcasts`, and the `discovery` option go away
@@ -164,10 +165,12 @@ above them.
 - [Malformed moq-transport input](/quest/m1/ietf-malformed-close.md) - malformed draft-18 and draft-21 control input closes the session with the draft's code, or PROTOCOL_VIOLATION where a code is a real burden and the fallback is recorded in `doc/concept/standard.md`, in moq-net and js/net
 - [Binding track resolver](/quest/m1/binding-track-helper.md) - binding apps subscribe to a rendition without inlining `track` or the key
 - [Exporters follow a rendition to a new track](/quest/m1/export-rendition-rebind.md) - the fMP4, TS, MKV and FLV exporters rebuild a rendition whose resolved `track` or `broadcast` changes under the same ID
+- [Opaque catalog consumer](/quest/m1/catalog-consumer-opaque.md) - `moq_mux::catalog::Consumer` hides its encoding variants and closed state
 
 - [Stats prefix tracks](/quest/m1/stats-prefix-tracks.md) - additive tracks required by the breaking lag API; existing maps remain supported
 
 - [C++ and OBS package proof](/quest/m1/cpp-package-check.md) - the installed artifacts pass before their first release
+- [C++ FFI reuse](/quest/m1/cpp-ffi-reuse.md) - C++ packages link the shared default-feature FFI build once it is proven compatible
 
 ## Related
 
