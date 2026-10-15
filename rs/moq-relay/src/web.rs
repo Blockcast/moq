@@ -1743,7 +1743,7 @@ mod tests {
 				let (ca, cert, key) = make_certs(&certs);
 				let mut config = crate::Config::default();
 				config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
-				config.listen.timeout = std::time::Duration::ZERO;
+				config.listen.timeout = Some(std::time::Duration::ZERO);
 				config.web.ws = true;
 				config.auth.public = vec![moq_auth::Pattern::all()];
 				config.drain_timeout = DRAIN_WINDOW;
