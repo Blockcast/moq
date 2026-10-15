@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { Priority } from "../index.ts";
 import { infoDefaults } from "../track.ts";
 import { fromWire, toWire } from "./priority.ts";
 
@@ -21,4 +22,10 @@ test("subscriber priority round trips", () => {
 
 test("an unset track priority is the draft's usual publisher priority", () => {
 	expect(toWire(infoDefaults().priority)).toBe(128);
+});
+
+test("the package entry exports the converter so callers need no private copy", () => {
+	expect(Priority.toWire).toBe(toWire);
+	expect(Priority.fromWire).toBe(fromWire);
+	expect(Priority.toWire(2)).toBe(0xfd);
 });
