@@ -20,6 +20,7 @@ case "${1:-}" in
         run just rs test -p moq-bench --release --run-ignored only \
             -E 'test(benchmark_readiness_establishment)' --success-output immediate
         run just rs bench-playback
+        run just rs bench-feed-fetch
         run just rs test -p moq-relay -E 'test(benchmark_stun_sources)' --run-ignored only --success-output immediate
         # Fuzz exposes moq-net's codec benches; it is not a feature of the other crates.
         run cargo bench --locked --no-fail-fast -p moq-net --features fuzz --bench '*' -- --test
