@@ -32,8 +32,8 @@ case "${1:-}" in
             --features moq-stats/bench \
             --bench http_idle --bench auth --bench producer_tick --bench decode --bench aggregate \
             --bench catalog --bench ts_schedule --bench export --bench chunk_interleaving --bench worker_turns -- --test
-        run just rs test -p moq-archive -p moq-mux --no-fail-fast \
-            -E 'test(benchmark_timeline_fetch_fanout) | test(benchmark_damage_pid_fanout) | test(benchmark_pes_staging)' \
+        run just rs test -p moq-archive -p moq-mux -p moq-hls --no-fail-fast \
+            -E 'test(benchmark_timeline_fetch_fanout) | test(benchmark_damage_pid_fanout) | test(benchmark_pes_staging) | test(benchmark_reference_handoff_fanout)' \
             --run-ignored only --success-output immediate
         # Codecs are irrelevant to timebase reservation, so skip building them.
         run just rs test -p moq-ffi --no-default-features -E 'test(benchmark_timebase_reservation_fanout)' \
