@@ -17,6 +17,8 @@ run() {
 case "${1:-}" in
     rust)
         run just rs bench-latency
+        run just rs test -p moq-bench --release --run-ignored only \
+            -E 'test(benchmark_readiness_establishment)' --success-output immediate
         run just rs bench-playback
         run just rs test -p moq-relay -E 'test(benchmark_stun_sources)' --run-ignored only --success-output immediate
         # Fuzz exposes moq-net's codec benches; it is not a feature of the other crates.
