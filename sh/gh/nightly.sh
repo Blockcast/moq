@@ -32,7 +32,7 @@ case "${1:-}" in
             --bench http_idle --bench auth --bench producer_tick --bench decode --bench aggregate \
             --bench catalog --bench ts_schedule --bench export --bench chunk_interleaving -- --test
         run just rs test -p moq-archive -p moq-mux --no-fail-fast \
-            -E 'test(benchmark_timeline_fetch_fanout) | test(benchmark_damage_pid_fanout)' \
+            -E 'test(benchmark_timeline_fetch_fanout) | test(benchmark_damage_pid_fanout) | test(benchmark_pes_staging)' \
             --run-ignored only --success-output immediate
         # Codecs are irrelevant to timebase reservation, so skip building them.
         run just rs test -p moq-ffi --no-default-features -E 'test(benchmark_timebase_reservation_fanout)' \
