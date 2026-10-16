@@ -167,9 +167,20 @@ The `container.kind` on each rendition says how frames are framed:
 | `legacy` | varint microsecond timestamp + codec payload | The default. Cheapest. |
 | `cmaf` | `moof` + `mdat` | fMP4 passthrough for HLS/DASH interop; ~100 bytes per frame. |
 | `loc` | small property block + payload | The IETF [LOC](/concept/standard#loc) container. |
+| `mmtp` | one MMTP packet (ISO/IEC 23008-1) of `packetId` | MPEG Media Transport sources; a sample may span several frames. JS only. |
 
 A consumer skips renditions with a kind it doesn't recognize and carries them
 through when republishing the catalog.
+
+An `mmtp` rendition names the MMTP `packetId` (1-65535; 0 is the signaling
+flow) its frames carry, and the track must be timed. A fragmented sample (MFU
+fragmentation indicator 1, 2, 3) is joined across consecutive frames of one
+group, and presents at the timestamp of the frame carrying its first fragment.
+Metadata packets (MPU and movie-fragment metadata) produce no frame; decoder
+configuration comes from the catalog, as for `legacy`. FEC repair is not
+carried on the media track. A packet of another `packet_id`, a malformed
+packet or a refused fragment ends its group like any other decode error.
+Parsing and reassembly come from [libmmt](https://github.com/Blockcast/libmmt).
 
 A CMAF frame's timestamp is its fragment's earliest presentation time, and the
 broadcast timeline: `tfdt` only places the samples relative to each other. A

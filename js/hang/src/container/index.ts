@@ -1,6 +1,6 @@
 /**
  * Per-frame container formats (timestamp plus codec bitstream): the legacy varint
- * container, CMAF (fMP4), and LOC, with consumers and producers to read/write them.
+ * container, CMAF (fMP4), LOC and MMTP, with consumers and producers to read/write them.
  *
  * @module
  */
@@ -10,5 +10,6 @@ export * as Cmaf from "./cmaf";
 export { Consumer, type ConsumerProps, type Read } from "./consumer";
 export type { Format } from "./format";
 export * as Legacy from "./legacy";
+export * as Mmtp from "./mmtp";
 export { type TrackInfoOptions, trackInfo } from "./track";
 export * from "./types";
