@@ -4533,6 +4533,7 @@ dependencies = [
  "moq-archive",
  "moq-audio",
  "moq-auth 0.2.1",
+ "moq-clock",
  "moq-hls",
  "moq-json",
  "moq-msf",
@@ -4608,6 +4609,7 @@ dependencies = [
  "kio 0.6.2",
  "libc",
  "moq-audio",
+ "moq-clock",
  "moq-json",
  "moq-mux",
  "moq-net",
@@ -4737,6 +4739,7 @@ dependencies = [
  "hang",
  "kio 0.6.2",
  "memchr",
+ "moq-clock",
  "moq-flate",
  "moq-json",
  "moq-loc",
@@ -4756,7 +4759,6 @@ dependencies = [
  "tracing",
  "tracing-test",
  "url",
- "web-async",
  "webm-iterable",
 ]
 
@@ -4776,7 +4778,7 @@ dependencies = [
  "kio 0.6.2",
  "libc",
  "loom",
- "moq-net-sim",
+ "moq-clock",
  "moq-pattern 0.1.2",
  "num_enum",
  "rand 0.10.3",
@@ -4789,7 +4791,6 @@ dependencies = [
  "tracing",
  "uuid",
  "wasm-bindgen-test",
- "web-async",
 ]
 
 [[package]]
@@ -4799,19 +4800,6 @@ dependencies = [
  "libfuzzer-sys",
  "moq-net",
 ]
-
-[[package]]
-name = "moq-net-sim"
-version = "0.0.0"
-dependencies = [
- "futures",
- "kio 0.6.2",
- "moq-net-sim-macros",
-]
-
-[[package]]
-name = "moq-net-sim-macros"
-version = "0.0.0"
 
 [[package]]
 name = "moq-nvenc"
@@ -4945,12 +4933,12 @@ version = "0.2.11"
 dependencies = [
  "kio 0.6.2",
  "moq-auth 0.2.1",
+ "moq-clock",
  "moq-json",
  "moq-net",
  "moq-tokio",
  "thiserror 2.0.21",
  "tokio",
- "web-async",
 ]
 
 [[package]]
@@ -5052,6 +5040,7 @@ version = "0.2.12"
 dependencies = [
  "criterion",
  "futures",
+ "moq-clock",
  "moq-json",
  "moq-net",
  "serde",
