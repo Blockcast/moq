@@ -124,7 +124,6 @@ ranked just below deterministic TS legs, which it requires.
 - [mTLS on tls://](/quest/m2/tls-listener-mtls.md) - a `tls://` listener can identify a cluster peer by its client certificate
 - [Link quality](/quest/m2/link-quality.md) - a radio link's cost follows its measured quality without flapping routes
 - [Archive recovery listing](/quest/m2/archive-recovery-listing.md) - a resumed DVR lists what changed since its checkpoint, not every stored group
-- [One connection lifecycle](/quest/m2/uring-connection-log.md) - every accept path, io_uring included, logs a connection's span and close from one owner, so Interop's accounting works on the ring
 - [Relay io_uring packages](/quest/m2/relay-io-uring-package.md) - Linux relay packages ship io_uring once the ring is on par with tokio
 - [Opus implementation](/quest/m2/audio-opus-backend.md) - compare Opus codec quality, CPU, build cost, and the loss recovery each backend offers
 - [Latency ledger](/quest/m2/latency-ledger.md) - a viewer reports its share of playback delay stage by stage: jitter buffer, decode, render, and device
