@@ -1,7 +1,7 @@
 import * as z from "@zod/mini";
 
 /** The container kinds this build knows how to decode. */
-const KNOWN_KINDS = ["legacy", "cmaf", "loc"];
+const KNOWN_KINDS = ["legacy", "cmaf", "loc", "mmtp"];
 
 /**
  * A container this build does not recognize, preserved verbatim.
@@ -36,6 +36,10 @@ export const UnknownContainerSchema = z.pipe(
  *           The init segment (ftyp+moov) is base64-encoded in the catalog.
  * - "loc": Low Overhead Container (draft-ietf-moq-loc). Each frame has a small
  *          property block followed by the codec payload.
+ * - "mmtp": MPEG Media Transport Protocol (ISO/IEC 23008-1). Each frame is one MMTP packet
+ *           of the declared `packetId`; a sample may span several frames as MFU fragments.
+ *           The track must be timed: the presentation time is the frame timestamp of the
+ *           sample's first fragment. FEC repair, if any, rides its own track.
  *
  * Anything else parses as {@link UnknownContainerSchema} instead of throwing, so one rendition
  * using a future container does not take down the rest of the catalog.
@@ -52,6 +56,11 @@ export const ContainerSchema = z._default(
 			}),
 			// Low Overhead Container.
 			z.object({ kind: z.literal("loc") }),
+			// MMTP packets of one packet_id. 0 is the signaling flow and never a media track.
+			z.object({
+				kind: z.literal("mmtp"),
+				packetId: z.number().check(z.int(), z.gte(1), z.lte(0xffff)),
+			}),
 		]),
 		UnknownContainerSchema,
 	]),
@@ -69,6 +78,9 @@ export type Container = z.infer<typeof ContainerSchema>;
 
 /** The CMAF variant of {@link Container}, carrying the base64 init segment. */
 export type CmafContainer = Extract<Container, { kind: "cmaf" }>;
+
+/** The MMTP variant of {@link Container}, carrying the packet_id its frames must use. */
+export type MmtpContainer = Extract<Container, { kind: "mmtp" }>;
 
 /** Whether a container can be decoded by this build, i.e. its `kind` is recognized. */
 export function containerSupported(container: Container): boolean {

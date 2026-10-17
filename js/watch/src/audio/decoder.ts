@@ -413,8 +413,13 @@ export class Decoder {
 		const preSkip =
 			config.codec === "opus" && config.description ? Util.Opus.preSkip(Util.Hex.toBytes(config.description)) : 0;
 		this.#terminal.clear(preSkip, Time.Micro.fromMilli(Time.Milli(config.warmup ?? 0)));
-		const format =
-			config.container.kind === "loc" ? new Container.Loc.Format("audio") : new Container.Legacy.Format(config);
+		const container = config.container;
+		const format: Container.Format =
+			container.kind === "mmtp"
+				? new Container.Mmtp.Format(container)
+				: container.kind === "loc"
+					? new Container.Loc.Format("audio")
+					: new Container.Legacy.Format(config);
 		// Create consumer with slightly less latency than the render worklet to avoid underflowing.
 		// TODO include JITTER_UNDERHEAD
 		const consumer = new Container.Consumer(sub, {
