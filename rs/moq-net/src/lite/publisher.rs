@@ -436,7 +436,12 @@ impl<S: crate::transport::poll::Session> AuthServe<S> {
 			Ok(()) => Error::Cancel,
 			Err(err) => {
 				match &err {
-					Error::Cancel | Error::Unsupported | Error::Stream(_) | Error::Session(_) | Error::Transport(_) => {
+					Error::Cancel
+					| Error::Unsupported
+					| Error::Stream(_)
+					| Error::Session(_)
+					| Error::Transport(_)
+					| Error::IdleTimeout => {
 						tracing::debug!(%err, "auth stream ended")
 					}
 					err => tracing::warn!(%err, "auth stream error"),
@@ -896,7 +901,8 @@ impl<S: crate::transport::poll::Session> AnnounceServe<S> {
 							Error::Cancel
 							| Error::Stream(crate::StreamError::Cancel)
 							| Error::Session(crate::SessionError::Cancel)
-							| Error::Transport(_) => {
+							| Error::Transport(_)
+							| Error::IdleTimeout => {
 								tracing::debug!(prefix = %origin.absolute(""), "announcing cancelled");
 							}
 							err => {
@@ -1389,6 +1395,7 @@ fn is_cancel(err: &Error) -> bool {
 			| Error::Stream(crate::StreamError::Cancel)
 			| Error::Session(crate::SessionError::Cancel)
 			| Error::Transport(_)
+			| Error::IdleTimeout
 	)
 }
 
