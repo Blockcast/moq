@@ -108,8 +108,6 @@ ranked just below deterministic TS legs, which it requires.
 - [Drop web-transport-trait](/quest/m2/drop-web-transport-trait.md) - every backend implements moq-net's `transport::poll` traits, and the generic `web_transport_trait` adapters are deleted
 - [Measure ECN on the backbone](/quest/m2/quic-ecn-measure.md) - a written
   verdict on marking versus dropping, and whether Linode and OVH keep marks
-- [Per-stream ACK progress](/quest/m2/quic-ack-progress.md) - `moq-quic` reports
-  how far a send stream has been acknowledged and when
 - [poll_acked on moq-net's send stream](/quest/m2/quic-ack-hook.md) - the
   backend-neutral hook on moq-net's own transport trait that awaits an
   acknowledged stream offset, implemented by the moq-tokio and moq-uring adapters
