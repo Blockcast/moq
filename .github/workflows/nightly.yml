@@ -28,8 +28,9 @@ name: Nightly
 # release PRs on them.
 #
 # Main PRs run no cloud CI beyond the merge queue's Check and Test, so every
-# path-filtered gate (Android, C++, WASM, X11, the audio replays, platform.yml
-# and the release dry-runs) runs here on main too, and on release PRs.
+# path-filtered gate (Android, C++, WASM, X11, the audio replays, the OSS
+# Scanner image, platform.yml and the release dry-runs) runs here on main too,
+# and on release PRs.
 #
 # A failure here lands on main rather than being caught in review, which is the
 # accepted trade. Anything that must block a merge belongs in check.yml.
@@ -64,6 +65,9 @@ jobs:
 
   audio-replay:
     uses: ./.github/workflows/audio-quality.yml
+
+  oss-scanner:
+    uses: ./.github/workflows/oss-scanner.yml
 
   # Each independent workload gets its own hour. Each benchmark group keeps one
   # build environment, so a benchmark reuses the dependencies its group already
