@@ -123,6 +123,8 @@ lands before the cut.
 - [moq-net compiles once](/quest/m1/net-erase-transport.md) - the session drivers stop monomorphizing per transport and per crate, saving several MiB of the relay, FFI library, `libmoq` and CLI
 - [moq-net internals](/quest/m1/net-internals.md) - no per-group session clones, no transport type parameter in lite and IETF internals, and the `Local` check measured
 
+- [Subscribe update churn](/quest/m1/subscribe-update-churn.md) - a viewer sends SUBSCRIBE_UPDATE only on a meaningful change, measured after the publisher stall fix
+
 - [Dead code and API surface audit](/quest/m1/audit-dead-code.md) - repeat the removal audit before the next major release
 - [Dependency and alternatives audit](/quest/m1/audit-deps.md) - dependencies are current, deduplicated, needed, and the best maintained option
 - [Test cost audit](/quest/m1/audit-test-cost.md) - the slowest, flakiest, and least valuable tests are fixed, deleted, or planned
