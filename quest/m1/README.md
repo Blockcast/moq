@@ -93,6 +93,8 @@ tracks, so per-group stats stop costing cluster announces.
 - [A widened max age re-offers cached groups](/quest/m1/resolved-demand.md) - a warm relay serves a reader with a wider max age the cached groups a cold relay would, with no wire change
 - [Drop set](/quest/m1/drop-set.md) - each cursor judges missing groups against its own budget, so a narrow reader drops promptly and a widening re-offers groups already reported dropped on lite-07
 - [Broadcast archives](/quest/m1/archive/README.md) - ANNOUNCE, TRACKS, and a SUBSCRIBE per track record every track under a prefix to any object_store, a host serves a stored broadcast back, and the catalog drops its archive pointer for an opt-in `hls` field
+- [Pause an IETF SUBSCRIBE](/quest/m1/ietf-subscribe-pause.md) - Forward=0 pauses a SUBSCRIBE without demand upstream and Forward=1 resumes it, instead of ending it
+- [A listing says whether a removed track finished](/quest/m1/listing-end-reason.md) - a listing removal carries whether the track finished, at every hop, so the IETF answerer ends a finished track's PUBLISH with TRACK_ENDED and a Rust-to-Rust IETF listing removes it without a reset
 - [Compressed tracks](/quest/m1/compress/README.md) - a track flagged `compress` is DEFLATEd per group by moq-net, forwarded compressed, and inflated once on the relay for peers that cannot signal it; `catalog.json.z` and moq-flate go away
 - [lite-06 max sequence](/quest/m1/lite06-max-sequence.md) - group sequence 2^62-1 reaches a lite-06 subscriber or is refused loudly, instead of vanishing
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
@@ -101,7 +103,6 @@ tracks, so per-group stats stop costing cluster announces.
 - [A public model](/quest/m1/public-model/README.md) - every model item a built-in session reaches is public, unnecessary, or marked deliberately private, so a custom publisher, subscriber, or relay builds from the public model alone
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break has its MIGRATE entry
 - [FETCH_OK whole group](/quest/m1/ietf-fetch-end-location.md) - on drafts 14 to 19, FETCH_OK End Object 0 means the whole group in both directions, and a FETCH ending at the maximum group is refused as unsupported
-- [Pause an IETF SUBSCRIBE](/quest/m1/ietf-subscribe-pause.md) - Forward=0 pauses a SUBSCRIBE without demand upstream and Forward=1 resumes it, instead of ending it
 - [JavaScript FETCH](/quest/m1/js-fetch.md) - browser publishers answer IETF FETCH through the JS ranges request surface
 - [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - native FILL_TIMEOUT bounds upstream waiting on drafts 18-22, alongside local content-age enforcement
 - [Rust identity enforcement](/quest/m1/catalog-identity-rs.md) - `moq-mux` refuses a redefined rendition, and every Rust publisher mints a new rendition name for a decoder identity change and updates everything else in place
