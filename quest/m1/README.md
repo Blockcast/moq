@@ -110,7 +110,6 @@ lite-07 stream type here.
 - [Replica resume](/quest/m1/replica-resume.md) - a lagging same-epoch replica resumes with every frame exactly once and in order, on lite-07 and on moq-transport
 - [Recovery verdicts](/quest/m1/recovery-verdicts.md) - group recovery refetches only on errors a new copy can fix, so a repeating error ends the group instead of looping
 - [Rust resume holds a declared end](/quest/m1/resume-rust-end.md) - a resumed Rust track keeps a declared end across copies, dedupes flapping copies, and judges retention inside the reader's window
-- [Received timestamps are media time](/quest/m1/lite-time-provenance.md) - a received timed track's timestamps are media time, so the rewind check can run across hops
 - [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS
 - [Silent-peer close](/quest/m1/quic-silent-peer-drain.md) - moq-quic closes a connection that never heard its peer without the 3 s drain
 - [Binding linger](/quest/m1/linger-ffi.md) - `moq-ffi` and every binding finish a broadcast cleanly, so subscribers drain it until its media is stale
