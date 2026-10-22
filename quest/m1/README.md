@@ -125,7 +125,7 @@ lite-07 stream type here.
 - [moq-net compiles once](/quest/m1/net-erase-transport.md) - the session drivers stop monomorphizing per transport and per crate, saving several MiB of the relay, FFI library, `libmoq` and CLI
 - [Binding check cost](/quest/m1/binding-check-cost.md) - `moq.cpp` compiles once per C++ standard and Gradle stays warm, measured before and after
 - [Audio devices on ARM](/quest/m1/audio-devices-arm.md) - `just rs audio-devices` passes on the hosted ARM runner
-- [CI housekeeping](/quest/m1/ci-housekeeping.md) - queue nextest at 24 threads, stale Pages artifacts cleared, the actionlint ignore dropped
+- [CI housekeeping](/quest/m1/ci-housekeeping.md) - validate queue nextest at 24 threads and remove the actionlint queue ignore after its release
 - [Interop audio delivery](/quest/m1/interop-audio.md) - every interop subscriber decodes and checks the publishers' 440 Hz tone, and the Rust publisher sends Opus
 - [AAC in the native JS fallback](/quest/m1/libav-aac.md) - Node and Bun players decode AAC, and the Rust interop publisher adds an AAC track
 - [Native audio decode conformance](/quest/m1/audio-decode-conformance.md) - Opus and AAC decode through every moq-audio backend, moq-c, and moq-ffi is checked against known tones and clips, like moq-video's suite
