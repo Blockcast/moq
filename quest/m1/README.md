@@ -127,7 +127,6 @@ tracks, so per-group stats stop costing cluster announces.
 - [JS release preflight](/quest/m1/js-publish-preflight.md) - `release.ts` refuses a package whose `@moq/*` dependency is not on npm, so no dependent publishes uninstallable
 - [Stream sockets disable Nagle](/quest/m1/tcp-nodelay.md) - every qmux TCP, TLS, and WebSocket socket, accepted or dialed, sets `TCP_NODELAY`
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
-- [Resumed close](/quest/m1/resume-closed.md) - a resumed JS track keeps its declared end across copies, and its `closed` and `largest()` settle on a clean end
 - [Replica resume](/quest/m1/replica-resume.md) - a lagging same-epoch replica resumes with every frame exactly once and in order, on lite-07 and on moq-transport
 - [Rust resume holds a declared end](/quest/m1/resume-rust-end.md) - a resumed Rust track keeps a declared end across copies, dedupes flapping copies, and judges retention inside the reader's window
 - [Rust resume checks compression](/quest/m1/resume-compress.md) - a same-epoch route copy with a different `compress` is refused instead of corrupting framing
