@@ -81,7 +81,6 @@ lite-07 stream type here.
 - [Compressed tracks](/quest/m1/compress/README.md) - a track flagged `compress` is DEFLATEd per group by moq-net, forwarded compressed, and inflated once on the relay for peers that cannot signal it; `catalog.json.z` and moq-flate go away
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Moxygen minimal interop](/quest/m1/smoke-moxygen.md) - waiting on Moxygen to send a registered filter type, then the smoke lane stops hiding its failure
-- [IETF setup waits under validity](/quest/m1/ietf-setup-validity.md) - every IETF subscriber setup wait ends once its request's route retires or its grant is revoked
 - [More tests under load](/quest/m1/test-flakes-2/README.md) - the second round of load-only failures, one quest per flake, fixed at the cause
 - [Lazy discovery](/quest/m1/lazy-discovery/README.md) - a `consume` session requests announcements only for prefixes the origin is watching, in JS then Rust; `follow`, `broadcasts`, and the `discovery` option go away
 - [A public model](/quest/m1/public-model/README.md) - every model item a built-in session reaches is public, unnecessary, or marked deliberately private, so a custom publisher, subscriber, or relay builds from the public model alone
