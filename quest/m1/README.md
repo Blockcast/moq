@@ -85,6 +85,7 @@ tracks, so per-group stats stop costing cluster announces.
 - [Generated C bindings](/quest/m1/c/README.md) - C generated from moq-ffi ships as `moq-c` 0.8.0 and replaces the hand-written libmoq
 - [Exact timestamps in every binding](/quest/m1/binding-timestamps.md) - bindings carry `{value, scale}` timestamps instead of lossy microseconds
 - [Binding encoder config](/quest/m1/binding-encoder-config.md) - binding encoders take an exact rational framerate, and the publication track name moves to options only the producers take
+- [FFI shutdown requests the drain synchronously](/quest/m1/ffi-shutdown-sync.md) - `shutdown()` becomes a sync drain request awaited with `closed()`, so a dropped future can no longer cancel
 - [moq-transport passthrough](/quest/m1/ietf-extension/README.md) - object IDs, properties, end status, datagram objects, and unknown track properties survive moq-transport -> moq-relay (and a relay cluster) -> moq-transport; moxygen's moq-test sections 1-7 pass nightly, except cases that use a subgroup other than 0
 - [Refresh](/quest/m1/refresh/README.md) - a join asks for a fresh group once the current group's deltas exceed a publisher-advertised byte ratio, at every hop; replaces `Demand::used`/`unused` and moq-json's `delta_ratio`
 - [Announcement takeover](/quest/m1/announce-takeover.md) - a new independent route explicitly continues instances served through its predecessor, with shared Rust/JS semantics and lite-07 wire
@@ -139,6 +140,8 @@ tracks, so per-group stats stop costing cluster announces.
 - [NixOS leaf dials its root](/quest/m1/nix-cluster-connect.md) - the NixOS relay module sets the cluster variable the relay reads, so a leaf joins its root instead of running standalone
 - [Wayland display id](/quest/m1/wayland-display-id.md) - a requested display id off X11 is refused or honored, never silently replaced by a portal pick shared across publications
 - [CI housekeeping](/quest/m1/ci-housekeeping.md) - validate queue nextest at 24 threads and remove the actionlint queue ignore after its release
+- [Nightly OBS TSan suite](/quest/m1/obs-test-nightly.md) - Nightly runs `just obs test` so a broken suite is seen
+- [libav polyfill fork fix](/quest/m1/libav-polyfill-fork.md) - our polyfill fork copies planar audio correctly and `@moq/hang` drops its patch
 - [Wire-compat audio](/quest/m1/wire-compat-audio.md) - the wire-compat media lanes decode and check the interop tone across releases
 - [Interop AAC](/quest/m1/interop-aac.md) - the Rust interop publisher adds an AAC tone and every subscriber checks it beside Opus
 - [Interop pre-skip](/quest/m1/interop-preskip.md) - the interop tone check anchors phase to timestamps, so a misapplied pre-skip fails
