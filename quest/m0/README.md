@@ -44,6 +44,7 @@ Each lands its fixes in its own PR and plans only what needs a decision.
 
 - [Broadcast epochs](/quest/m0/broadcast-epoch/README.md) - every first-party publisher that can restart mints a fresh route epoch, the newest wins a path, and only routes with the same epoch resume a subscription
 - [Redundant failover drift](/quest/m0/redundant-failover-drift.md) - a stitching TS export switches back to the surviving importer behind bufferbloat instead of failing on a stalled clock
+- [web-transport-proto 0.6.3](/quest/m0/web-transport-proto-0.6.3.md) - `main` and `release` lock the upstream release that bounds decoded CONNECT headers, so a peer can't make a relay hold megabytes per session before auth
 - [qmux 0.5.3](/quest/m0/qmux-0.5.3.md) - crates.io publishes qmux 0.5.3 with the builder session config the release backport of #5609 needs
 - [Release shutdown backport](/quest/m0/ffi-shutdown-backport.md) - `release` publishes a non-breaking moq-ffi with an async `drain()` and qmux sessions on the QUIC stream limit
 - [Release fixed delay](/quest/m0/release-fixed-delay.md) - a fixed latency on `release`, which moq.dev runs, ignores the catalog's jitter and delay as `main` already does
