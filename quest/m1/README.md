@@ -129,6 +129,7 @@ lite-07 stream type here.
 - [Simplification audit](/quest/m1/audit-simplify.md) - repeat the simplification audit, starting with the m0 leftovers, before the next major release
 - [Artifact size audit](/quest/m1/audit-size.md) - binary, FFI, WASM, and bundle growth since the m0 run is explained, fixed, or planned
 - [Compile time audit](/quest/m1/audit-compile-time.md) - build-time hotspots are measured against the m0 baselines and the worst are fixed or planned
+- [Nightly benchmark regressions](/quest/m1/bench-ci.md) - each nightly compares the Rust Criterion benches against the previous nightly's commit on the same hosted runner, publishes it to the git.moq.dev report, and alerts on a regression
 - [Performance audit](/quest/m1/audit-perf.md) - benchmarks that regressed since the m0 run are explained, fixed, or planned, and unbenched hot paths get coverage
 
 ## Related
