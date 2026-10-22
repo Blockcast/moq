@@ -120,7 +120,6 @@ tracks, so per-group stats stop costing cluster announces.
 - [Audio playout memory](/quest/m1/audio-playout-memory.md) - a catalog's advertised jitter or delay cannot size decoded PCM; the lookahead stays encoded
 - [AAC alias classification](/quest/m1/aac-he-alias.md) - every accepted AAC spelling gets the right frame duration from one classification
 - [A/V clock](/quest/m1/av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
-- [Publish channel count](/quest/m1/publish-audio-channel-count.md) - forcing a channel count on an Audio.Capture stops costing the subscriber gaps of silence, and the media fixture's cold-start audio-tone flake is fixed at its cause
 - [Signals notify on every structural change](/quest/m1/signals-equality.md) - a renamed `undefined` key or a changed sparse array length notifies, checked by a fast-check model of the notification contract
 - [Container reads drop backfill](/quest/m1/read-backfill.md) - the JS container consumer drops groups below its read cursor like Rust
 - [qmux local lifecycle](/quest/m1/qmux-local-lifecycle.md) - an abort blocked on send credit resets at once, and a close behind a backed-up socket still sends APPLICATION_CLOSE
