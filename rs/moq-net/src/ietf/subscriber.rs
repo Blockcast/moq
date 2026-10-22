@@ -472,6 +472,7 @@ impl Target {
 /// metadata differs. A sealed TIMESCALE travels downstream unchanged, so it must too.
 fn accepted_info(properties: &ietf::Properties, version: Version) -> track::Info {
 	let mut info = track::Info::default()
+		.with_compress(properties.compress)
 		.with_timescale(properties.timescale)
 		.with_max_age(properties.max_cache_duration)
 		.with_priority(super::priority::from_wire(properties.priority.unwrap_or(128)))
@@ -489,7 +490,10 @@ fn accepted_info(properties: &ietf::Properties, version: Version) -> track::Info
 
 /// Why a track a `version` publisher answered with `properties` is neither processed nor
 /// forwarded, if it is not.
-fn refused(properties: &ietf::Properties, version: Version) -> Option<Error> {
+fn refused(properties: &ietf::Properties, version: Version, negotiated: bool) -> Option<Error> {
+	if properties.compress && !(negotiated && super::flate::supported(version)) {
+		return Some(Error::UnsupportedExtension);
+	}
 	let info = accepted_info(properties, version);
 	info.properties.as_deref()?.refused(&info)
 }
@@ -2968,8 +2972,11 @@ where
 			// A track that needs a property we do not understand, or carries more than we
 			// could forward, is neither processed nor forwarded: the subscription is
 			// cancelled and the subscribers refused.
-			Ok(Some(accepted)) if refused(&accepted.properties, self.version).is_some() => {
-				let err = refused(&accepted.properties, self.version).expect("checked by the guard");
+			Ok(Some(accepted))
+				if refused(&accepted.properties, self.version, self.peer_setup.get().await.flate).is_some() =>
+			{
+				let err = refused(&accepted.properties, self.version, self.peer_setup.get().await.flate)
+					.expect("checked by the guard");
 				tracing::debug!(broadcast = %self.origin.absolute(broadcast_path), track = %track_name, %err, "subscribe refused");
 				// Refuse before waiting on the peer to acknowledge the cancellation.
 				if let Some(pending) = self.take_pending(request_id) {
@@ -3902,7 +3909,7 @@ where
 		let _ = stream.writer.finish();
 		let ok = match response {
 			// A track that needs a property we do not understand is not forwarded.
-			Ok(ok) => match refused(&ok.properties, self.version) {
+			Ok(ok) => match refused(&ok.properties, self.version, self.peer_setup.get().await.flate) {
 				Some(err) => Err(err),
 				None => Ok(ok),
 			},
@@ -4162,21 +4169,26 @@ where
 		// timed track without a Timestamp is refused by the model.
 		let properties = bytes::Bytes::from(datagram.properties.unwrap_or_default());
 		// A status object has no frame to hold its time, so its block keeps it.
-		let (timestamp, properties) = match status.is_some_and(|status| status != 0) {
+		let (timestamp, properties, inflated) = match status.is_some_and(|status| status != 0) {
 			true => (
 				None,
 				super::object::unframed(&properties, self.version, track.timescale)?,
+				None,
 			),
 			false => {
 				let decoded = super::object::read(&properties, self.version, track.timescale)?;
 				super::object::check_frame(&decoded.properties, track.timescale)?;
-				(decoded.timestamp, decoded.properties)
+				(decoded.timestamp, decoded.properties, decoded.inflated)
 			}
 		};
 		let Some(producer) = track.producer.as_mut() else {
 			return Ok(());
 		};
-		producer.insert_wire_datagram(crate::model::datagram::Stored {
+		let inflated = match status.is_some_and(|s| s != 0) {
+			true => None,
+			false => super::object::inflated(inflated, producer.info().compress)?,
+		};
+		let stored = crate::model::datagram::Stored {
 			datagram: crate::Datagram {
 				sequence,
 				timestamp,
@@ -4190,7 +4202,11 @@ where
 				properties,
 			})),
 			deflated: None,
-		})?;
+		};
+		match inflated {
+			Some(size) => producer.insert_deflated_datagram(stored, size)?,
+			None => producer.insert_wire_datagram(stored)?,
+		}
 		Ok(())
 	}
 }
@@ -4471,6 +4487,7 @@ struct GroupIngest {
 	/// The property list `properties` was read from, for a status object, which has no frame.
 	raw: bytes::Bytes,
 	gap: Option<u64>,
+	inflated: Option<u64>,
 	/// The object being read is one the group started past, so it is read and dropped.
 	dropping: bool,
 	phase: IngestPhase,
@@ -4512,6 +4529,7 @@ impl GroupIngest {
 			properties: Default::default(),
 			raw: bytes::Bytes::new(),
 			gap: None,
+			inflated: None,
 			dropping: false,
 			phase: IngestPhase::Delta,
 			budget: subscriber.frames.clone(),
@@ -4894,7 +4912,7 @@ where
 		let header = frame::Header {
 			info: frame::Info { size, timestamp },
 			fields,
-			inflated: None,
+			inflated: super::object::inflated(decoded.inflated, producer.compressed())?,
 		};
 		let mut frame = producer.create_frame_owned(header, &self.frames)?;
 		if let Err(err) = std::future::poll_fn(|cx| stream.poll_read_frame(cx, &mut frame)).await {
@@ -5631,7 +5649,7 @@ impl GroupIngest {
 		Ok(frame::Header {
 			info,
 			fields,
-			inflated: None,
+			inflated: super::object::inflated(self.inflated, group.compressed())?,
 		})
 	}
 
@@ -5656,6 +5674,7 @@ impl GroupIngest {
 					self.properties = Default::default();
 					self.raw = bytes::Bytes::new();
 					self.gap = None;
+					self.inflated = None;
 					self.dropping = self.start.is_some() && id < group.frame_count() as u64;
 					self.phase = match self.has_extensions {
 						true => IngestPhase::ExtSize,
@@ -5673,6 +5692,7 @@ impl GroupIngest {
 					self.properties = decoded.properties;
 					self.raw = ext;
 					self.gap = decoded.gap;
+					self.inflated = decoded.inflated;
 					self.phase = IngestPhase::Size { timestamp };
 				}
 				IngestPhase::Size { timestamp } => {
@@ -16629,5 +16649,37 @@ mod track_property_tests {
 				assert_eq!(subscriber.info().timescale, Some(Timescale::MILLI), "{version}");
 			}
 		}
+	}
+}
+
+#[cfg(test)]
+mod compression_negotiation_tests {
+	use super::*;
+	#[test]
+	fn a_compression_declaration_requires_mutual_negotiation() {
+		let properties = ietf::Properties {
+			compress: true,
+			..Default::default()
+		};
+		for version in [
+			Version::Draft14,
+			Version::Draft15,
+			Version::Draft16,
+			Version::Draft17,
+			Version::Draft18,
+			Version::Draft22,
+		] {
+			assert!(matches!(
+				refused(&properties, version, false),
+				Some(Error::UnsupportedExtension)
+			));
+			assert_eq!(
+				refused(&properties, version, true).is_none(),
+				super::super::flate::supported(version)
+			);
+		}
+		let info = accepted_info(&properties, Version::Draft22);
+		assert!(info.compress);
+		assert!(info.properties.unwrap().values.is_empty());
 	}
 }
