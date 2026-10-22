@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### IETF whole-group FETCH answers name the requested group ([#6199](https://github.com/moq-dev/moq/issues/6199))
+
+On moq-transport drafts 14 through 19, a whole-group `FETCH_OK` now names `{g, 0}` instead of `{g+1, 0}`.
+Readers accept both forms and set End Of Track to the sequence after the fetched group.
+An older moq-net reader can reject the new answer; upgrade it before pairing it with a new publisher, or use draft 20 and later, whose inclusive End Location is unchanged.
+No Rust API changes.
+
 ### Receive streams are read through leases (#5878)
 
 `transport::poll::RecvStream` now has `poll_lease(cx, want)`, `set_priority`, and `stop`, plus the provided `poll_read_chunk` and `read_chunk`.
