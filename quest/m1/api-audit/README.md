@@ -79,7 +79,6 @@ Rejected in planning:
 - [Ranges refuse what the wire drops](/quest/m1/api-audit/ranges-wire.md) - relative and time anchors fail loud where a wire cannot carry them, `floor()` honors the subscription, and bindings take an optional max delay
 - [Derived origins borrow](/quest/m1/api-audit/derived-origin-close.md) - closing a JS `scope()` or `withPreference()` handle releases only that handle
 - [Wrapper config names](/quest/m1/api-audit/wrapper-config.md) - Python, Go, and Dart client options use the FFI's names and nesting
-- [One decode read](/quest/m1/api-audit/decode-read.md) - audio and video decoders yield the same `Frame`, `Gap`, `End` read as moq-mux containers
 - [Bindings read gaps and ends](/quest/m1/api-audit/decode-read-bindings.md) - moq-ffi and every wrapper surface `Gap` and `End` instead of discarding them
 - [Media surface trim](/quest/m1/api-audit/media-trim.md) - media crate items with no consumer go private, and Rust/JS media names agree
 - [One frame rate name](/quest/m1/api-audit/frame-rate.md) - core `moq_video::Rate` becomes `FrameRate`, as the bindings name it
