@@ -125,7 +125,6 @@ tracks, so per-group stats stop costing cluster announces.
 - [JSON encoder options without a downcast](/quest/m1/json-encoder-options.md) - moq-mux's `json_snapshot` takes its `deltas` switch through a typed path any custom catalog entry can use, not an `Any` downcast
 - [Audio devices on ARM](/quest/m1/audio-devices-arm.md) - `just rs audio-devices` passes on the hosted ARM runner
 - [Tooling tests gate every merge](/quest/m1/gh-test-gate.md) - every queue Check runs `just gh test`, so a change to the CI selector or release tooling cannot merge without its own tests
-- [Wayland display id](/quest/m1/wayland-display-id.md) - a requested display id off X11 is refused or honored, never silently replaced by a portal pick shared across publications
 - [CI housekeeping](/quest/m1/ci-housekeeping.md) - validate queue nextest at 24 threads and remove the actionlint queue ignore after its release
 - [libav polyfill fork fix](/quest/m1/libav-polyfill-fork.md) - our polyfill fork copies planar audio correctly and `@moq/hang` drops its patch
 - [Interop AAC](/quest/m1/interop-aac.md) - the Rust interop publisher adds an AAC tone and every subscriber checks it beside Opus
