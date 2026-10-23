@@ -96,7 +96,6 @@ child records whether its behavior is new on main or inherited from release.
 - [Bound decoded datagram retention](/quest/m1/release-audit/datagram-memory.md) - shared ownership accounts for retained plain and compressed payloads across tracks
 - [Decode order](/quest/m1/ts-reliability/decode-order.md) - the exporters' decode clock holds at most the declared reorder depth, so flat timestamps cannot bypass MKV/TS backpressure or cause quadratic draining
 - [Validate CMAF header fields](/quest/m1/release-audit/cmaf-counts.md) - tiny fragments cannot force allocations proportional to an untrusted sample count, and a zero timescale is refused
-- [Preserve fMP4 sample runs](/quest/m1/release-audit/fmp4-passthrough.md) - passthrough does not substitute gap or interleaved bytes for media samples
 - [Refuse partial lite groups in JS](/quest/m1/release-audit/js-partial-group.md) - a nonzero `frameStart` closes the session as a protocol violation, not a renumbered complete group
 - [Cancel Dart stream reads](/quest/m1/release-audit/dart-cancellation.md) - listener cancellation releases pending native operations without an unrelated event
 - [Parse QMux records without copying suffixes](/quest/m1/release-audit/qmux-copy.md) - many small frames do not cause quadratic copying
