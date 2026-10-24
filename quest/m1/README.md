@@ -149,7 +149,6 @@ it lands before the cut.
 - [IETF lazy discovery](/quest/m1/ietf-lazy-discovery.md) - moq-transport sessions ask for announcements only under watched prefixes, starting with UNSUBSCRIBE_NAMESPACE on d14/15
 - [Interop coverage](/quest/m1/interop-coverage/README.md) - the riskiest moq-transport features moq-net exposes get cross-implementation tests over the even drafts 14 to 22
 - [One Annex-B exporter](/quest/m1/annexb-export.md) - H.264 and H.265 Annex-B export share one private lifecycle, which also follows a rebound rendition
-- [One CLI duration type](/quest/m1/cli-duration.md) - moq-cli, moq-bench and moq-relay reuse moq-tokio's public `cli::Duration` instead of their own copies
 - [Simplification audit](/quest/m1/audit-simplify.md) - repeat the simplification audit, starting with the m0 leftovers, before the next major release
 - [Caption store bounds](/quest/m1/caption-store-bounds.md) - a hostile caption track cannot grow a viewer's cue and region store or its per-frame work without bound
 - [Peers advertise their implementation and version](/quest/m1/peer-version.md) - moq-net and `@moq/net` send a `name/version` SETUP parameter both ways, and the auth request and session span carry the client's
