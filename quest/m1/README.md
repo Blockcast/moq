@@ -170,7 +170,6 @@ Binding durations wait on Duration support in the generated C.
 - [Clean close reason](/quest/m1/clean-close-reason.md) - a session that closes on its own is never recorded as `Unauthorized` because its in-band credentials closed with it
 - [Metric-safe tiers](/quest/m1/metric-tier.md) - tiers are `[A-Za-z0-9._-]` paths refused where they are set, and every metric label value is escaped
 - [WebRTC mDNS resolver](/quest/m1/webrtc-mdns-resolver.md) - each peer resolves its `.local` candidates in one owned task, one distinct name at a time
-- [Stats group linger](/quest/m1/stats-group-linger.md) - at depth >= 1 a lingered group ends its held tracks, documented and tested
 
 ## Related
 
