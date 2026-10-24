@@ -68,6 +68,12 @@ announce churn on today's hop-list mesh, shipping with the next cut from
 route layer ships; and stats groups as
 tracks, so per-group stats stop costing cluster announces.
 
+Added 2026-10-22 (maintainer, security audit of the relay, auth, stats,
+ACME, and WebRTC): a clean close misreported as a revocation, injectable
+metric tiers, an unbudgeted ACME renewal, unbounded mDNS work per WebRTC
+offer, and an undocumented stats linger cut. The audit's `server_name`
+finding was already fixed by moq-dev/moq#6509.
+
 Added 2026-10-23 (maintainer, from a linger audit): broadcasts lose their
 finished state and retention moves to moq-mux, a break in every binding, so
 it lands before the cut.
@@ -163,6 +169,11 @@ audit's receive-memory, priority, and lease bugs rank ahead of that reshape.
 - [HLS recorder in the CLI](/quest/m1/hls-record-cli.md) - `export hls --output <dir>` records playlists and segments to a directory
 - [Group storage benchmark](/quest/m1/group-storage-bench.md) - numbers pick the append-only log, a ring buffer, or sorted runs for `GroupState` before either lands
 - [Unbounded groups](/quest/m1/unbounded-groups/README.md) - groups and frames lose their size caps; the cache sheds parts of a group under pressure and refills the holes in place
+- [Clean close reason](/quest/m1/clean-close-reason.md) - a session that closes on its own is never recorded as `Unauthorized` because its in-band credentials closed with it
+- [Metric-safe tiers](/quest/m1/metric-tier.md) - tiers are `[A-Za-z0-9._-]` paths refused where they are set, and every metric label value is escaped
+- [ACME renewal budget](/quest/m1/acme-renewal-budget.md) - renewal counts failed validations against the startup budget and pauses instead of locking the hostname out
+- [WebRTC mDNS resolver](/quest/m1/webrtc-mdns-resolver.md) - each peer resolves its `.local` candidates in one owned task, one distinct name at a time
+- [Stats group linger](/quest/m1/stats-group-linger.md) - at depth >= 1 a lingered group ends its held tracks, documented and tested
 
 ## Related
 
