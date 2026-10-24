@@ -547,7 +547,7 @@ mod test {
 		let mut programs = Programs::new(origin.clone(), "event.hang", catalog::Config::default());
 
 		let input = two_programs();
-		let before = std::time::SystemTime::now();
+		let before = moq_clock::wall();
 		programs.decode(&input[..100]).unwrap();
 		assert!(
 			programs.programs.is_empty(),
@@ -555,7 +555,7 @@ mod test {
 		);
 		programs.decode(&input[100..]).unwrap();
 		let _finished = programs.finish().unwrap();
-		let after = std::time::SystemTime::now();
+		let after = moq_clock::wall();
 
 		for (path, fills) in [("event/1.hang", [0xAA, 0xBB]), ("event/2.hang", [0xCC, 0xDD])] {
 			let consumer = origin.consume().request_broadcast(path, None).await.unwrap();

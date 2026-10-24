@@ -660,7 +660,7 @@ impl MoqSink {
 		});
 		let sample = super::wall::Sample {
 			running: reference_running_time,
-			wall: moq_clock::wall().into(),
+			wall: moq_clock::wall(),
 		};
 		let map = buffer.map_readable().map_err(|_| {
 			gst::error!(CAT, "failed to map buffer on pad {}", pad.name());
@@ -1177,7 +1177,7 @@ mod tests {
 					Duration::ZERO,
 					super::super::wall::Sample {
 						running: Some(gst::ClockTime::ZERO),
-						wall: std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_735_689_600),
+						wall: moq_clock::Wall::UNIX_EPOCH + Duration::from_secs(1_735_689_600),
 					},
 				)
 				.unwrap();
