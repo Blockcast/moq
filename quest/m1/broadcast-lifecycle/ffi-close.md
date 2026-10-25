@@ -30,7 +30,3 @@ ownership, no new `abort()` on media handles.
 - Test in moq-ffi and moq-c with a paused clock: close with open handles,
   drop without finish, and finish then close, each read by a subscriber that
   checks the cause.
-
-## Required
-
-- [Stateless broadcasts](/quest/m1/broadcast-lifecycle/stateless.md) - lands the catalog-only finish this builds on
