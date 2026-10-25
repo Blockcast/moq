@@ -159,7 +159,6 @@ Catalog HLS field.
 - [DASH init readiness](/quest/m1/dash-init-ready.md) - a DASH manifest lists the renditions whose init exists instead of waiting on one that is stuck
 - [HLS dot-only names](/quest/m1/hls-dot-names.md) - a `.` or `..` rendition is refused instead of advertising a URL outside its directory
 - [MSF duplicate init](/quest/m1/msf-duplicate-init.md) - an MSF catalog refuses a repeated `initDataList` id instead of resolving it last-wins
-- [Image hardening](/quest/m1/image-hardening.md) - the relay image runs unprivileged and its builder stage is pinned
 - [Binding peer version](/quest/m1/binding-peer-version.md) - every binding names itself ahead of the Rust core in the SETUP Implementation parameter
 - [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - A/A and deliberately slowed Nightly runs set the paired comparison's threshold, so its regression alerts can be trusted
 - [HLS export tests over a session](/quest/m1/hls-session-tests.md) - an integration suite records and serves through a real moq-net session, so a publisher disconnect, finish, or takeover ends the cursor and playlists as specified
