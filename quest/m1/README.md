@@ -144,7 +144,6 @@ Catalog HLS field.
 - [JS reload config](/quest/m1/js-reload-config.md) - `@moq/net` reload takes Rust's `healthy` backoff and no ignored `extensions`
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
 - [Encoders declare no reordering](/quest/m1/encoder-reorder.md) - moq-video encoders publish `reorder: 0`
-- [Rust resume checks compression](/quest/m1/resume-compress.md) - a same-epoch route copy with a different `compress` is refused instead of corrupting framing
 - [JS resume reports drops](/quest/m1/resume-drops.md) - a routed JS subscriber reports its copies' dropped groups, so publishers forward SUBSCRIBE_DROP
 - [Lowered resume floor](/quest/m1/resume-floor.md) - lowering a resumed reader's floor re-offers groups only a released copy cached
 - [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS
