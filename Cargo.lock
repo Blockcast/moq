@@ -5351,6 +5351,7 @@ dependencies = [
  "moq-net",
  "serde",
  "serde_json",
+ "serde_with",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
