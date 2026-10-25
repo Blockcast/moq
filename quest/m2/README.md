@@ -27,7 +27,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [Switch to rust2's UniFFI](/quest/m2/uniffi-fork.md) - moq-ffi and every wrapper build from kixelated/rust2's fork under one pin, and moq's generator code is deleted
 - [Pure-Rust crypto for moq-relay](/quest/m2/pure-crypto/README.md) - moq-relay's release builds use graviola and RustCrypto and compile no C
 - [Benchmark sources](/quest/m2/bench-sources.md) - every measuring nightly benchmark feeds the regression table, and none is a smoke run
-- [Link the benchmark trends](/quest/m2/bench-site-doc.md) - the docs point language choosers at the regression table
 - [Poll-native async](/quest/m2/ffi-poll-migrate.md) - moq-ffi's pure-kio async exports poll their state directly instead of going through `ffi::Task`
 - [QoS](/quest/m2/qos/README.md) - the relay's egress `lag` histogram and `dropped` counters on the stats totals and prefix tracks
 - [Lazy retained HLS instances](/quest/m2/hls-lazy-instances.md) - a replaced HLS instance starts its watchers only when a request reaches it
