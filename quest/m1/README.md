@@ -134,7 +134,6 @@ Catalog HLS field.
 - [Container reads drop backfill](/quest/m1/read-backfill.md) - the JS container consumer drops groups below its read cursor like Rust
 - [Buffered playback subscribes in ascending order](/quest/m1/buffered-ascending.md) - a buffered `<moq-watch>` asks for the oldest group first, so a voice reply's opening arrives first, and audio's head hold shrinks to the floor
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
-- [Lowered resume floor](/quest/m1/resume-floor.md) - lowering a resumed reader's floor re-offers groups only a released copy cached
 - [WebGPU on Safari](/quest/m1/webgpu-safari.md) - the WebGPU renderer is verified on Safari 26 for macOS and iOS
 - [CI housekeeping](/quest/m1/ci-housekeeping.md) - validate queue nextest at 24 threads and remove the actionlint queue ignore after its release
 - [Main is no slower than release](/quest/m1/release-perf/README.md) - every benchmark where main is slower than release is fixed or accepted with a reason, checked by a final paired run before the cut
