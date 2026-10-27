@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Request handlers are `requests()` ([#6752](https://github.com/moq-dev/moq/pull/6752))
+
+Rename `Origin.Producer.dynamic(prefix)` to `requests(prefix)`, and the `Origin.Dynamic` handle it returns to `Origin.Requests`; its methods are unchanged.
+
 ### Names say one thing ([#6751](https://github.com/moq-dev/moq/pull/6751))
 
 `Auth.Auth` is `Auth.Credential`, and `Reservation.grant` is `Reservation.rate`.

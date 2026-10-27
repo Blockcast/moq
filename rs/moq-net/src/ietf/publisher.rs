@@ -1475,7 +1475,7 @@ impl Publisher {
 					};
 					// We just received a subscribe for this exact namespace, so the peer must have
 					// already seen the announcement. `request_broadcast` resolves it immediately, or
-					// falls back to the route covering it (an `origin::Dynamic`), if any. Pinned to
+					// falls back to the route covering it (an `origin::Requests`), if any. Pinned to
 					// the instance it names, if any: another is refused, never served.
 					let requesting = origin.request_broadcast(&msg.track_namespace, msg.epoch.clone());
 					let broadcast = match self
@@ -9648,7 +9648,7 @@ mod serve_tests {
 			let mut h = serve(version);
 			let claim = h
 				._origin
-				.dynamic_route("live", crate::origin::Route::default())
+				.requests_route("live", crate::origin::Route::default())
 				.unwrap();
 			let auth = crate::auth::Link::new(false);
 			auth.handle().authorize(&nothing());
@@ -9671,7 +9671,7 @@ mod serve_tests {
 			let mut h = serve(version);
 			let claim = h
 				._origin
-				.dynamic_route("live", crate::origin::Route::default())
+				.requests_route("live", crate::origin::Route::default())
 				.unwrap();
 			let auth = crate::auth::Link::new(false);
 			h.publisher = h.publisher.clone().with_auth(auth.clone());
@@ -10006,7 +10006,7 @@ mod serve_tests {
 		let version = Version::Draft22;
 		for path in [".", "./child", ".session", ".session/extension"] {
 			let h = serve(version);
-			let claim = h._origin.dynamic_route("", crate::origin::Route::default()).unwrap();
+			let claim = h._origin.requests_route("", crate::origin::Route::default()).unwrap();
 			settle().await;
 			let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), version)
 				.await
@@ -12177,7 +12177,7 @@ mod serve_tests {
 		for version in FETCH_DRAFTS {
 			let h = serve(version);
 			let request = h._broadcast.reserve_track("cam").unwrap();
-			let dynamic = request.dynamic();
+			let dynamic = request.requests();
 			let fetching = request.consume().fetch_group(1, None);
 			let mut fetched = dynamic.requested_fill_group().await.unwrap().accept(None).unwrap();
 			fetched.write_frame(None, b"1-0".to_vec()).unwrap();
@@ -12207,7 +12207,7 @@ mod serve_tests {
 		let version = Version::Draft22;
 		let h = serve(version);
 		let request = h._broadcast.reserve_track("cam").unwrap();
-		let dynamic = request.dynamic();
+		let dynamic = request.requests();
 		let fetching = request.consume().fetch_group(4, None);
 		let mut fetched = dynamic.requested_fill_group().await.unwrap().accept(None).unwrap();
 		for object in 0..2 {
@@ -13061,7 +13061,7 @@ mod serve_tests {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let (claim, published) = match parked {
 			Parked::Resolving => (
-				Some(origin.dynamic_route("room", crate::origin::Route::default()).unwrap()),
+				Some(origin.requests_route("room", crate::origin::Route::default()).unwrap()),
 				None,
 			),
 			Parked::Acking | Parked::Ending => {
@@ -13251,7 +13251,7 @@ mod serve_tests {
 		let mut idle = None;
 		match setup {
 			Setup::Resolving => {
-				let route = origin.dynamic_route("room", crate::origin::Route::default()).unwrap();
+				let route = origin.requests_route("room", crate::origin::Route::default()).unwrap();
 				let request = {
 					let requested = std::pin::pin!(route.requested_broadcast());
 					match futures::future::select(requested, serving.as_mut()).await {
@@ -13263,7 +13263,7 @@ mod serve_tests {
 			}
 			Setup::Subscribing => {
 				let broadcast = origin.publish("room", crate::origin::Route::default()).unwrap();
-				let mut dynamic = broadcast.dynamic();
+				let mut dynamic = broadcast.requests();
 				let request = {
 					let requested = std::pin::pin!(dynamic.requested_track());
 					match futures::future::select(requested, serving.as_mut()).await {
