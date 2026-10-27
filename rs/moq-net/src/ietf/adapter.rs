@@ -9,7 +9,7 @@ use std::{
 use bytes::{Buf, Bytes, BytesMut};
 
 use crate::{
-	Error, PathOwned,
+	Error, Path,
 	coding::{Decode, Decoder, Encoder, Reader, Writer},
 	ietf::{self, RequestId},
 };
@@ -645,9 +645,9 @@ struct Namespaces {
 
 #[derive(Default)]
 struct NamespacesState {
-	outgoing: HashMap<PathOwned, NamespaceRequests>,
-	incoming: HashMap<PathOwned, NamespaceRequests>,
-	subscribed: HashMap<PathOwned, NamespaceRequests>,
+	outgoing: HashMap<Path, NamespaceRequests>,
+	incoming: HashMap<Path, NamespaceRequests>,
+	subscribed: HashMap<Path, NamespaceRequests>,
 
 	/// request_id → the namespace that request advertised, one entry per request
 	/// including queued duplicates, so [`Namespaces::forget`] removes only that
@@ -663,13 +663,13 @@ struct NamespaceRequests {
 
 struct NamespaceRegistration {
 	direction: Direction,
-	namespace: PathOwned,
+	namespace: Path,
 	previous: Option<RequestId>,
 	next: Option<RequestId>,
 }
 
 impl NamespacesState {
-	fn map(&mut self, direction: Direction) -> &mut HashMap<PathOwned, NamespaceRequests> {
+	fn map(&mut self, direction: Direction) -> &mut HashMap<Path, NamespaceRequests> {
 		match direction {
 			Direction::Outgoing => &mut self.outgoing,
 			Direction::Incoming => &mut self.incoming,
@@ -685,7 +685,7 @@ impl Namespaces {
 	/// advertises the same namespace twice would otherwise move the name onto the second
 	/// request, and the withdrawal it eventually names would close that one while the
 	/// first stayed open, advertised for the life of the session.
-	fn register(&self, direction: Direction, namespace: PathOwned, request_id: RequestId) {
+	fn register(&self, direction: Direction, namespace: Path, request_id: RequestId) {
 		let mut state = self.state.lock().unwrap();
 		if state.by_request.contains_key(&request_id) {
 			return;
@@ -717,13 +717,13 @@ impl Namespaces {
 	}
 
 	/// The namespace the peer's request `request_id` advertises, if it is a PUBLISH_NAMESPACE.
-	fn incoming(&self, request_id: RequestId) -> Option<PathOwned> {
+	fn incoming(&self, request_id: RequestId) -> Option<Path> {
 		let state = self.state.lock().unwrap();
 		let registration = state.by_request.get(&request_id)?;
 		(registration.direction == Direction::Incoming).then(|| registration.namespace.clone())
 	}
 
-	fn get(&self, direction: Direction, namespace: &PathOwned) -> Option<RequestId> {
+	fn get(&self, direction: Direction, namespace: &Path) -> Option<RequestId> {
 		self.state
 			.lock()
 			.unwrap()
@@ -796,9 +796,9 @@ struct Shared {
 /// its stream, which it does after releasing the route. Bounded by the peer's requests.
 #[derive(Default)]
 struct Readvertised {
-	namespaces: HashMap<PathOwned, Withdrawing>,
+	namespaces: HashMap<Path, Withdrawing>,
 	/// Each withdrawn request a handler still holds, to the namespace it advertised.
-	withdrawn: HashMap<RequestId, PathOwned>,
+	withdrawn: HashMap<RequestId, Path>,
 }
 
 #[derive(Default)]
@@ -1242,7 +1242,7 @@ fn classify(type_id: u64, body: &Bytes, version: Version, namespaces: &Namespace
 				let mut r = Decoder::new(body, version.into());
 				let id = RequestId::decode(&mut r, version)?;
 				if let Ok(prefix) = crate::ietf::namespace::decode_namespace(&mut r) {
-					namespaces.register(Direction::Subscribed, prefix.into_owned(), id);
+					namespaces.register(Direction::Subscribed, prefix, id);
 				}
 				Ok(Route::NewRequest(id))
 			}
@@ -1617,7 +1617,7 @@ fn decode_response_request_id(body: &Bytes, version: Version) -> Result<RequestI
 }
 
 /// Decode the namespace from a PublishNamespace message body (after the request_id).
-fn decode_publish_namespace_body(body: &Bytes, version: Version) -> Result<PathOwned, Error> {
+fn decode_publish_namespace_body(body: &Bytes, version: Version) -> Result<Path, Error> {
 	let mut r = Decoder::new(body, version.into());
 	// Skip request_id
 	let _request_id = RequestId::decode(&mut r, version)?;
@@ -1626,7 +1626,7 @@ fn decode_publish_namespace_body(body: &Bytes, version: Version) -> Result<PathO
 		r.varint()?;
 	}
 	let ns = crate::ietf::namespace::decode_namespace(&mut r)?;
-	Ok(ns.into_owned())
+	Ok(ns)
 }
 
 #[cfg(test)]
@@ -1974,10 +1974,10 @@ mod tests {
 		encode_raw(M::ID, &body, version)
 	}
 
-	fn publish_namespace(request_id: RequestId, namespace: &str) -> ietf::PublishNamespace<'_> {
+	fn publish_namespace(request_id: RequestId, namespace: &str) -> ietf::PublishNamespace {
 		ietf::PublishNamespace {
 			request_id,
-			track_namespace: crate::Path::new(namespace),
+			track_namespace: crate::Path::new(namespace).unwrap(),
 			params: Default::default(),
 			authorization_token: None,
 		}
@@ -2071,11 +2071,11 @@ mod tests {
 	#[test]
 	fn test_namespace_reverse_lookup_v14() {
 		let namespaces = Namespaces::default();
-		namespaces.register(Direction::Incoming, crate::Path::new("test/ns"), RequestId(42));
+		namespaces.register(Direction::Incoming, crate::Path::from_static("test/ns"), RequestId(42));
 
 		let body = encode_body(
 			&ietf::PublishNamespaceDone {
-				track_namespace: crate::Path::new("test/ns"),
+				track_namespace: crate::Path::from_static("test/ns"),
 				request_id: RequestId(0),
 			},
 			Version::Draft14,
@@ -2093,7 +2093,7 @@ mod tests {
 		let (shared, mut ours, mut theirs) = mesh("cluster/ns", version, Direction::Outgoing).await;
 
 		let done = ietf::PublishNamespaceDone {
-			track_namespace: crate::Path::new("cluster/ns"),
+			track_namespace: crate::Path::from_static("cluster/ns"),
 			request_id: RequestId(0),
 		};
 		let route = classify(
@@ -2119,7 +2119,7 @@ mod tests {
 		let (shared, mut ours, mut theirs) = mesh("cluster/ns", version, Direction::Incoming).await;
 
 		let cancel = ietf::PublishNamespaceCancel {
-			track_namespace: crate::Path::new("cluster/ns"),
+			track_namespace: crate::Path::from_static("cluster/ns"),
 			request_id: RequestId(0),
 			error_code: 0,
 			reason_phrase: "".into(),
@@ -2142,7 +2142,7 @@ mod tests {
 	/// Classify the peer withdrawing its own advertisement of `namespace`.
 	fn done(shared: &Arc<Shared>, namespace: &str, version: Version) -> Route {
 		let msg = ietf::PublishNamespaceDone {
-			track_namespace: crate::Path::new(namespace),
+			track_namespace: crate::Path::new(namespace).unwrap(),
 			request_id: RequestId(0),
 		};
 		classify(
@@ -2157,7 +2157,7 @@ mod tests {
 	/// Classify the peer rejecting our advertisement of `namespace`.
 	fn cancel(shared: &Arc<Shared>, namespace: &str, version: Version) -> Route {
 		let msg = ietf::PublishNamespaceCancel {
-			track_namespace: crate::Path::new(namespace),
+			track_namespace: crate::Path::new(namespace).unwrap(),
 			request_id: RequestId(0),
 			error_code: 0,
 			reason_phrase: "".into(),
@@ -2205,7 +2205,7 @@ mod tests {
 		let mut theirs = receive(&shared, "cluster/ns", version, RequestId(7)).await;
 
 		let msg = ietf::PublishNamespaceDone {
-			track_namespace: crate::Path::new("cluster/ns"),
+			track_namespace: crate::Path::from_static("cluster/ns"),
 			request_id: RequestId(0),
 		};
 		shared.close(RequestId(7), encode_msg(&msg, version));
@@ -2239,7 +2239,7 @@ mod tests {
 	/// The peer withdrawing `namespace` on `request_id`, as the read loop routes it.
 	fn withdraw(shared: &Arc<Shared>, namespace: &str, version: Version, request_id: RequestId) {
 		let msg = ietf::PublishNamespaceDone {
-			track_namespace: crate::Path::new(namespace),
+			track_namespace: crate::Path::new(namespace).unwrap(),
 			request_id,
 		};
 		let route = classify(
@@ -2363,7 +2363,7 @@ mod tests {
 						}
 						let fourth = (0..4).find(|id| *id != first && *id != second && *id != third).unwrap();
 						let namespaces = Namespaces::default();
-						let name = crate::Path::new("ns");
+						let name = crate::Path::from_static("ns");
 						for id in 0..4 {
 							namespaces.register(direction, name.clone(), RequestId(id));
 						}
@@ -2432,7 +2432,7 @@ mod tests {
 		};
 		for version in [Version::Draft14, Version::Draft15, Version::Draft16] {
 			let registry = Registry::new(Default::default());
-			let stats = registry.tier(Tier::default()).session("");
+			let stats = registry.tier(Tier::default()).session(crate::Path::from_static(""));
 			let msg = ietf::FetchCancel {
 				request_id: RequestId(0),
 			};

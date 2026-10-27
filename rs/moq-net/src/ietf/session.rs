@@ -1548,7 +1548,7 @@ async fn enforce_grant(auth: crate::auth::Link, publisher: Publisher, mut sessio
 	let Some(path) = kio::wait(|waiter| check.poll(&auth, &mut announced, waiter)).await else {
 		return Ok(());
 	};
-	tracing::error!(broadcast = %origin.absolute(&path), "publishing outside our grant; closing the session");
+	tracing::error!(broadcast = %crate::path::Rooted(origin.root(), &path), "publishing outside our grant; closing the session");
 	let err = Error::Unauthorized;
 	session.close(
 		super::error::to_session_code(&SessionError::from(&err)),
@@ -1679,7 +1679,7 @@ mod tests {
 							} else {
 								ietf::TrackStatus {
 									request_id: RequestId(id),
-									track_namespace: crate::Path::from("test"),
+									track_namespace: crate::Path::from_static("test"),
 									track_name: "video".into(),
 									properties_wanted: true,
 									epoch: None,
@@ -1995,7 +1995,7 @@ mod tests {
 		writer.varint(ietf::Namespace::ID).await.unwrap();
 		writer
 			.encode(&ietf::Namespace {
-				suffix: crate::Path::new("cam"),
+				suffix: crate::Path::from_static("cam"),
 				params: None,
 			})
 			.await
@@ -2142,7 +2142,7 @@ mod tests {
 		);
 		let msg = ietf::SubscribeNamespaceLegacy {
 			request_id,
-			namespace: crate::Path::new(namespace),
+			namespace: crate::Path::new(namespace).unwrap(),
 			subscribe_options: ietf::SubscribeOptions::Namespace,
 			hidden: false,
 		};
@@ -2156,7 +2156,7 @@ mod tests {
 		let log = crate::lite::test_transport::Log::default();
 		let mut writer = Writer::new(crate::lite::test_transport::SinkSend::new(log.clone()), version);
 		let msg = ietf::UnsubscribeNamespace {
-			prefix: crate::Path::new(prefix),
+			prefix: crate::Path::new(prefix).unwrap(),
 			request_id,
 		};
 		writer.varint(ietf::UnsubscribeNamespace::ID).await.unwrap();
@@ -3127,7 +3127,7 @@ mod tests {
 			max_age: None,
 			new_group: None,
 			request_id: RequestId(1),
-			track_namespace: crate::Path::new("room"),
+			track_namespace: crate::Path::from_static("room"),
 			track_name: "video".into(),
 			subscriber_priority: 128,
 			group_order: ietf::GroupOrder::Descending,
@@ -3448,7 +3448,7 @@ mod tests {
 		writer
 			.encode(&ietf::PublishNamespace {
 				request_id: RequestId(1),
-				track_namespace: crate::Path::new("room/host"),
+				track_namespace: crate::Path::from_static("room/host"),
 				params: Default::default(),
 				authorization_token: None,
 			})
@@ -3459,7 +3459,7 @@ mod tests {
 			writer.varint(ietf::PublishNamespaceDone::ID).await.unwrap();
 			writer
 				.encode(&ietf::PublishNamespaceDone {
-					track_namespace: crate::Path::new("room/host"),
+					track_namespace: crate::Path::from_static("room/host"),
 					request_id: RequestId(0),
 				})
 				.await
@@ -3558,7 +3558,7 @@ mod tests {
 			max_age: None,
 			new_group: None,
 			request_id: RequestId(0),
-			track_namespace: crate::Path::new("room"),
+			track_namespace: crate::Path::from_static("room"),
 			track_name: "video".into(),
 			subscriber_priority: 128,
 			group_order: ietf::GroupOrder::Descending,
@@ -4115,7 +4115,7 @@ mod tests {
 		let mut body = Vec::new();
 		ietf::SubscribeNamespace {
 			request_id: RequestId(request_id),
-			namespace: crate::Path::new(""),
+			namespace: crate::Path::from_static(""),
 			hidden: false,
 		}
 		.encode_msg(&mut crate::coding::Encoder::new(&mut body, version.into()), version)
