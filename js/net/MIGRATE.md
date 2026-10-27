@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### moq-transport drafts 14 through 17 are removed ([#6753](https://github.com/moq-dev/moq/pull/6753))
+
+The `"moq-transport-14"` through `"moq-transport-17"` version names now throw a `TypeError`, and a peer offering only those versions fails the handshake.
+The moql SETUP (no ALPN, or `moql`) negotiates only moq-lite versions.
+Peers must speak moq-transport draft 18 or later, or moq-lite.
+
 ### Request handlers are `requests()` ([#6752](https://github.com/moq-dev/moq/pull/6752))
 
 Rename `Origin.Producer.dynamic(prefix)` to `requests(prefix)`, and the `Origin.Dynamic` handle it returns to `Origin.Requests`; its methods are unchanged.
