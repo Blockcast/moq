@@ -805,17 +805,18 @@ test("Frame reads only the current LOC Timestamp ID on every draft", async () =>
 
 // A fetch stream's first object is the only one carrying absolute ids, so a wrong flag byte
 // there silently renumbers every object after it. This codec is the sole serialization path
-// for a served fill.
+// for a served fill. Its priority is the track's, as a subgroup header's is: model priority
+// 72 is wire 55, lower first.
 test("FetchFrame: the first object carries its absolute ids and the rest inherit them", async () => {
 	const timestamp = new Timestamp(96_000, Timescale.MILLI);
-	const frame = new FetchFrame({ payload: new Uint8Array([0xaa, 0xbb]), timestamp });
+	const frame = new FetchFrame({ payload: new Uint8Array([0xaa, 0xbb]), timestamp, priority: 55 });
 
 	const first = await encodeFetchFrameVersioned(frame, { group: 7, object: 3, first: true }, Version.DRAFT_22);
 	expect(Array.from(first)).toEqual([
 		0x3c, // GROUP_ID | OBJECT_ID | PRIORITY | PROPERTIES
 		7, // group id
 		3, // object id
-		0, // publisher priority
+		55, // publisher priority
 		0x04, // properties length
 		0x10, // TIMESTAMP
 		0xc1,
@@ -845,7 +846,11 @@ test("FetchFrame: the first object carries its absolute ids and the rest inherit
 // A fetch object has no status field, unlike a subgroup object: a zero payload length is
 // simply an empty object, and writing a status after it would desync the stream.
 test("FetchFrame: an empty payload is a zero length, with no status byte", async () => {
-	const frame = new FetchFrame({ payload: new Uint8Array(), timestamp: new Timestamp(0, Timescale.MILLI) });
+	const frame = new FetchFrame({
+		payload: new Uint8Array(),
+		timestamp: new Timestamp(0, Timescale.MILLI),
+		priority: 0,
+	});
 	const encoded = await encodeFetchFrameVersioned(frame, { group: 1, object: 0, first: true }, Version.DRAFT_22);
 
 	expect(Array.from(encoded)).toEqual([
@@ -864,7 +869,7 @@ test("FetchFrame: an empty payload is a zero length, with no status byte", async
 // omitted rather than carrying a value in units the peer was never told. This is what a
 // subscriber that sent INCLUDE_PROPERTIES=0 gets.
 test("FetchFrame: an unstamped object omits the properties field", async () => {
-	const frame = new FetchFrame({ payload: new Uint8Array([0x01]) });
+	const frame = new FetchFrame({ payload: new Uint8Array([0x01]), priority: 0 });
 	const encoded = await encodeFetchFrameVersioned(frame, { group: 0, object: 0, first: false }, Version.DRAFT_22);
 
 	// Flags 0 (subgroup zero, no fields present), then the payload.
@@ -873,7 +878,7 @@ test("FetchFrame: an unstamped object omits the properties field", async () => {
 
 // The first object still carries its absolute ids and priority; only the properties go.
 test("FetchFrame: an unstamped first object keeps its ids", async () => {
-	const frame = new FetchFrame({ payload: new Uint8Array([0x01]) });
+	const frame = new FetchFrame({ payload: new Uint8Array([0x01]), priority: 0 });
 	const encoded = await encodeFetchFrameVersioned(frame, { group: 4, object: 2, first: true }, Version.DRAFT_22);
 
 	expect(Array.from(encoded)).toEqual([
