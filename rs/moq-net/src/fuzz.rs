@@ -73,6 +73,18 @@ pub fn object_group(frames: usize, properties: bool) -> (broadcast::Producer, tr
 	(broadcast, track, group)
 }
 
+/// Private canonical-owner fixture for size and final-storage cleanup benchmarks.
+pub struct CanonicalStorage(crate::model::group::StorageBench);
+
+impl CanonicalStorage {
+	pub fn new(frames: usize, views: usize) -> Self {
+		Self(crate::model::group::StorageBench::new(frames, views))
+	}
+	pub fn size(&self) -> u64 {
+		self.0.size()
+	}
+}
+
 /// Every target, keyed by the name of its `fuzz_targets/<name>.rs` shim.
 pub const TARGETS: &[(&str, Target)] = &[
 	("lite", lite_wire),

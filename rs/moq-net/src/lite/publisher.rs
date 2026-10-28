@@ -2206,12 +2206,15 @@ impl Request for FetchServe {
 	fn start(_: &Shared, msg: Self::Message, broadcast: crate::broadcast::Consumer) -> Result<Self, Error> {
 		let fetching = broadcast
 			.track(&msg.track)?
-			.fetch_group(
+			.fetch_range(
 				msg.group,
-				group::Fetch {
-					priority: msg.priority,
-					max_delay: msg.max_delay,
-					frame_start: msg.start_frame,
+				track::FetchOptions {
+					options: group::Fetch {
+						priority: msg.priority,
+						max_delay: msg.max_delay,
+						frame_start: msg.start_frame,
+					},
+					end: msg.end_frame.and_then(|end| end.checked_add(1)),
 				},
 			)
 			.into_inner();
@@ -2233,7 +2236,7 @@ impl Request for FetchServe {
 				Self::Fetch { msg, fetching } => {
 					// Before the group: a fetched group polled while this waited would be lost.
 					let ietf = ready!(shared.peer_setup.poll_ietf(waiter));
-					let group = ready!(kio::Task::poll(fetching, waiter))?;
+					let group = ready!(kio::Task::poll(fetching, waiter))?.with_range(msg.start_frame..);
 
 					// The response carries no header, so a short run is indistinguishable
 					// from one that started elsewhere: only serve a range we can cover
@@ -8276,6 +8279,51 @@ mod tests {
 			"a group was reset: {:?}",
 			session.log.resets()
 		);
+	}
+
+	/// A cold relay fills a bounded request from the group's head, so its cache does not
+	/// store an undecodable tail merely because that was the downstream reader's floor.
+	#[moq_clock::test]
+	async fn a_cold_bounded_fetch_requests_the_prefix() {
+		let origin = crate::origin::Config::new(Hop::new(1).unwrap()).produce();
+		let broadcast = origin.create_broadcast("room").unwrap();
+		let track = broadcast.create_track("video", track::Info::timed()).unwrap();
+		let dynamic = track.requests();
+		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
+		peer_setup.set(crate::lite::Setup::default());
+		let (_, goaway) = crate::goaway::Handle::new(true);
+		let publisher = Publisher::new(PublisherConfig {
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(ScriptedSession::new(Vec::new())),
+			origin: origin.consume(),
+			version: Version::Lite07,
+			peer_setup,
+			goaway,
+			peer_hop: None,
+			auth: crate::auth::Link::new(false),
+			peer_grant: Default::default(),
+			client: false,
+			subscriptions: Default::default(),
+			estimate: kio::Producer::default().weak(),
+		});
+		let run = FetchServe::start(
+			&publisher.shared,
+			lite::Fetch {
+				epoch: None,
+				broadcast: crate::Path::new("room").unwrap(),
+				track: "video".into(),
+				priority: 0,
+				max_delay: None,
+				group: 0,
+				start_frame: 2,
+				end_frame: Some(3),
+			},
+			broadcast.consume(),
+		)
+		.unwrap();
+		let request = dynamic.requested_fill_group().await.unwrap();
+		assert_eq!(request.frame_start(), 0, "a cold relay keeps the prefix");
+		drop(run);
 	}
 
 	/// A FETCH whose own budget gives up on its group partway resets as too old: a FIN

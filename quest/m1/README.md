@@ -123,7 +123,6 @@ surface and zero-copy texture import, land before the cut.
 - [Lite-05/06 timestamps pass through](/quest/m1/lite-timestamps-through.md) - a timed track received over lite-05/06 stays timed and is forwarded with its timestamps over every version
 - [Exact timestamps in every binding](/quest/m1/binding-timestamps.md) - bindings carry `{value, scale}` timestamps instead of lossy microseconds
 - [Announcement takeover](/quest/m1/announce-takeover.md) - a new independent route explicitly continues instances served through its predecessor, with shared Rust/JS semantics and lite-07 wire
-- [The transport may start a group mid-way](/quest/m1/transport-frame-offsets.md) - a hop may request and deliver a group from any frame it needs, while applications still ask for whole groups
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - a lite-07 SUBSCRIBE asks for past and live ranges with absolute or relative ends, in either order, and replaces FETCH; merged ranges never starve a subscriber; relays fill misses by range, including over moq-transport
 - [Drop set](/quest/m1/drop-set.md) - each cursor judges missing groups against its own budget, so a narrow reader drops promptly and a widening re-offers groups already reported dropped on lite-07
 - [Broadcast archives](/quest/m1/archive/README.md) - ANNOUNCE, TRACKS, and a SUBSCRIBE per track record every track under a prefix to any object_store, a host serves a stored broadcast back, and the catalog drops its archive pointer for an opt-in `hls` field
