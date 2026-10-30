@@ -98,12 +98,21 @@ jobs:
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
       - name: Cache the dev shell
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
         run: |
           # `--profile` realises the shell's full build closure, which is what
           # the runners actually need; `nix build .#devShells...` alone leaves
           # out the build-time inputs.
           nix develop --profile /tmp/devshell --command true
-          cachix push kixelated /tmp/devshell
+          # A fork has no token for the kixelated cache, and an unauthenticated
+          # push fails the job before the Rust cache below is ever saved. Read
+          # the cache, skip the push.
+          if [ -n "$CACHIX_AUTH_TOKEN" ]; then
+            cachix push kixelated /tmp/devshell
+          else
+            echo "::notice::CACHIX_AUTH_TOKEN is not set; skipping the dev shell push"
+          fi
 
       # The single writer. `save-on-dispatch` is what lets the
       # `workflow_dispatch` above prime a cold store; the action otherwise saves
