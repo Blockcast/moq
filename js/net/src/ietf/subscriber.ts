@@ -17,7 +17,7 @@ import { Cost, type Route, randomHop, routesEqual, stampHops, UNKNOWN_HOP } from
 import { hiddenBelow, hooks, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import * as Path from "../path.ts";
 import type { Cursor, Reader, Stream } from "../stream.ts";
-import { Tail } from "../tail.ts";
+import { TAIL_GRACE_MS, Tail } from "../tail.ts";
 import { Milli, type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
@@ -55,6 +55,21 @@ import { Version } from "./version.ts";
 // blocks. The timeout turns that into a clear error.
 const SUBSCRIBE_OK_TIMEOUT_MS = 10_000;
 
+/**
+ * A group being delivered, and the subgroup streams still writing into it.
+ *
+ * moq-transport lets one group arrive on several concurrent streams, one per subgroup. They
+ * share a producer: a group is one ordered stream of frames above here, and each subgroup
+ * contributes its objects to it in arrival order with its own identity on every frame.
+ */
+type GroupEntry = {
+	producer: netGroup.Producer;
+	// Subgroup streams currently writing into it.
+	streams: number;
+	// Armed once every subgroup stream has ended with no end declared; see `#releaseGroup`.
+	timer?: ReturnType<typeof setTimeout>;
+};
+
 // A live subscription, as the track alias its data streams name resolves to.
 type Subscription = {
 	// The write side incoming group streams are routed into.
@@ -62,6 +77,8 @@ type Subscription = {
 	// The group streams received, so the subscription can wait for the ones PUBLISH_DONE
 	// says are still owed.
 	tail: Tail;
+	// The groups still open, by sequence, so the subgroup streams of one group find each other.
+	groups: Map<number, GroupEntry>;
 	// The track's exclusive end, once an END_OF_TRACK declares it.
 	end?: number;
 };
@@ -550,7 +567,7 @@ export class Subscriber {
 		// Keep the request pending until SUBSCRIBE_OK supplies immutable track metadata.
 		// Group streams already wait on the alias, so early data stays behind this response.
 		const producer = hooks.pendingTrackProducer(request);
-		const subscription: Subscription = { track: producer, tail: new Tail() };
+		const subscription: Subscription = { track: producer, tail: new Tail(), groups: new Map() };
 
 		// Open the stream and wait for SUBSCRIBE_OK under a timeout. State
 		// flows back via `state` so the timeout path can clean up the stream
@@ -1034,10 +1051,6 @@ export class Subscriber {
 	 * @internal
 	 */
 	async handleGroup(group: GroupMessage, stream: Reader) {
-		if (group.subGroupId !== 0) {
-			throw new Error("subgroups are not supported");
-		}
-
 		let subscription: Subscription;
 		try {
 			// The control message establishing this alias can arrive after the data stream.
@@ -1058,50 +1071,45 @@ export class Subscriber {
 		// Every data stream counts toward PUBLISH_DONE's Stream Count, even one dropped below.
 		const read = tail.open(group.groupId);
 
-		// Created on the first object rather than the header: an END_OF_TRACK at object 0
-		// means the group does not exist at all.
-		let producer: netGroup.Producer | undefined;
-		const open = () => {
-			if (!producer) {
-				// The publisher contradicted its own end, which no later group can repair.
-				if (subscription.end !== undefined && group.groupId >= subscription.end) {
-					throw new ProtocolViolation(
-						`group ${group.groupId} is at or past the declared end ${subscription.end}`,
-					);
-				}
-				producer = new netGroup.Producer(group.groupId);
-				track.writeGroup(producer);
-			}
-			return producer;
+		// Opened on the first object rather than the header: an END_OF_TRACK at object 0 means
+		// the group does not exist at all. Shared with the group's other subgroup streams, so
+		// this stream holds a reference rather than the producer itself.
+		let entry: GroupEntry | undefined;
+		const open = (): GroupEntry => {
+			entry ??= this.#openGroup(subscription, group);
+			return entry;
 		};
 
 		try {
 			// FIRST_OBJECT clear says this stream starts partway through the group, which the
-			// draft lets a publisher do to answer a filter. Nothing above here can use it: the
-			// objects that would arrive are not decodable without the missing head, and a group
-			// is the unit an application resyncs on. Drop it and pick up at the next group, the
-			// same degradation as a publisher that no longer holds the head.
+			// draft lets a publisher do to answer a filter. The objects are delivered from the
+			// stream's true first Object ID rather than dropped: a mapping that rides in the
+			// ids (MPEG MMTP, an AL-FEC repair flow numbered against its source) is still
+			// readable without the head, and the consumer sees the ids it actually got.
 			//
-			// This only saves reading a stream we would throw away. The bit is the publisher's
-			// claim, so what is enforced is the object ids themselves: `Frame.decode` holds every
-			// object to starting at 0 and incrementing by 1, whatever the header said and on the
-			// drafts that have no such bit to read.
-			if (!group.flags.firstObject) {
-				console.debug(`dropping a group with no head: alias=${group.trackAlias} group=${group.groupId}`);
-				stream.stop(new Error("a group must start at object 0"));
-				return;
-			}
+			// The bit remains the publisher's claim, and what is enforced is the object ids
+			// themselves: `Frame.decode` still holds a stream that *claims* its head to
+			// starting at object 0, which is a contradiction rather than a gap.
 
 			// The alias binds after SUBSCRIBE_OK commits the track property; an omitted
 			// header priority inherits it (draft-21 section 10.4).
 			if (!group.flags.hasPriority) group.publisherPriority = toWire((await track.info()).priority);
 
-			const decode = (c: Cursor) => Frame.decode(c, group.flags, this.#timescales.get(group.trackAlias));
+			const timescale = this.#timescales.get(group.trackAlias);
+			// Object IDs are relative to the object before them on this stream, and may skip:
+			// each subgroup stream carries its own numbering.
+			let prior: number | undefined;
+			const decode = (c: Cursor) => {
+				const frame = Frame.decode(c, group.flags, timescale, prior);
+				prior = frame.objectId;
+				return frame;
+			};
 			for (;;) {
 				// Every object already buffered is written without an await, so the reader wakes
-				// once per batch rather than once per object. Only the group's own stream ends it:
-				// a track that closes first has already closed (or aborted) this group through its
-				// cache.
+				// once per batch rather than once per object. Only the group's own terminal object
+				// ends it: a track that closes first has already closed (or aborted) this group
+				// through its cache.
+				const producer = entry?.producer;
 				const frame =
 					stream.tryDecode(decode) ??
 					(await (producer
@@ -1111,9 +1119,11 @@ export class Subscriber {
 
 				if (frame.endOfTrack) {
 					// No object at or past this location exists: after the group's last object
-					// the track ends with it, and at object 0 it ends before it.
-					const end = producer ? group.groupId + 1 : group.groupId;
-					producer?.close();
+					// the track ends with it, and at object 0 it ends before it. Any subgroup
+					// stream of the group may have opened it.
+					const opened = subscription.groups.get(group.groupId);
+					const end = opened ? group.groupId + 1 : group.groupId;
+					if (opened) this.#closeGroup(subscription, opened);
 					try {
 						track.finishAt(end);
 					} catch (err: unknown) {
@@ -1122,32 +1132,111 @@ export class Subscriber {
 					subscription.end ??= end;
 					return;
 				}
-				if (frame.payload === undefined) break;
+				// END_OF_GROUP ends the group itself, however many of its subgroup streams are
+				// still open.
+				if (frame.payload === undefined) {
+					this.#closeGroup(subscription, open());
+					return;
+				}
 
-				open().writeFrame({ payload: frame.payload, timestamp: frame.timestamp ?? Timestamp.now() });
+				open().producer.writeFrame({
+					payload: frame.payload,
+					timestamp: frame.timestamp ?? Timestamp.now(),
+					object: {
+						subgroup: group.subGroupId,
+						id: frame.objectId ?? 0,
+						status: frame.status,
+						properties: frame.properties,
+						propertyList: frame.propertyList,
+					},
+				});
 			}
 
-			// A group with no objects still exists.
-			open().close();
+			// A group with no objects still exists. The stream ending is not the group ending;
+			// `#releaseGroup` decides that below.
+			open();
 		} catch (err: unknown) {
 			const e = await sessionCause(this.#quic, err);
 			if (e instanceof ProtocolViolation) {
 				// The publisher broke the track's end, which no later group can repair.
-				producer?.close(e);
+				if (entry) this.#closeGroup(subscription, entry, e);
 				track.close(e);
 			} else {
 				// A stream that fails before its first object still names a group, which the
 				// reader sees fail rather than silently go missing.
 				try {
-					open().close(e);
+					this.#closeGroup(subscription, open(), e);
 				} catch {
 					// The track has already closed or ended below this group.
 				}
 			}
 			stream.stop(e);
 		} finally {
+			if (entry) this.#releaseGroup(subscription, entry, group.flags.hasEnd);
 			read();
 		}
+	}
+
+	// The producer every subgroup stream of this group writes into, created on demand.
+	#openGroup(subscription: Subscription, group: GroupMessage): GroupEntry {
+		const existing = subscription.groups.get(group.groupId);
+		if (existing) {
+			existing.streams += 1;
+			// A stream arriving within the grace is the group still being delivered.
+			if (existing.timer !== undefined) {
+				clearTimeout(existing.timer);
+				existing.timer = undefined;
+			}
+			return existing;
+		}
+
+		// The publisher contradicted its own end, which no later group can repair.
+		if (subscription.end !== undefined && group.groupId >= subscription.end) {
+			throw new ProtocolViolation(`group ${group.groupId} is at or past the declared end ${subscription.end}`);
+		}
+
+		const entry: GroupEntry = { producer: new netGroup.Producer(group.groupId), streams: 1 };
+		subscription.groups.set(group.groupId, entry);
+		subscription.track.writeGroup(entry.producer);
+		return entry;
+	}
+
+	#closeGroup(subscription: Subscription, entry: GroupEntry, abort?: Error): void {
+		if (entry.timer !== undefined) {
+			clearTimeout(entry.timer);
+			entry.timer = undefined;
+		}
+		if (subscription.groups.get(entry.producer.sequence) === entry) {
+			subscription.groups.delete(entry.producer.sequence);
+		}
+		entry.producer.close(abort);
+	}
+
+	/**
+	 * Release this stream's reference to its group, closing the group if the stream ended it.
+	 *
+	 * The group's end is a thing the publisher declares, not a thing a stream ending implies:
+	 * a header with END_OF_GROUP set (`hasEnd`) says this stream carries the group to its end,
+	 * so its FIN is the group's end. Any other subgroup stream of the same group ending is one
+	 * stream finishing while the rest are still in flight, and closing there would truncate the
+	 * group at whichever subgroup happened to finish first. The explicit END_OF_GROUP object a
+	 * stream without the flag writes is handled on the read path instead.
+	 *
+	 * A group whose publisher declares neither would never close, so the grace the tail already
+	 * uses for a stream that never arrived bounds the wait.
+	 */
+	#releaseGroup(subscription: Subscription, entry: GroupEntry, endsGroup: boolean): void {
+		entry.streams -= 1;
+		if (entry.producer.isClosed) return;
+		if (endsGroup) {
+			this.#closeGroup(subscription, entry);
+			return;
+		}
+		if (entry.streams > 0) return;
+
+		entry.timer = setTimeout(() => {
+			if (entry.streams === 0) this.#closeGroup(subscription, entry);
+		}, TAIL_GRACE_MS);
 	}
 }
 

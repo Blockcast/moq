@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import * as Path from "../path.ts";
-import { type Cursor, Reader, Writer } from "../stream.ts";
+import { Cursor, Reader, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import * as Varint from "../varint.ts";
 import { Fetch } from "./fetch.ts";
@@ -68,10 +68,11 @@ async function encodeFrameVersioned(
 	flags: GroupFlags,
 	version: IetfVersion,
 	timescale: Timescale = Timescale.MILLI,
+	idDelta = 0,
 ): Promise<Uint8Array> {
 	const { stream, written } = createTestWritableStream();
 	const writer = new Writer(stream, version);
-	await frame.encode(writer, flags, timescale, version);
+	await frame.encode(writer, flags, timescale, version, idDelta);
 	writer.close();
 	await writer.closed;
 	return concatChunks(written);
@@ -1941,4 +1942,133 @@ test("Subscribe v16: rejects INCLUDE_PROPERTIES", async () => {
 	// One parameter: INCLUDE_PROPERTIES (0x35), length 1, value 0.
 	const body = framed([...TRACK_HEAD, 0x01, 0x35, 0x01, 0x00]);
 	await expect(decodeVersioned(body, Subscribe.Subscribe.decode, Version.DRAFT_16)).rejects.toThrow();
+});
+
+// ---------------------------------------------------------------------------
+// The moq-transport object model in the codec: Object IDs that skip, and a properties
+// block carried whole rather than reduced to the timestamp.
+// ---------------------------------------------------------------------------
+
+const OBJECT_FLAGS: GroupFlags = {
+	hasExtensions: true,
+	hasSubgroup: true,
+	hasSubgroupObject: false,
+	hasEnd: true,
+	hasPriority: true,
+	firstObject: true,
+};
+
+/**
+ * A publisher may skip Object IDs: a repair flow numbers its objects against the source
+ * flow it repairs, so renumbering them to be contiguous destroys the mapping. Each decode
+ * is told the prior object's id, and resolves the delta against it.
+ */
+test("Frame resolves Object IDs across a gap", async () => {
+	// Object IDs 0, 2, 5 -> deltas 0, 1, 2 (draft-20 11.4.3: later id = prior + delta + 1).
+	const ids = [0, 2, 5];
+	const deltas = [0, 1, 2];
+	const encoded = await Promise.all(
+		ids.map((id, i) =>
+			encodeFrameVersioned(
+				new Frame({ payload: new Uint8Array([id]), timestamp: new Timestamp(id, Timescale.MILLI) }),
+				OBJECT_FLAGS,
+				Version.DRAFT_20,
+				Timescale.MILLI,
+				deltas[i],
+			),
+		),
+	);
+
+	const c = new Cursor(concatChunks(encoded), Version.DRAFT_20);
+	const decoded: Frame[] = [];
+	let prior: number | undefined;
+	while (c.remaining > 0) {
+		const frame = Frame.decode(c, OBJECT_FLAGS, Timescale.MILLI, prior);
+		prior = frame.objectId;
+		decoded.push(frame);
+	}
+
+	expect(decoded.length).toBe(ids.length);
+	expect(decoded.map((f) => f.objectId)).toEqual(ids);
+	expect(decoded.map((f) => f.payload?.[0])).toEqual(ids);
+	expect(decoded.map((f) => f.timestamp?.value)).toEqual(ids);
+});
+
+/**
+ * A stream claiming it carries the group from its first published object, whose first object
+ * is not 0, is still a contradiction rather than a gap: the head is missing and nothing can
+ * say which objects it held.
+ */
+test("Frame refuses a claimed head that does not start at object 0", async () => {
+	const encoded = await encodeFrameVersioned(
+		new Frame({ payload: new Uint8Array([1]) }),
+		OBJECT_FLAGS,
+		Version.DRAFT_20,
+		Timescale.MILLI,
+		5,
+	);
+	expect(() => Frame.decode(new Cursor(encoded, Version.DRAFT_20), OBJECT_FLAGS, Timescale.MILLI)).toThrow(
+		/object IDs must start at 0/,
+	);
+
+	// With the claim cleared, the same bytes name object 5 — the publisher answering a filter.
+	const partial = { ...OBJECT_FLAGS, firstObject: false };
+	expect(Frame.decode(new Cursor(encoded, Version.DRAFT_20), partial, Timescale.MILLI).objectId).toBe(5);
+});
+
+/**
+ * Every object property reaches the consumer, in both parities and whatever its id, and the
+ * block round-trips verbatim so a consumer can forward it unchanged. Only Timestamp is read
+ * a second time to stamp the frame; no other codepoint is known here.
+ */
+test("Frame carries an object properties block whole", async () => {
+	// Delta-encoded types: 0x10 (Timestamp) = 20, then +0x10 -> 0x20 = 42, then +1 -> 0x21
+	// with two bytes. Every value is a one-byte varint.
+	const properties = new Uint8Array([0x10, 20, 0x10, 42, 1, 2, 0xab, 0xcd]);
+	const encoded = await encodeFrameVersioned(
+		new Frame({ payload: new Uint8Array([0xaa]), properties }),
+		OBJECT_FLAGS,
+		Version.DRAFT_20,
+	);
+
+	const frame = Frame.decode(new Cursor(encoded, Version.DRAFT_20), OBJECT_FLAGS, Timescale.MILLI);
+	expect(Array.from(frame.properties ?? [])).toEqual(Array.from(properties));
+	expect(frame.propertyList).toEqual([
+		{ type: 0x10n, value: 20n },
+		{ type: 0x20n, value: 42n },
+		{ type: 0x21n, bytes: new Uint8Array([0xab, 0xcd]) },
+	]);
+	// The Timestamp in the block still stamps the frame, in the track's units.
+	expect(frame.timestamp?.value).toBe(20);
+	expect(frame.timestamp?.scale).toBe(Timescale.MILLI);
+	expect(frame.status).toBe(0);
+});
+
+/**
+ * A track that declared no timescale opted out of timestamps, and that must not cost it the
+ * properties: a mapping riding in them is unrelated to whether the track has a timeline.
+ */
+test("Frame keeps object properties on a track with no timescale", async () => {
+	const properties = new Uint8Array([0x20, 42]);
+	const encoded = await encodeFrameVersioned(
+		new Frame({ payload: new Uint8Array([0xaa]), properties }),
+		OBJECT_FLAGS,
+		Version.DRAFT_20,
+	);
+
+	const frame = Frame.decode(new Cursor(encoded, Version.DRAFT_20), OBJECT_FLAGS, undefined);
+	expect(frame.timestamp).toBeUndefined();
+	expect(frame.propertyList).toEqual([{ type: 0x20n, value: 42n }]);
+});
+
+/** The status is reported rather than reduced to "this object has no payload". */
+test("Frame reports the Object Status", async () => {
+	const flags = { ...OBJECT_FLAGS, hasEnd: false };
+	const endOfGroup = await encodeFrameVersioned(new Frame(), flags, Version.DRAFT_20);
+	expect(Frame.decode(new Cursor(endOfGroup, Version.DRAFT_20), flags, Timescale.MILLI).status).toBe(0x03);
+
+	const endOfTrack = await encodeFrameVersioned(new Frame({ endOfTrack: true }), flags, Version.DRAFT_20);
+	const decoded = Frame.decode(new Cursor(endOfTrack, Version.DRAFT_20), flags, Timescale.MILLI);
+	expect(decoded.status).toBe(0x04);
+	expect(decoded.endOfTrack).toBe(true);
 });
